@@ -214,11 +214,12 @@ def get_weather_data(start_date: datetime, end_date: datetime) -> pd.DataFrame:
         if not weather_df.empty:
             # Reset index to get date as column
             weather_df = weather_df.reset_index()
-            weather_df = weather_df[['time', 'tavg']].copy()
-            weather_df.columns = ['Date', 'Air_Temperature']
-            weather_df = weather_df.dropna()
+            # Include daily high, low, and average temperatures
+            weather_df = weather_df[['time', 'tavg', 'tmin', 'tmax']].copy()
+            weather_df.columns = ['Date', 'Air_Temperature', 'Air_Temp_Min', 'Air_Temp_Max']
+            weather_df = weather_df.dropna(subset=['Air_Temperature'])  # Only require average temp
         else:
-            weather_df = pd.DataFrame(columns=['Date', 'Air_Temperature'])
+            weather_df = pd.DataFrame(columns=['Date', 'Air_Temperature', 'Air_Temp_Min', 'Air_Temp_Max'])
         
         # Add synthetic future weather data for predictions (since meteostat doesn't provide forecasts)
         today = datetime.now().date()
@@ -230,9 +231,18 @@ def get_weather_data(start_date: datetime, end_date: datetime) -> pd.DataFrame:
             
             if len(weather_df) > 0:
                 # Use recent temperature patterns to create realistic future temps
-                recent_temps = weather_df.tail(30)['Air_Temperature']
-                mean_temp = recent_temps.mean()
-                std_temp = recent_temps.std() if len(recent_temps) > 1 else 3.0
+                recent_temps_avg = weather_df.tail(30)['Air_Temperature']
+                recent_temps_min = weather_df.tail(30)['Air_Temp_Min'].dropna()
+                recent_temps_max = weather_df.tail(30)['Air_Temp_Max'].dropna()
+                
+                mean_temp = recent_temps_avg.mean()
+                std_temp = recent_temps_avg.std() if len(recent_temps_avg) > 1 else 3.0
+                
+                # Calculate typical daily temperature range
+                if len(recent_temps_min) > 0 and len(recent_temps_max) > 0:
+                    avg_daily_range = (recent_temps_max.mean() - recent_temps_min.mean()) / 2
+                else:
+                    avg_daily_range = 4.0  # Default 4°C range
                 
                 # Add some seasonal variation
                 for date in future_dates:
@@ -241,12 +251,19 @@ def get_weather_data(start_date: datetime, end_date: datetime) -> pd.DataFrame:
                     
                     # Add some random variation
                     temp_variation = np.random.normal(0, std_temp * 0.3)  # Reduced variation for predictions
-                    future_temp = mean_temp + seasonal_factor + temp_variation
+                    future_temp_avg = mean_temp + seasonal_factor + temp_variation
+                    
+                    # Generate realistic high/low based on average
+                    daily_variation = np.random.normal(0, avg_daily_range * 0.2)  # Small random adjustment to range
+                    future_temp_max = future_temp_avg + avg_daily_range + daily_variation
+                    future_temp_min = future_temp_avg - avg_daily_range + daily_variation
                     
                     # Add to weather data
                     new_row = pd.DataFrame({
                         'Date': [date],
-                        'Air_Temperature': [future_temp]
+                        'Air_Temperature': [future_temp_avg],
+                        'Air_Temp_Min': [future_temp_min],
+                        'Air_Temp_Max': [future_temp_max]
                     })
                     weather_df = pd.concat([weather_df, new_row], ignore_index=True)
             
@@ -932,7 +949,7 @@ def create_download_button(df: pd.DataFrame) -> None:
     )
 
 
-def create_forecast_tab(df: pd.DataFrame) -> None:
+def create_forecast_tab(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> None:
     """Create the short-term forecast tab content."""
     st.header("🔮 Short-term Temperature Forecast")
     
@@ -994,6 +1011,44 @@ def create_forecast_tab(df: pd.DataFrame) -> None:
                 marker=dict(size=6, color='orange'),
                 showlegend=True
             )
+            
+            # Add weather data if available
+            if weather_df is not None and not weather_df.empty:
+                # Filter weather data for the same period
+                weather_forecast = weather_df[(weather_df['Date'] >= forecast_start) & (weather_df['Date'] <= forecast_end)].copy()
+                
+                if not weather_forecast.empty:
+                    # Add high temperatures
+                    if 'Air_Temp_Max' in weather_forecast.columns:
+                        fig.add_scatter(
+                            x=weather_forecast['Date'],
+                            y=weather_forecast['Air_Temp_Max'],
+                            mode='lines',
+                            name='Air Temp High',
+                            line=dict(color='red', width=1, dash='dot'),
+                            showlegend=True
+                        )
+                    
+                    # Add low temperatures  
+                    if 'Air_Temp_Min' in weather_forecast.columns:
+                        fig.add_scatter(
+                            x=weather_forecast['Date'],
+                            y=weather_forecast['Air_Temp_Min'],
+                            mode='lines',
+                            name='Air Temp Low',
+                            line=dict(color='lightblue', width=1, dash='dot'),
+                            showlegend=True
+                        )
+                    
+                    # Add average air temperature
+                    fig.add_scatter(
+                        x=weather_forecast['Date'],
+                        y=weather_forecast['Air_Temperature'],
+                        mode='lines',
+                        name='Air Temp Avg',
+                        line=dict(color='gray', width=2, dash='dash'),
+                        showlegend=True
+                    )
             
             # Add vertical line for "today" using shapes instead of add_vline
             fig.add_shape(
@@ -1122,6 +1177,9 @@ def main() -> None:
         add_log_message("error", "No data available. Please check the data source.")
         return
     
+    # Initialize weather_df
+    weather_df = None
+    
     # If predictions enabled, get weather data and create predictions
     if enable_predictions:
         with st.spinner("Loading weather data for predictions..."):
@@ -1153,6 +1211,11 @@ def main() -> None:
                     add_log_message("warning", "No future predictions generated - may need more recent weather data")
             else:
                 add_log_message("warning", "Could not load weather data for predictions")
+    else:
+        # Even if predictions are disabled, load weather data for the forecast tab
+        start_date = df['Date'].min() - pd.Timedelta(days=7)
+        end_date = datetime.now() + timedelta(days=14)
+        weather_df = get_weather_data(start_date, end_date)
     
     # Display statistics (only for actual data)
     actual_df = df[df['Type'] == 'Actual'] if 'Type' in df.columns else df
@@ -1162,7 +1225,7 @@ def main() -> None:
     tab1, tab2 = st.tabs(["📊 Short-term Forecast", "📈 Historical Data & Statistics"])
     
     with tab1:
-        create_forecast_tab(df)
+        create_forecast_tab(df, weather_df)
     
     with tab2:
         create_historical_tab(df, actual_df)
