@@ -1142,6 +1142,207 @@ def display_recent_data(df: pd.DataFrame) -> None:
     st.dataframe(recent_data.iloc[::-1], use_container_width=True, hide_index=True)
 
 
+def create_physics_model_analysis(df: pd.DataFrame, weather_df: pd.DataFrame) -> None:
+    """Create physics model comparison and analysis section."""
+    st.subheader("🔬 Physics Model vs Daily Temperature Correlation")
+    
+    if weather_df is None or weather_df.empty:
+        st.warning("No weather data available for physics model analysis.")
+        return
+    
+    # Filter to only actual water temperature data
+    if 'Type' in df.columns:
+        actual_water_data = df[df['Type'] == 'Actual'].copy()
+    else:
+        actual_water_data = df.copy()
+    
+    if actual_water_data.empty:
+        st.warning("No actual water temperature data available for physics model analysis.")
+        return
+    
+    # Merge water and weather data on date
+    merged_data = pd.merge(
+        actual_water_data[['Date', 'Temperature']],
+        weather_df[['Date', 'Air_Temperature']],
+        on='Date',
+        how='inner'
+    ).dropna()
+    
+    if len(merged_data) < 30:
+        st.warning("Not enough overlapping data points for physics model analysis (need at least 30).")
+        return
+    
+    # Initialize and train physics model
+    model = WaterTemperatureModel()
+    training_dates = merged_data['Date'].dt.to_pydatetime()
+    training_air_temps = merged_data['Air_Temperature'].values
+    training_water_temps = merged_data['Temperature'].values
+    
+    # Fit the physics model
+    try:
+        result = model.fit_parameters(training_air_temps, training_water_temps, training_dates)
+        model_fitted = result and result.success
+    except Exception as e:
+        st.error(f"Physics model fitting failed: {e}")
+        return
+    
+    # Calculate daily temperature differences and correlations
+    merged_data['Air_Water_Diff'] = merged_data['Air_Temperature'] - merged_data['Temperature']
+    merged_data['Day_of_Year'] = merged_data['Date'].dt.dayofyear
+    
+    # Calculate rolling correlations over different windows
+    window_sizes = [7, 14, 30, 60]
+    correlations = {}
+    
+    for window in window_sizes:
+        if len(merged_data) >= window:
+            rolling_corr = merged_data['Air_Temperature'].rolling(window=window).corr(
+                merged_data['Temperature']
+            )
+            correlations[f'{window}d'] = rolling_corr.dropna()
+    
+    # Calculate physics model predictions
+    physics_predictions = model.predict_temperature(
+        training_air_temps, training_water_temps[0], training_dates
+    )
+    
+    # Calculate physics model performance metrics
+    physics_rmse = np.sqrt(np.mean((physics_predictions - training_water_temps) ** 2))
+    physics_mae = np.mean(np.abs(physics_predictions - training_water_temps))
+    physics_r2 = 1 - np.sum((training_water_temps - physics_predictions) ** 2) / np.sum((training_water_temps - np.mean(training_water_temps)) ** 2)
+    
+    # Display physics model parameters
+    st.markdown("### 🧮 Physics Model Parameters")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Heat Transfer Coeff (k)", f"{model.k:.4f} day⁻¹")
+    with col2:
+        st.metric("Seasonal Amplitude", f"{model.seasonal_amp:.2f}°C")
+    with col3:
+        st.metric("Seasonal Phase", f"{model.seasonal_phase:.0f} days")
+    with col4:
+        st.metric("Physics R²", f"{physics_r2:.3f}")
+    
+    # Compare with simple correlation
+    simple_correlation = np.corrcoef(merged_data['Air_Temperature'], merged_data['Temperature'])[0, 1]
+    
+    # Create visualization comparing physics model vs correlation patterns
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    
+    # Plot 1: Temperature difference vs seasonal offset
+    ax1 = axes[0, 0]
+    seasonal_offsets = [model.seasonal_offset(doy) for doy in merged_data['Day_of_Year']]
+    scatter = ax1.scatter(merged_data['Air_Water_Diff'], seasonal_offsets, 
+                         c=merged_data['Day_of_Year'], cmap='viridis', alpha=0.6)
+    ax1.set_xlabel('Air-Water Temperature Difference (°C)')
+    ax1.set_ylabel('Physics Model Seasonal Offset (°C)')
+    ax1.set_title('Seasonal Effects vs Temperature Differences')
+    ax1.grid(True, alpha=0.3)
+    plt.colorbar(scatter, ax=ax1, label='Day of Year')
+    
+    # Plot 2: Heat transfer rate vs correlation
+    ax2 = axes[0, 1]
+    if '30d' in correlations:
+        heat_transfer_rate = model.k * merged_data['Air_Water_Diff']
+        correlation_30d = correlations['30d']
+        
+        # Align data for comparison
+        min_len = min(len(heat_transfer_rate), len(correlation_30d))
+        if min_len > 0:
+            ax2.scatter(heat_transfer_rate[-min_len:], correlation_30d[-min_len:], alpha=0.6)
+            ax2.set_xlabel('Heat Transfer Rate (k × ΔT)')
+            ax2.set_ylabel('30-day Rolling Correlation')
+            ax2.set_title('Heat Transfer Rate vs Rolling Correlation')
+            ax2.grid(True, alpha=0.3)
+    
+    # Plot 3: Physics predictions vs actual vs linear model
+    ax3 = axes[1, 0]
+    ax3.scatter(training_water_temps, physics_predictions, alpha=0.6, label='Physics Model', color='green')
+    
+    # Simple linear model for comparison
+    from sklearn.linear_model import LinearRegression
+    linear_model = LinearRegression()
+    linear_model.fit(training_air_temps.reshape(-1, 1), training_water_temps)
+    linear_predictions = linear_model.predict(training_air_temps.reshape(-1, 1))
+    linear_r2 = linear_model.score(training_air_temps.reshape(-1, 1), training_water_temps)
+    
+    ax3.scatter(training_water_temps, linear_predictions, alpha=0.4, label='Linear Model', color='orange')
+    
+    # Perfect prediction line
+    min_temp = min(training_water_temps.min(), physics_predictions.min())
+    max_temp = max(training_water_temps.max(), physics_predictions.max())
+    ax3.plot([min_temp, max_temp], [min_temp, max_temp], 'r--', alpha=0.8, label='Perfect Prediction')
+    
+    ax3.set_xlabel('Observed Water Temperature (°C)')
+    ax3.set_ylabel('Predicted Water Temperature (°C)')
+    ax3.set_title('Model Predictions vs Observations')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # Plot 4: Time series of correlations and physics variables
+    ax4 = axes[1, 1]
+    
+    # Plot 30-day rolling correlation if available
+    if '30d' in correlations and len(correlations['30d']) > 0:
+        correlation_dates = merged_data['Date'].iloc[-len(correlations['30d']):]
+        ax4.plot(correlation_dates, correlations['30d'], 'b-', label='30d Rolling Correlation', linewidth=2)
+    
+    # Plot normalized seasonal component
+    normalized_seasonal = np.array(seasonal_offsets) / max(abs(np.array(seasonal_offsets)))
+    ax4.plot(merged_data['Date'], normalized_seasonal, 'g--', label='Normalized Seasonal Effect', alpha=0.7)
+    
+    # Plot normalized heat transfer coefficient effect
+    normalized_k_effect = (model.k * merged_data['Air_Water_Diff']) / max(abs(model.k * merged_data['Air_Water_Diff']))
+    ax4.plot(merged_data['Date'], normalized_k_effect, 'r:', label='Normalized Heat Transfer', alpha=0.7)
+    
+    ax4.set_xlabel('Date')
+    ax4.set_ylabel('Normalized Values')
+    ax4.set_title('Time Series: Correlation vs Physics Components')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    ax4.tick_params(axis='x', rotation=45)
+    
+    plt.tight_layout()
+    st.pyplot(fig)
+    
+    # Analysis comparison table
+    st.markdown("### 📊 Model Comparison")
+    
+    comparison_data = {
+        'Metric': ['R² Score', 'RMSE (°C)', 'MAE (°C)', 'Simple Correlation', 'Parameters'],
+        'Physics Model': [f'{physics_r2:.3f}', f'{physics_rmse:.2f}', f'{physics_mae:.2f}', 
+                         f'{simple_correlation:.3f}', '3 (k, seasonal_amp, phase)'],
+        'Linear Model': [f'{linear_r2:.3f}', 
+                        f'{np.sqrt(np.mean((linear_predictions - training_water_temps) ** 2)):.2f}',
+                        f'{np.mean(np.abs(linear_predictions - training_water_temps)):.2f}',
+                        f'{simple_correlation:.3f}', '2 (slope, intercept)']
+    }
+    
+    comparison_df = pd.DataFrame(comparison_data)
+    st.table(comparison_df)
+    
+    # Interpretation
+    st.markdown("### 🔍 Physics Model Insights")
+    
+    # Calculate key relationships
+    temp_responsiveness = model.k * 24  # Convert to temperature change per day per degree difference
+    seasonal_range = 2 * model.seasonal_amp  # Peak-to-peak seasonal variation
+    
+    st.write(f"**Heat Transfer Dynamics:**")
+    st.write(f"- Water temperature adjusts at {temp_responsiveness:.3f}°C/day per 1°C air-water difference")
+    st.write(f"- Seasonal variation: ±{model.seasonal_amp:.1f}°C (total range: {seasonal_range:.1f}°C)")
+    st.write(f"- Seasonal peak occurs around day {model.seasonal_phase:.0f} ({pd.Timestamp('2024-01-01') + pd.Timedelta(days=int(model.seasonal_phase)):%B %d})")
+    
+    if physics_r2 > linear_r2:
+        improvement = ((physics_r2 - linear_r2) / linear_r2) * 100
+        st.write(f"**Model Performance:** Physics model performs {improvement:.1f}% better than simple linear correlation")
+    else:
+        st.write(f"**Model Performance:** Linear model performs slightly better, suggesting simpler relationships dominate")
+    
+    st.write(f"**Key Finding:** The physics model captures {physics_r2*100:.1f}% of water temperature variation using thermal dynamics")
+
+
 def create_correlation_analysis(df: pd.DataFrame, weather_df: pd.DataFrame) -> None:
     """Create correlation analysis between water and air temperature."""
     st.subheader("🔬 Water vs Air Temperature Correlation Analysis")
@@ -1465,7 +1666,11 @@ def create_historical_tab(df: pd.DataFrame, actual_df: pd.DataFrame, weather_df:
     # Monthly analysis (only actual data)
     create_monthly_analysis(actual_df)
     
-    # Correlation analysis between water and air temperature
+    # Physics model comparison analysis (new section)
+    if weather_df is not None and not weather_df.empty:
+        create_physics_model_analysis(df, weather_df)
+    
+    # Standard correlation analysis between water and air temperature
     create_correlation_analysis(df, weather_df)
     
     # Recent data table (only actual data)
