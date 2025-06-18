@@ -238,25 +238,38 @@ def get_weather_data(start_date: datetime, end_date: datetime) -> pd.DataFrame:
                 mean_temp = recent_temps_avg.mean()
                 std_temp = recent_temps_avg.std() if len(recent_temps_avg) > 1 else 3.0
                 
-                # Calculate typical daily temperature range
+                # Calculate typical daily temperature range  
                 if len(recent_temps_min) > 0 and len(recent_temps_max) > 0:
-                    avg_daily_range = (recent_temps_max.mean() - recent_temps_min.mean()) / 2
+                    # Full range from min to max, then half-range for +/- from average
+                    full_daily_range = recent_temps_max.mean() - recent_temps_min.mean()
+                    avg_daily_range = full_daily_range / 2  # Half range for +/- from average
+                    
+                    # But also track actual recent highs and lows for better synthetic generation
+                    recent_avg_high = recent_temps_max.mean()
+                    recent_avg_low = recent_temps_min.mean()
+                    recent_avg_temp = recent_temps_avg.mean()
                 else:
-                    avg_daily_range = 4.0  # Default 4°C range
+                    avg_daily_range = 5.0  # Default 5°C range (increased from 4°C)
+                    recent_avg_high = mean_temp + 5.0
+                    recent_avg_low = mean_temp - 5.0
+                    recent_avg_temp = mean_temp
                 
                 # Add some seasonal variation
                 for date in future_dates:
                     day_of_year = date.timetuple().tm_yday
                     seasonal_factor = np.sin(2 * np.pi * day_of_year / 365.25) * 2  # +/- 2°C seasonal variation
                     
-                    # Add some random variation
-                    temp_variation = np.random.normal(0, std_temp * 0.3)  # Reduced variation for predictions
-                    future_temp_avg = mean_temp + seasonal_factor + temp_variation
+                    # Generate future temperatures based on recent patterns
+                    daily_random = np.random.normal(0, std_temp * 0.4)  # Day-to-day variation
                     
-                    # Generate realistic high/low based on average
-                    daily_variation = np.random.normal(0, avg_daily_range * 0.2)  # Small random adjustment to range
-                    future_temp_max = future_temp_avg + avg_daily_range + daily_variation
-                    future_temp_min = future_temp_avg - avg_daily_range + daily_variation
+                    # Generate realistic high based on recent high patterns
+                    future_temp_max = recent_avg_high + seasonal_factor + daily_random
+                    
+                    # Generate realistic low based on recent low patterns  
+                    future_temp_min = recent_avg_low + seasonal_factor + daily_random
+                    
+                    # Average is between high and low
+                    future_temp_avg = (future_temp_max + future_temp_min) / 2
                     
                     # Add to weather data
                     new_row = pd.DataFrame({
@@ -267,7 +280,10 @@ def get_weather_data(start_date: datetime, end_date: datetime) -> pd.DataFrame:
                     })
                     weather_df = pd.concat([weather_df, new_row], ignore_index=True)
             
-            add_log_message("info", f"🌤️ Generated {len(future_dates)} days of synthetic weather data for predictions")
+            if len(recent_temps_min) > 0 and len(recent_temps_max) > 0:
+                add_log_message("info", f"🌤️ Generated {len(future_dates)} days of synthetic weather (based on recent highs ~{recent_avg_high:.1f}°C, lows ~{recent_avg_low:.1f}°C)")
+            else:
+                add_log_message("info", f"🌤️ Generated {len(future_dates)} days of synthetic weather data (using defaults)")
         
         return weather_df.sort_values('Date').reset_index(drop=True)
         
