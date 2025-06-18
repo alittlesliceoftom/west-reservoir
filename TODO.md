@@ -1,10 +1,12 @@
 # TODO List
 
 ## Weather & Forecasting
-- [ ] Use weather forecast, not synthetic weather
-  - Currently generating synthetic future weather data based on historical patterns
-  - Should integrate with real weather forecast API (e.g., OpenWeatherMap, WeatherAPI, etc.)
-  - This would provide actual predicted air temperatures for more accurate water temperature forecasts
+- [x] Use weather forecast, not synthetic weather ✅
+  - ~~Currently generating synthetic future weather data based on historical patterns~~
+  - ✅ Integrated with OpenWeatherMap API for real 5-day forecasts
+  - ✅ Uses Meteostat for historical data up to today, then real forecasts from today onwards
+  - ✅ Falls back to improved synthetic data when API key is not available
+  - ✅ Provides actual predicted air temperatures for more accurate water temperature forecasts
 
 ## Future Enhancements
 - [ ] Add more sophisticated gap filling algorithms

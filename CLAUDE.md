@@ -8,6 +8,30 @@ This is a temperature tracking project with two main components:
 1. **Streamlit Application** (`west_reservoir_tracker.py`) - A web dashboard for visualizing West Reservoir temperature data
 2. **Python Environment** (`env/`) - Virtual environment for Python dependencies
 
+## Weather API Setup (Optional)
+
+To get real weather forecasts instead of synthetic data:
+
+1. **Get a free API key from OpenWeatherMap:**
+   - Visit https://openweathermap.org/api
+   - Sign up for a free account
+   - Get your API key from the dashboard
+
+2. **Set your API key (choose one method):**
+   
+   **Option A: Environment Variable**
+   ```bash
+   export OPENWEATHER_API_KEY="your_api_key_here"
+   ```
+   
+   **Option B: Streamlit Secrets**
+   Create `.streamlit/secrets.toml`:
+   ```toml
+   OPENWEATHER_API_KEY = "your_api_key_here"
+   ```
+
+3. **Without API key:** The app will fall back to synthetic weather data based on historical patterns.
+
 ## Common Development Commands
 
 ### Python/Streamlit Development

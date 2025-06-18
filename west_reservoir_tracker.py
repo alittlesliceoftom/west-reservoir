@@ -11,6 +11,10 @@ from meteostat import Point, Daily
 from sklearn.linear_model import LinearRegression
 import numpy as np
 from forecast import WaterTemperatureModel
+import json
+import seaborn as sns
+import matplotlib.pyplot as plt
+from scipy import stats
 
 st.set_page_config(
     page_title="West Reservoir Temperature Tracker",
@@ -47,6 +51,173 @@ REQUEST_TIMEOUT = 30
 
 # West Reservoir location (London)
 RESERVOIR_LOCATION = Point(51.566938, -0.090492)  # West Reservoir coordinates
+RESERVOIR_LAT = 51.566938
+RESERVOIR_LON = -0.090492
+
+# Weather API configuration
+# Using OpenWeatherMap free tier (requires API key)
+# Users can set their API key via environment variable or Streamlit secrets
+def get_weather_api_key():
+    """Get weather API key from environment or Streamlit secrets."""
+    import os
+    
+    # Try environment variable first
+    api_key = os.getenv('OPENWEATHER_API_KEY')
+    
+    # Only try Streamlit secrets if environment variable is not set
+    if not api_key:
+        try:
+            # Check if secrets are available
+            if hasattr(st, 'secrets') and 'OPENWEATHER_API_KEY' in st.secrets:
+                api_key = st.secrets['OPENWEATHER_API_KEY']
+        except Exception:
+            # Secrets not available or configured, that's fine
+            pass
+    
+    return api_key
+
+
+def get_weather_forecast(api_key: str, days: int = 5) -> pd.DataFrame:
+    """Get real weather forecast data from OpenWeatherMap API.
+    
+    Args:
+        api_key: OpenWeatherMap API key
+        days: Number of days to forecast (max 5 for free tier)
+        
+    Returns:
+        pd.DataFrame: Weather forecast data with Date, Air_Temperature, Air_Temp_Min, Air_Temp_Max
+    """
+    try:
+        # OpenWeatherMap 5-day forecast endpoint
+        url = "https://api.openweathermap.org/data/2.5/forecast"
+        params = {
+            'lat': RESERVOIR_LAT,
+            'lon': RESERVOIR_LON,
+            'appid': api_key,
+            'units': 'metric',  # Celsius
+            'cnt': min(days * 8, 40)  # API returns 3-hour intervals, max 40 calls (5 days)
+        }
+        
+        response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        # Process forecast data
+        forecast_data = []
+        daily_data = {}
+        
+        for item in data['list']:
+            # Convert timestamp to date
+            dt = datetime.fromtimestamp(item['dt'])
+            date_key = dt.date()
+            
+            temp = item['main']['temp']
+            temp_min = item['main']['temp_min']
+            temp_max = item['main']['temp_max']
+            
+            # Group by date to get daily min/max/avg
+            if date_key not in daily_data:
+                daily_data[date_key] = {
+                    'temps': [],
+                    'mins': [],
+                    'maxs': []
+                }
+            
+            daily_data[date_key]['temps'].append(temp)
+            daily_data[date_key]['mins'].append(temp_min)
+            daily_data[date_key]['maxs'].append(temp_max)
+        
+        # Create daily aggregated data
+        for date_key, temps in daily_data.items():
+            forecast_data.append({
+                'Date': pd.Timestamp(date_key),
+                'Air_Temperature': np.mean(temps['temps']),
+                'Air_Temp_Min': min(temps['mins']),
+                'Air_Temp_Max': max(temps['maxs'])
+            })
+        
+        forecast_df = pd.DataFrame(forecast_data)
+        forecast_df = forecast_df.sort_values('Date').reset_index(drop=True)
+        
+        add_log_message("success", f"🌤️ Retrieved {len(forecast_df)} days of real weather forecast from OpenWeatherMap")
+        
+        return forecast_df
+        
+    except requests.exceptions.RequestException as e:
+        add_log_message("warning", f"Weather API request failed: {e}")
+        return pd.DataFrame()
+    except Exception as e:
+        add_log_message("warning", f"Weather forecast processing failed: {e}")
+        return pd.DataFrame()
+
+
+def generate_synthetic_weather_fallback(historical_weather_df: pd.DataFrame, future_dates: pd.DatetimeIndex) -> pd.DataFrame:
+    """Generate synthetic weather data as fallback when real forecast is unavailable.
+    
+    Args:
+        historical_weather_df: Historical weather data to base patterns on
+        future_dates: Dates to generate synthetic weather for
+        
+    Returns:
+        pd.DataFrame: Synthetic weather data
+    """
+    if len(historical_weather_df) == 0:
+        # No historical data, use London seasonal averages
+        synthetic_data = []
+        for date in future_dates:
+            day_of_year = date.timetuple().tm_yday
+            # London seasonal temperature pattern
+            seasonal_avg = 10 + 8 * np.sin(2 * np.pi * (day_of_year - 80) / 365.25)
+            daily_variation = np.random.normal(0, 3)
+            
+            avg_temp = seasonal_avg + daily_variation
+            synthetic_data.append({
+                'Date': pd.Timestamp(date),
+                'Air_Temperature': avg_temp,
+                'Air_Temp_Min': avg_temp - 4,
+                'Air_Temp_Max': avg_temp + 6
+            })
+        
+        return pd.DataFrame(synthetic_data)
+    
+    # Use recent patterns from historical data
+    recent_data = historical_weather_df.tail(30)
+    recent_temps_avg = recent_data['Air_Temperature']
+    recent_temps_min = recent_data['Air_Temp_Min'].dropna()
+    recent_temps_max = recent_data['Air_Temp_Max'].dropna()
+    
+    mean_temp = recent_temps_avg.mean()
+    std_temp = recent_temps_avg.std() if len(recent_temps_avg) > 1 else 3.0
+    
+    # Calculate recent patterns
+    if len(recent_temps_min) > 0 and len(recent_temps_max) > 0:
+        recent_avg_high = recent_temps_max.mean()
+        recent_avg_low = recent_temps_min.mean()
+    else:
+        recent_avg_high = mean_temp + 5.0
+        recent_avg_low = mean_temp - 5.0
+    
+    synthetic_data = []
+    for date in future_dates:
+        day_of_year = date.timetuple().tm_yday
+        seasonal_factor = np.sin(2 * np.pi * day_of_year / 365.25) * 2  # +/- 2°C seasonal variation
+        daily_random = np.random.normal(0, std_temp * 0.4)  # Day-to-day variation
+        
+        # Generate temperatures based on recent patterns
+        future_temp_max = recent_avg_high + seasonal_factor + daily_random
+        future_temp_min = recent_avg_low + seasonal_factor + daily_random
+        future_temp_avg = (future_temp_max + future_temp_min) / 2
+        
+        synthetic_data.append({
+            'Date': pd.Timestamp(date),
+            'Air_Temperature': future_temp_avg,
+            'Air_Temp_Min': future_temp_min,
+            'Air_Temp_Max': future_temp_max
+        })
+    
+    return pd.DataFrame(synthetic_data)
+
 
 # Sample data for fallback
 SAMPLE_DATA = [
@@ -221,69 +392,48 @@ def get_weather_data(start_date: datetime, end_date: datetime) -> pd.DataFrame:
         else:
             weather_df = pd.DataFrame(columns=['Date', 'Air_Temperature', 'Air_Temp_Min', 'Air_Temp_Max'])
         
-        # Add synthetic future weather data for predictions (since meteostat doesn't provide forecasts)
+        # Add real weather forecast data for future dates
         today = datetime.now().date()
         future_end = end_date.date()
         
         if future_end > today:
-            # Create future dates
-            future_dates = pd.date_range(start=today + timedelta(days=1), end=future_end, freq='D')
+            # Try to get real weather forecast
+            api_key = get_weather_api_key()
             
-            if len(weather_df) > 0:
-                # Use recent temperature patterns to create realistic future temps
-                recent_temps_avg = weather_df.tail(30)['Air_Temperature']
-                recent_temps_min = weather_df.tail(30)['Air_Temp_Min'].dropna()
-                recent_temps_max = weather_df.tail(30)['Air_Temp_Max'].dropna()
+            if api_key:
+                # Get real weather forecast
+                forecast_days = min((future_end - today).days, 5)  # OpenWeatherMap free tier supports 5 days
+                forecast_df = get_weather_forecast(api_key, forecast_days)
                 
-                mean_temp = recent_temps_avg.mean()
-                std_temp = recent_temps_avg.std() if len(recent_temps_avg) > 1 else 3.0
-                
-                # Calculate typical daily temperature range  
-                if len(recent_temps_min) > 0 and len(recent_temps_max) > 0:
-                    # Full range from min to max, then half-range for +/- from average
-                    full_daily_range = recent_temps_max.mean() - recent_temps_min.mean()
-                    avg_daily_range = full_daily_range / 2  # Half range for +/- from average
+                if not forecast_df.empty:
+                    # Filter forecast to only future dates we need
+                    future_dates_needed = pd.date_range(start=today + timedelta(days=1), end=future_end, freq='D')
+                    forecast_filtered = forecast_df[forecast_df['Date'].dt.date.isin([d.date() for d in future_dates_needed])]
                     
-                    # But also track actual recent highs and lows for better synthetic generation
-                    recent_avg_high = recent_temps_max.mean()
-                    recent_avg_low = recent_temps_min.mean()
-                    recent_avg_temp = recent_temps_avg.mean()
+                    if not forecast_filtered.empty:
+                        # Add real forecast data
+                        weather_df = pd.concat([weather_df, forecast_filtered], ignore_index=True)
+                        add_log_message("success", f"✅ Added {len(forecast_filtered)} days of real weather forecast")
+                    
+                    # For dates beyond 5-day forecast, fall back to synthetic
+                    if future_end > (today + timedelta(days=5)):
+                        remaining_dates = pd.date_range(start=today + timedelta(days=6), end=future_end, freq='D')
+                        if len(remaining_dates) > 0:
+                            synthetic_weather = generate_synthetic_weather_fallback(weather_df, remaining_dates)
+                            weather_df = pd.concat([weather_df, synthetic_weather], ignore_index=True)
+                            add_log_message("info", f"🔮 Added {len(remaining_dates)} days of synthetic weather for extended forecast")
                 else:
-                    avg_daily_range = 5.0  # Default 5°C range (increased from 4°C)
-                    recent_avg_high = mean_temp + 5.0
-                    recent_avg_low = mean_temp - 5.0
-                    recent_avg_temp = mean_temp
-                
-                # Add some seasonal variation
-                for date in future_dates:
-                    day_of_year = date.timetuple().tm_yday
-                    seasonal_factor = np.sin(2 * np.pi * day_of_year / 365.25) * 2  # +/- 2°C seasonal variation
-                    
-                    # Generate future temperatures based on recent patterns
-                    daily_random = np.random.normal(0, std_temp * 0.4)  # Day-to-day variation
-                    
-                    # Generate realistic high based on recent high patterns
-                    future_temp_max = recent_avg_high + seasonal_factor + daily_random
-                    
-                    # Generate realistic low based on recent low patterns  
-                    future_temp_min = recent_avg_low + seasonal_factor + daily_random
-                    
-                    # Average is between high and low
-                    future_temp_avg = (future_temp_max + future_temp_min) / 2
-                    
-                    # Add to weather data
-                    new_row = pd.DataFrame({
-                        'Date': [date],
-                        'Air_Temperature': [future_temp_avg],
-                        'Air_Temp_Min': [future_temp_min],
-                        'Air_Temp_Max': [future_temp_max]
-                    })
-                    weather_df = pd.concat([weather_df, new_row], ignore_index=True)
-            
-            if len(recent_temps_min) > 0 and len(recent_temps_max) > 0:
-                add_log_message("info", f"🌤️ Generated {len(future_dates)} days of synthetic weather (based on recent highs ~{recent_avg_high:.1f}°C, lows ~{recent_avg_low:.1f}°C)")
+                    # Forecast API failed, use synthetic for all future dates
+                    future_dates = pd.date_range(start=today + timedelta(days=1), end=future_end, freq='D')
+                    synthetic_weather = generate_synthetic_weather_fallback(weather_df, future_dates)
+                    weather_df = pd.concat([weather_df, synthetic_weather], ignore_index=True)
+                    add_log_message("warning", "📡 Weather forecast failed, using synthetic data for future dates")
             else:
-                add_log_message("info", f"🌤️ Generated {len(future_dates)} days of synthetic weather data (using defaults)")
+                # No API key, use synthetic for all future dates
+                future_dates = pd.date_range(start=today + timedelta(days=1), end=future_end, freq='D')
+                synthetic_weather = generate_synthetic_weather_fallback(weather_df, future_dates)
+                weather_df = pd.concat([weather_df, synthetic_weather], ignore_index=True)
+                add_log_message("info", f"🔑 No weather API key found, using synthetic data for {len(future_dates)} future days")
         
         return weather_df.sort_values('Date').reset_index(drop=True)
         
@@ -830,7 +980,7 @@ def display_statistics(df: pd.DataFrame) -> None:
     st.sidebar.metric("Average", f"{avg_temp:.1f}°C")
 
 
-def create_line_chart(df: pd.DataFrame) -> None:
+def create_line_chart(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> None:
     """Create and display the main temperature line chart."""
     st.subheader("📈 Temperature Over Time")
     
@@ -880,6 +1030,46 @@ def create_line_chart(df: pd.DataFrame) -> None:
                 marker=dict(size=5, color='orange'),
                 showlegend=True
             )
+        
+        # Add weather data if available
+        if weather_df is not None and not weather_df.empty:
+            # Filter weather data to match the date range of water temperature data
+            water_start = df['Date'].min()
+            water_end = df['Date'].max()
+            weather_filtered = weather_df[(weather_df['Date'] >= water_start) & (weather_df['Date'] <= water_end)].copy()
+            
+            if not weather_filtered.empty:
+                # Add high temperatures
+                if 'Air_Temp_Max' in weather_filtered.columns:
+                    fig.add_scatter(
+                        x=weather_filtered['Date'],
+                        y=weather_filtered['Air_Temp_Max'],
+                        mode='lines',
+                        name='Air Temp High',
+                        line=dict(color='red', width=1, dash='dot'),
+                        showlegend=True
+                    )
+                
+                # Add low temperatures  
+                if 'Air_Temp_Min' in weather_filtered.columns:
+                    fig.add_scatter(
+                        x=weather_filtered['Date'],
+                        y=weather_filtered['Air_Temp_Min'],
+                        mode='lines',
+                        name='Air Temp Low',
+                        line=dict(color='lightblue', width=1, dash='dot'),
+                        showlegend=True
+                    )
+                
+                # Add average air temperature
+                fig.add_scatter(
+                    x=weather_filtered['Date'],
+                    y=weather_filtered['Air_Temperature'],
+                    mode='lines',
+                    name='Air Temp Avg',
+                    line=dict(color='gray', width=2, dash='dash'),
+                    showlegend=True
+                )
         
     else:
         fig = px.line(
@@ -950,6 +1140,133 @@ def display_recent_data(df: pd.DataFrame) -> None:
     recent_data = df.tail(10).copy()
     recent_data['Date'] = recent_data['Date'].dt.strftime('%d/%m/%Y')
     st.dataframe(recent_data.iloc[::-1], use_container_width=True, hide_index=True)
+
+
+def create_correlation_analysis(df: pd.DataFrame, weather_df: pd.DataFrame) -> None:
+    """Create correlation analysis between water and air temperature."""
+    st.subheader("🔬 Water vs Air Temperature Correlation Analysis")
+    
+    if weather_df is None or weather_df.empty:
+        st.warning("No weather data available for correlation analysis.")
+        return
+    
+    # Filter to only actual water temperature data
+    if 'Type' in df.columns:
+        actual_water_data = df[df['Type'] == 'Actual'].copy()
+    else:
+        actual_water_data = df.copy()
+    
+    if actual_water_data.empty:
+        st.warning("No actual water temperature data available for correlation analysis.")
+        return
+    
+    # Merge water and weather data on date
+    merged_data = pd.merge(
+        actual_water_data[['Date', 'Temperature']],
+        weather_df[['Date', 'Air_Temperature']],
+        on='Date',
+        how='inner'
+    ).dropna()
+    
+    if len(merged_data) < 10:
+        st.warning("Not enough overlapping data points for meaningful correlation analysis.")
+        return
+    
+    # Rename columns for clarity
+    merged_data = merged_data.rename(columns={
+        'Temperature': 'Water_Temperature',
+        'Air_Temperature': 'Air_Temperature'
+    })
+    
+    # Calculate correlation statistics
+    correlation, p_value = stats.pearsonr(merged_data['Air_Temperature'], merged_data['Water_Temperature'])
+    
+    # Perform linear regression
+    slope, intercept, r_value, p_value_reg, std_err = stats.linregress(
+        merged_data['Air_Temperature'], 
+        merged_data['Water_Temperature']
+    )
+    
+    # Calculate residuals
+    predicted_water = slope * merged_data['Air_Temperature'] + intercept
+    residuals = merged_data['Water_Temperature'] - predicted_water
+    
+    # Display statistics
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Correlation (r)", f"{correlation:.3f}")
+    with col2:
+        st.metric("R² Score", f"{r_value**2:.3f}")
+    with col3:
+        st.metric("P-value", f"{p_value:.2e}")
+    with col4:
+        st.metric("Data Points", f"{len(merged_data)}")
+    
+    # Create plots using matplotlib/seaborn
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    
+    # Scatter plot with regression line
+    sns.scatterplot(data=merged_data, x='Air_Temperature', y='Water_Temperature', 
+                   alpha=0.6, ax=ax1, color='blue')
+    sns.regplot(data=merged_data, x='Air_Temperature', y='Water_Temperature', 
+               scatter=False, ax=ax1, color='red', line_kws={'linewidth': 2})
+    
+    ax1.set_title(f'Water vs Air Temperature\n(r = {correlation:.3f}, R² = {r_value**2:.3f})')
+    ax1.set_xlabel('Air Temperature (°C)')
+    ax1.set_ylabel('Water Temperature (°C)')
+    ax1.grid(True, alpha=0.3)
+    
+    # Add regression equation
+    equation_text = f'Water Temp = {slope:.2f} × Air Temp + {intercept:.2f}'
+    ax1.text(0.05, 0.95, equation_text, transform=ax1.transAxes, 
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8),
+             verticalalignment='top')
+    
+    # Residuals plot
+    sns.scatterplot(x=predicted_water, y=residuals, alpha=0.6, ax=ax2, color='green')
+    ax2.axhline(y=0, color='red', linestyle='--', linewidth=2)
+    ax2.set_title('Residuals Plot\n(Predicted vs Actual Difference)')
+    ax2.set_xlabel('Predicted Water Temperature (°C)')
+    ax2.set_ylabel('Residuals (°C)')
+    ax2.grid(True, alpha=0.3)
+    
+    # Add residual statistics
+    rmse = np.sqrt(np.mean(residuals**2))
+    mae = np.mean(np.abs(residuals))
+    residual_text = f'RMSE = {rmse:.2f}°C\nMAE = {mae:.2f}°C'
+    ax2.text(0.05, 0.95, residual_text, transform=ax2.transAxes,
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8),
+             verticalalignment='top')
+    
+    plt.tight_layout()
+    st.pyplot(fig)
+    
+    # Interpretation text
+    st.markdown("**📊 Interpretation:**")
+    
+    # Correlation strength interpretation
+    if abs(correlation) >= 0.8:
+        correlation_strength = "very strong"
+    elif abs(correlation) >= 0.6:
+        correlation_strength = "strong"
+    elif abs(correlation) >= 0.4:
+        correlation_strength = "moderate"
+    elif abs(correlation) >= 0.2:
+        correlation_strength = "weak"
+    else:
+        correlation_strength = "very weak"
+    
+    st.write(f"- **Correlation:** {correlation_strength} {'positive' if correlation > 0 else 'negative'} relationship (r = {correlation:.3f})")
+    st.write(f"- **Explanation:** {r_value**2*100:.1f}% of water temperature variation is explained by air temperature")
+    st.write(f"- **Linear Model:** For every 1°C increase in air temperature, water temperature increases by {slope:.2f}°C on average")
+    st.write(f"- **Model Accuracy:** Typical prediction error is ±{rmse:.1f}°C (RMSE)")
+    
+    if p_value < 0.001:
+        st.write("- **Statistical Significance:** Highly significant relationship (p < 0.001)")
+    elif p_value < 0.05:
+        st.write("- **Statistical Significance:** Statistically significant relationship (p < 0.05)")
+    else:
+        st.write("- **Statistical Significance:** Not statistically significant (p ≥ 0.05)")
 
 
 def create_download_button(df: pd.DataFrame) -> None:
@@ -1138,15 +1455,18 @@ def create_forecast_tab(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> No
             add_log_message("info", "No predictions available. Enable predictions in the sidebar to see forecasts.")
 
 
-def create_historical_tab(df: pd.DataFrame, actual_df: pd.DataFrame) -> None:
+def create_historical_tab(df: pd.DataFrame, actual_df: pd.DataFrame, weather_df: pd.DataFrame = None) -> None:
     """Create the historical data and statistics tab content."""
     st.header("📊 Historical Data & Statistics")
     
     # Main chart (includes predictions if available)
-    create_line_chart(df)
+    create_line_chart(df, weather_df)
     
     # Monthly analysis (only actual data)
     create_monthly_analysis(actual_df)
+    
+    # Correlation analysis between water and air temperature
+    create_correlation_analysis(df, weather_df)
     
     # Recent data table (only actual data)
     display_recent_data(actual_df)
@@ -1244,7 +1564,7 @@ def main() -> None:
         create_forecast_tab(df, weather_df)
     
     with tab2:
-        create_historical_tab(df, actual_df)
+        create_historical_tab(df, actual_df, weather_df)
     
     # Display all accumulated log messages at the end
     display_log_messages()
