@@ -1660,24 +1660,97 @@ def create_historical_tab(df: pd.DataFrame, actual_df: pd.DataFrame, weather_df:
     """Create the historical data and statistics tab content."""
     st.header("📊 Historical Data & Statistics")
     
-    # Main chart (includes predictions if available)
-    create_line_chart(df, weather_df)
+    # Filter data to only show up to today's date (no future predictions/forecasts)
+    today = pd.Timestamp(datetime.now().date())
+    
+    # Filter weather data to historical only
+    historical_weather_df = None
+    if weather_df is not None and not weather_df.empty:
+        historical_weather_df = weather_df[weather_df['Date'] <= today].copy()
+    
+    # Create model predictions for historical comparison
+    model_comparison_df = actual_df.copy()
+    
+    if historical_weather_df is not None and not historical_weather_df.empty:
+        # Merge actual data with weather data
+        merged_data = pd.merge(
+            actual_df[['Date', 'Temperature']],
+            historical_weather_df[['Date', 'Air_Temperature']],
+            on='Date',
+            how='inner'
+        ).dropna()
+        
+        if len(merged_data) >= 30:
+            # Generate physics model predictions
+            try:
+                physics_model = WaterTemperatureModel()
+                training_dates = merged_data['Date'].dt.to_pydatetime()
+                training_air_temps = merged_data['Air_Temperature'].values
+                training_water_temps = merged_data['Temperature'].values
+                
+                # Fit physics model
+                result = physics_model.fit_parameters(training_air_temps, training_water_temps, training_dates)
+                if result and result.success:
+                    physics_predictions = physics_model.predict_temperature(
+                        training_air_temps, training_water_temps[0], training_dates
+                    )
+                    
+                    # Add physics predictions to comparison dataframe
+                    physics_df = pd.DataFrame({
+                        'Date': merged_data['Date'],
+                        'Temperature': physics_predictions,
+                        'Type': 'Physics Model'
+                    })
+                    model_comparison_df = pd.concat([model_comparison_df, physics_df], ignore_index=True)
+                    
+            except Exception as e:
+                add_log_message("warning", f"Could not generate physics model predictions: {e}")
+            
+            # Generate linear model predictions
+            try:
+                from sklearn.linear_model import LinearRegression
+                linear_model = LinearRegression()
+                linear_model.fit(training_air_temps.reshape(-1, 1), training_water_temps)
+                linear_predictions = linear_model.predict(training_air_temps.reshape(-1, 1))
+                
+                # Add linear predictions to comparison dataframe
+                linear_df = pd.DataFrame({
+                    'Date': merged_data['Date'],
+                    'Temperature': linear_predictions,
+                    'Type': 'Linear Model'
+                })
+                model_comparison_df = pd.concat([model_comparison_df, linear_df], ignore_index=True)
+                
+            except Exception as e:
+                add_log_message("warning", f"Could not generate linear model predictions: {e}")
+    
+    # Ensure actual data has the right type
+    if 'Type' not in model_comparison_df.columns:
+        model_comparison_df['Type'] = 'Actual'
+    else:
+        model_comparison_df.loc[model_comparison_df['Type'].isna(), 'Type'] = 'Actual'
+    
+    # Sort by date
+    model_comparison_df = model_comparison_df.sort_values('Date').reset_index(drop=True)
+    
+    # Main chart showing actual data + model predictions
+    create_line_chart(model_comparison_df, historical_weather_df)
     
     # Monthly analysis (only actual data)
     create_monthly_analysis(actual_df)
     
-    # Physics model comparison analysis (new section)
-    if weather_df is not None and not weather_df.empty:
-        create_physics_model_analysis(df, weather_df)
+    # Physics model comparison analysis (historical data only)
+    if historical_weather_df is not None and not historical_weather_df.empty:
+        create_physics_model_analysis(model_comparison_df, historical_weather_df)
     
-    # Standard correlation analysis between water and air temperature
-    create_correlation_analysis(df, weather_df)
+    # Standard correlation analysis between water and air temperature (historical data only)
+    create_correlation_analysis(model_comparison_df, historical_weather_df)
     
     # Recent data table (only actual data)
     display_recent_data(actual_df)
     
-    # Download data
-    create_download_button(df)
+    # Download data (actual + model predictions)
+    create_download_button(model_comparison_df)
 
 
 def main() -> None:
@@ -1710,6 +1783,11 @@ def main() -> None:
     st.sidebar.header("🔧 Debug Options")
     debug_mode = st.sidebar.checkbox("Debug mode", value=False)
     st.session_state.debug_mode = debug_mode
+    
+    st.sidebar.header("🔄 Data Management")
+    if st.sidebar.button("Clear Cache & Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
     
     # Load reservoir data
     df = load_data()
