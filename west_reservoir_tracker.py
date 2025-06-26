@@ -31,8 +31,8 @@ def add_log_message(message_type: str, message: str) -> None:
     st.session_state.log_messages.append((message_type, message))
 
 def display_log_messages() -> None:
-    """Display all accumulated log messages."""
-    if st.session_state.log_messages:
+    """Display all accumulated log messages only in debug mode."""
+    if st.session_state.log_messages and st.session_state.get('debug_mode', False):
         st.subheader("📝 Processing Log")
         for msg_type, msg in st.session_state.log_messages:
             if msg_type == "info":
@@ -43,8 +43,8 @@ def display_log_messages() -> None:
                 st.error(msg)
             elif msg_type == "success":
                 st.success(msg)
-        # Clear messages after displaying
-        st.session_state.log_messages = []
+    # Clear messages after displaying (or not displaying)
+    st.session_state.log_messages = []
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1HNnucep6pv2jCFg2bYR_gV78XbYvWYyjx9y9tTNVapw/export?format=csv&gid=0"
 REQUEST_TIMEOUT = 30
@@ -996,13 +996,13 @@ def create_line_chart(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> None
             actual_data, 
             x='Date', 
             y='Temperature',
-            title='West Reservoir Water Temperature (Actual, Imputed & Predicted)',
+            title='West Reservoir Water Temperature',
             labels={'Temperature': 'Temperature (°C)', 'Date': 'Date'}
         )
         
         # Update actual data trace to be points only
         fig.update_traces(
-            name='Actual',
+            name='Water Temperature',
             marker=dict(color='#1f77b4', size=8),
             showlegend=True
         )
@@ -1484,8 +1484,8 @@ def create_download_button(df: pd.DataFrame) -> None:
 
 
 def create_forecast_tab(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> None:
-    """Create the short-term forecast tab content."""
-    st.header("🔮 Short-term Temperature Forecast")
+    """Create the forecast tab content."""
+    st.header("🔮 Temperature Forecast")
     
     # Filter data for the last 7 days and next 14 days
     today = pd.Timestamp(datetime.now().date())
@@ -1499,7 +1499,7 @@ def create_forecast_tab(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> No
         return
     
     # Show forecast chart
-    st.subheader("📈 Recent History & 14-Day Forecast")
+    st.subheader("📈 Recent temps & 14-Day Forecast")
     
     if 'Type' in forecast_df.columns:
         # Separate different data types for the forecast period
@@ -1512,12 +1512,12 @@ def create_forecast_tab(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> No
             actual_data, 
             x='Date', 
             y='Temperature',
-            title='Short-term Temperature Forecast (Last 7 Days + Next 14 Days)',
+            title='Temperature Forecast (Last 7 Days + Next 14 Days)',
             labels={'Temperature': 'Temperature (°C)', 'Date': 'Date'}
         )
         
         fig.update_traces(
-            name='Actual',
+            name='Water Temperature',
             marker=dict(color='#1f77b4', size=8),
             showlegend=True
         )
@@ -1753,10 +1753,106 @@ def create_historical_tab(df: pd.DataFrame, actual_df: pd.DataFrame, weather_df:
     create_download_button(model_comparison_df)
 
 
+def create_temperature_dashboard(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> None:
+    """Create a dashboard showing key temperature metrics."""
+    st.markdown("### 📊 Temperature Dashboard")
+    
+    today = pd.Timestamp(datetime.now().date())
+    yesterday = today - pd.Timedelta(days=1)
+    tomorrow = today + pd.Timedelta(days=1)
+    
+    # Initialize values
+    yesterday_water = yesterday_air = today_water = today_air = tomorrow_air = "N/A"
+    
+    # Get yesterday's data
+    if not df.empty:
+        yesterday_data = df[df['Date'] == yesterday]
+        if not yesterday_data.empty and yesterday_data['Type'].iloc[0] == 'Actual':
+            yesterday_water = f"{yesterday_data['Temperature'].iloc[0]:.1f}°C"
+    
+    # Get today's data - prefer actual, fallback to forecast
+    if not df.empty:
+        today_data = df[df['Date'] == today]
+        if not today_data.empty:
+            # Prefer actual data
+            actual_today = today_data[today_data['Type'] == 'Actual']
+            if not actual_today.empty:
+                today_water = f"{actual_today['Temperature'].iloc[0]:.1f}°C"
+            else:
+                # Use forecast/predicted data if actual not available
+                forecast_today = today_data[today_data['Type'].isin(['Predicted', 'Physics Model'])]
+                if not forecast_today.empty:
+                    today_water = f"{forecast_today['Temperature'].iloc[0]:.1f}°C*"
+    
+    # Get air temperature data
+    if weather_df is not None and not weather_df.empty:
+        # Yesterday's air temp
+        yesterday_air_data = weather_df[weather_df['Date'] == yesterday]
+        if not yesterday_air_data.empty:
+            yesterday_air = f"{yesterday_air_data['Air_Temperature'].iloc[0]:.1f}°C"
+        
+        # Today's air temp
+        today_air_data = weather_df[weather_df['Date'] == today]
+        if not today_air_data.empty:
+            today_air = f"{today_air_data['Air_Temperature'].iloc[0]:.1f}°C"
+        
+        # Tomorrow's air temp forecast
+        tomorrow_air_data = weather_df[weather_df['Date'] == tomorrow]
+        if not tomorrow_air_data.empty:
+            tomorrow_air = f"{tomorrow_air_data['Air_Temperature'].iloc[0]:.1f}°C"
+    
+    # Create metrics display
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.metric(
+            label="Yesterday Water",
+            value=yesterday_water,
+            help="Yesterday's water temperature"
+        )
+    
+    with col2:
+        st.metric(
+            label="Yesterday Air", 
+            value=yesterday_air,
+            help="Yesterday's air temperature"
+        )
+    
+    with col3:
+        st.metric(
+            label="Today Water",
+            value=today_water,
+            help="Today's water temperature (* = forecast if actual not available)"
+        )
+    
+    with col4:
+        st.metric(
+            label="Today Air",
+            value=today_air,
+            help="Today's air temperature"
+        )
+    
+    with col5:
+        st.metric(
+            label="Tomorrow Air Forecast",
+            value=tomorrow_air,
+            help="Tomorrow's forecasted air temperature"
+        )
+    
+    st.divider()
+
+
 def main() -> None:
     """Main application function."""
     st.title("🌡️ West Reservoir Temperature Tracker")
     st.markdown("Tracking water temperature at West Reservoir, London")
+    
+    # Add info explainer
+    st.info("""
+    ℹ️ **Important Notes:** Water temperatures are taken each morning around 7am. 
+    The water will often be warmer by the time you get in! Additionally, temperature varies 
+    throughout the reservoir by both position and depth - this is just a snapshot of conditions.
+    """)
     
     # Sidebar options
     st.sidebar.header("🔮 Prediction Options")
@@ -1836,12 +1932,15 @@ def main() -> None:
         end_date = datetime.now() + timedelta(days=14)
         weather_df = get_weather_data(start_date, end_date)
     
+    # Display temperature dashboard at the top
+    create_temperature_dashboard(df, weather_df)
+    
     # Display statistics (only for actual data)
     actual_df = df[df['Type'] == 'Actual'] if 'Type' in df.columns else df
     display_statistics(actual_df)
     
     # Create tabs
-    tab1, tab2 = st.tabs(["📊 Short-term Forecast", "📈 Historical Data & Statistics"])
+    tab1, tab2 = st.tabs(["🔮 Forecast", "📈 Historical Data & Statistics"])
     
     with tab1:
         create_forecast_tab(df, weather_df)
