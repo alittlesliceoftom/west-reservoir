@@ -19,7 +19,8 @@ from scipy import stats
 st.set_page_config(
     page_title="West Reservoir Temperature Tracker",
     page_icon="🌡️",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
 
 # Initialize session state for logging
@@ -1629,28 +1630,42 @@ def create_forecast_tab(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> No
     # Show forecast summary
     if 'Type' in forecast_df.columns:
         predicted_data = forecast_df[forecast_df['Type'] == 'Predicted']
-        if not predicted_data.empty:
-            st.subheader("📋 Forecast Summary")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                min_pred_temp = predicted_data['Temperature'].min()
-                st.metric("Predicted Min", f"{min_pred_temp:.1f}°C")
-            
-            with col2:
-                max_pred_temp = predicted_data['Temperature'].max()
-                st.metric("Predicted Max", f"{max_pred_temp:.1f}°C")
-            
-            with col3:
-                avg_pred_temp = predicted_data['Temperature'].mean()
-                st.metric("Predicted Avg", f"{avg_pred_temp:.1f}°C")
-            
+        if not predicted_data.empty:            
             # Show forecast table
             st.subheader("📅 Detailed Forecast")
             forecast_table = predicted_data[['Date', 'Temperature']].copy()
-            forecast_table.loc[:, 'Date'] = forecast_table['Date'].dt.strftime('%d/%m/%Y')
+            
+            # Add air temperature data if available
+            if weather_df is not None and not weather_df.empty:
+                # Merge with weather data for the same dates
+                weather_forecast = weather_df[weather_df['Date'].isin(predicted_data['Date'])]
+                
+                if not weather_forecast.empty:
+                    forecast_table = pd.merge(
+                        forecast_table, 
+                        weather_forecast[['Date', 'Air_Temperature', 'Air_Temp_Max']], 
+                        on='Date', 
+                        how='left'
+                    )
+                    
+                    # Rename columns for display
+                    if 'Air_Temperature' in forecast_table.columns:
+                        forecast_table = forecast_table.rename(columns={'Air_Temperature': 'Air Temp Avg'})
+                    if 'Air_Temp_Max' in forecast_table.columns:
+                        forecast_table = forecast_table.rename(columns={'Air_Temp_Max': 'Air Temp High'})
+            
+            # Format the table
+            forecast_table.loc[:, 'Date'] = forecast_table['Date'].dt.strftime('%a %d/%m')
             forecast_table.loc[:, 'Temperature'] = forecast_table['Temperature'].round(1)
+            
+            # Round air temperature columns if they exist
+            for col in ['Air Temp Avg', 'Air Temp High']:
+                if col in forecast_table.columns:
+                    forecast_table.loc[:, col] = forecast_table[col].round(1)
+            
+            # Rename water temperature column for clarity
+            forecast_table = forecast_table.rename(columns={'Temperature': 'Water Temp'})
+            
             st.dataframe(forecast_table, use_container_width=True, hide_index=True)
         else:
             add_log_message("info", "No predictions available. Enable predictions in the sidebar to see forecasts.")
@@ -1762,7 +1777,7 @@ def create_temperature_dashboard(df: pd.DataFrame, weather_df: pd.DataFrame = No
     tomorrow = today + pd.Timedelta(days=1)
     
     # Initialize values
-    yesterday_water = yesterday_air = today_water = today_air = tomorrow_air = "N/A"
+    yesterday_water = yesterday_air = today_water = today_air = hottest_air = hottest_water = "N/A"
     
     # Get yesterday's data
     if not df.empty:
@@ -1784,59 +1799,150 @@ def create_temperature_dashboard(df: pd.DataFrame, weather_df: pd.DataFrame = No
                 if not forecast_today.empty:
                     today_water = f"{forecast_today['Temperature'].iloc[0]:.1f}°C*"
     
-    # Get air temperature data
+    # Get air temperature data and find hottest forecasts
     if weather_df is not None and not weather_df.empty:
         # Yesterday's air temp
         yesterday_air_data = weather_df[weather_df['Date'] == yesterday]
         if not yesterday_air_data.empty:
-            yesterday_air = f"{yesterday_air_data['Air_Temperature'].iloc[0]:.1f}°C"
+            yesterday_avg = yesterday_air_data['Air_Temperature'].iloc[0]
+            if 'Air_Temp_Max' in yesterday_air_data.columns and not pd.isna(yesterday_air_data['Air_Temp_Max'].iloc[0]):
+                yesterday_high = yesterday_air_data['Air_Temp_Max'].iloc[0]
+                yesterday_air = f"{yesterday_avg:.1f} / {yesterday_high:.1f}°C"
+            else:
+                yesterday_air = f"{yesterday_avg:.1f}°C"
         
         # Today's air temp
         today_air_data = weather_df[weather_df['Date'] == today]
         if not today_air_data.empty:
-            today_air = f"{today_air_data['Air_Temperature'].iloc[0]:.1f}°C"
+            today_avg = today_air_data['Air_Temperature'].iloc[0]
+            if 'Air_Temp_Max' in today_air_data.columns and not pd.isna(today_air_data['Air_Temp_Max'].iloc[0]):
+                today_high = today_air_data['Air_Temp_Max'].iloc[0]
+                today_air = f"{today_avg:.1f} / {today_high:.1f}°C"
+            else:
+                today_air = f"{today_avg:.1f}°C"
         
-        # Tomorrow's air temp forecast
-        tomorrow_air_data = weather_df[weather_df['Date'] == tomorrow]
-        if not tomorrow_air_data.empty:
-            tomorrow_air = f"{tomorrow_air_data['Air_Temperature'].iloc[0]:.1f}°C"
+        # Find highest air temperature in forecast (next 7 days) using daily max
+        future_weather = weather_df[weather_df['Date'] > today]
+        if not future_weather.empty:
+            # Limit to next 7 days
+            week_ahead = today + pd.Timedelta(days=7)
+            future_week = future_weather[future_weather['Date'] <= week_ahead]
+            
+            if not future_week.empty:
+                # Use Air_Temp_Max if available, otherwise fall back to Air_Temperature
+                if 'Air_Temp_Max' in future_week.columns and not future_week['Air_Temp_Max'].isna().all():
+                    highest_air_row = future_week.loc[future_week['Air_Temp_Max'].idxmax()]
+                    highest_air_temp = highest_air_row['Air_Temp_Max']
+                else:
+                    highest_air_row = future_week.loc[future_week['Air_Temperature'].idxmax()]
+                    highest_air_temp = highest_air_row['Air_Temperature']
+                
+                highest_air_date = highest_air_row['Date'].strftime('%a %d')
+                hottest_air = f"{highest_air_temp:.1f}°C on {highest_air_date}"
     
-    # Create metrics display
-    col1, col2, col3, col4, col5 = st.columns(5)
+    # Find hottest water temperature in forecast (next 7 days)
+    if not df.empty:
+        future_water = df[df['Date'] > today]
+        if not future_water.empty:
+            # Limit to next 7 days and only forecast data
+            week_ahead = today + pd.Timedelta(days=7)
+            future_week = future_water[
+                (future_water['Date'] <= week_ahead) & 
+                (future_water['Type'].isin(['Predicted', 'Physics Model']))
+            ]
+            
+            if not future_week.empty:
+                hottest_water_row = future_week.loc[future_week['Temperature'].idxmax()]
+                hottest_water_temp = hottest_water_row['Temperature']
+                hottest_water_date = hottest_water_row['Date'].strftime('%a %d')
+                hottest_water = f"{hottest_water_temp:.1f}°C on {hottest_water_date}"
     
-    with col1:
+    # Air Temperature Row
+    st.markdown("**🌤️ Air Temperatures**")
+    air_col1, air_col2, air_col3, air_col4 = st.columns(4)
+    
+    with air_col1:
+        st.metric(
+            label="Yesterday Avg/High", 
+            value=yesterday_air,
+            help="Yesterday's air temperature (average / high)"
+        )
+    
+    with air_col2:
+        st.metric(
+            label="Today Avg/High",
+            value=today_air,
+            help="Today's air temperature (average / high)"
+        )
+    
+    with air_col3:
+        st.metric(
+            label="Highest Air (7 days)",
+            value=hottest_air,
+            help="Highest daily maximum air temperature in the next 7 days"
+        )
+    
+    with air_col4:
+        st.metric(
+            label="",
+            value="",
+            help=""
+        )
+    
+    # Water Temperature Row  
+    st.markdown("**🌊 Water Temperatures**")
+    water_col1, water_col2, water_col3, water_col4 = st.columns(4)
+    
+    with water_col1:
         st.metric(
             label="Yesterday Water",
             value=yesterday_water,
             help="Yesterday's water temperature"
         )
     
-    with col2:
-        st.metric(
-            label="Yesterday Air", 
-            value=yesterday_air,
-            help="Yesterday's air temperature"
-        )
-    
-    with col3:
+    with water_col2:
         st.metric(
             label="Today Water",
             value=today_water,
             help="Today's water temperature (* = forecast if actual not available)"
         )
     
-    with col4:
+    with water_col3:
         st.metric(
-            label="Today Air",
-            value=today_air,
-            help="Today's air temperature"
+            label="Hottest Water (7 days)",
+            value=hottest_water,
+            help="Highest forecasted water temperature in the next 7 days"
         )
     
-    with col5:
+    with water_col4:
+        # Neoprene recommendation based on today's water temperature
+        neoprene_advice = "Check water temp"
+        if not df.empty:
+            today_data = df[df['Date'] == today]
+            if not today_data.empty:
+                # Get today's water temp (prefer actual, fallback to forecast)
+                actual_today = today_data[today_data['Type'] == 'Actual']
+                if not actual_today.empty:
+                    water_temp = actual_today['Temperature'].iloc[0]
+                else:
+                    forecast_today = today_data[today_data['Type'].isin(['Predicted', 'Physics Model'])]
+                    if not forecast_today.empty:
+                        water_temp = forecast_today['Temperature'].iloc[0]
+                    else:
+                        water_temp = None
+                
+                if water_temp is not None:
+                    if water_temp > 16:
+                        neoprene_advice = "No Way! 🌊"
+                    elif water_temp > 10:
+                        neoprene_advice = "If you like 🤷"
+                    else:
+                        neoprene_advice = "Yes! Unless superhero 🦸"
+        
         st.metric(
-            label="Tomorrow Air Forecast",
-            value=tomorrow_air,
-            help="Tomorrow's forecasted air temperature"
+            label="Need Neoprene?",
+            value=neoprene_advice,
+            help="Neoprene wetsuit recommendation based on today's water temperature"
         )
     
     st.divider()
@@ -1845,11 +1951,11 @@ def create_temperature_dashboard(df: pd.DataFrame, weather_df: pd.DataFrame = No
 def main() -> None:
     """Main application function."""
     st.title("🌡️ West Reservoir Temperature Tracker")
-    st.markdown("Tracking water temperature at West Reservoir, London")
+    st.markdown("Tracking and forecasting water temperature at West Reservoir, London")
     
     # Add info explainer
     st.info("""
-    ℹ️ **Important Notes:** Water temperatures are taken each morning around 7am. 
+    ℹ️ Water temperatures are taken each morning around 7am. 
     The water will often be warmer by the time you get in! Additionally, temperature varies 
     throughout the reservoir by both position and depth - this is just a snapshot of conditions.
     """)
