@@ -2128,6 +2128,21 @@ def create_temperature_dashboard(df: pd.DataFrame, weather_df: pd.DataFrame = No
         value=neoprene_advice,
         help="Neoprene wetsuit recommendation based on today's water temperature"
         )
+
+    st.markdown("Future Water Temps")
+    col3, col4 = st.columns(2)
+    with col3:
+        st.metric(
+            label="Tomorrow the water will be",
+            value=f"{future_water.iloc[0]['Temperature']:.1f}°C" if not future_water.empty else "No data",
+            help="Tomorrow's predicted water temperature"
+            )
+    with col4: 
+        st.metric(
+            label="Hottest Water in  next 7 days)",
+            value=hottest_water,
+            help="Highest forecasted water temperature in the next 7 days"
+        )
     
     # with graph_col:
 
