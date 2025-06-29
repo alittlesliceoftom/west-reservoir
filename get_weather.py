@@ -13,5 +13,5 @@ data = Daily(location, start, end)
 data = data.fetch()
 
 
-with open('bristol_daily.p','wb') as f:
+with open("bristol_daily.p", "wb") as f:
     data.to_pickle(f)
