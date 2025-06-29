@@ -17,8 +17,7 @@ import matplotlib.pyplot as plt
 from scipy import stats
 
 st.set_page_config(
-    page_title="West Reservoir Temperature Tracker",
-    page_icon="🌡️",
+    page_title="West Reservoir Water Temperature Tracker",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -48,7 +47,18 @@ def display_log_messages() -> None:
     st.session_state.log_messages = []
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1HNnucep6pv2jCFg2bYR_gV78XbYvWYyjx9y9tTNVapw/export?format=csv&gid=0"
+# Google Form URL for community temperature submissions  
+GOOGLE_FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSc4FK6wBCZT3-20h42Usj0S-UNbi5geOxnOW9syG_HDSDLDhg/formResponse"
+# Form field IDs from the Google Form
+FORM_FIELD_IDS = {
+    'temperature': 'entry.1996988660',  # Temperature field
+    'name': 'entry.1457081819',         # Submitter name field
+    'timestamp': 'entry.918355495',     # Submission timestamp field
+}
 REQUEST_TIMEOUT = 30
+
+# Feature flags
+ENABLE_COMMUNITY_SUBMISSIONS = False  # Feature flag to enable/disable community temp submissions
 
 # West Reservoir location (London)
 RESERVOIR_LOCATION = Point(51.566938, -0.090492)  # West Reservoir coordinates
@@ -365,6 +375,226 @@ def load_sample_data() -> pd.DataFrame:
     """
     df = pd.DataFrame(SAMPLE_DATA)
     return validate_and_clean_data(df, debug_mode=st.session_state.get('debug_mode', False))
+
+
+def incorporate_community_temps(df: pd.DataFrame) -> pd.DataFrame:
+    """Incorporate approved community temperature submissions into the main dataset.
+    
+    Args:
+        df: Main temperature dataset
+        
+    Returns:
+        pd.DataFrame: Dataset with community temperatures added
+    """
+    if 'community_temps' not in st.session_state or not st.session_state.community_temps:
+        return df
+    
+    # For this demo, we'll automatically approve today's submission
+    # In production, you'd check against approved submissions from Google Sheets
+    today = datetime.now().date()
+    today_str = today.strftime('%d/%m/%Y')
+    
+    # Find today's submission
+    today_submission = None
+    for submission in st.session_state.community_temps:
+        if submission['Date'] == today_str:
+            today_submission = submission
+            break
+    
+    if today_submission:
+        # Add community temperature to dataset
+        community_row = {
+            'Date': pd.Timestamp(today),
+            'Temperature': today_submission['Temperature'],
+            'Type': 'Actual'
+        }
+        
+        # Remove any existing data for today and add community submission
+        df_filtered = df[df['Date'] != pd.Timestamp(today)]
+        community_df = pd.DataFrame([community_row])
+        
+        result_df = pd.concat([df_filtered, community_df], ignore_index=True)
+        result_df = result_df.sort_values('Date').reset_index(drop=True)
+        
+        add_log_message("info", f"Using community-submitted temperature for today: {today_submission['Temperature']}°C")
+        return result_df
+    
+    return df
+
+
+def submit_community_temperature(date: datetime, temperature: float, submitted_by: str = "Anonymous") -> bool:
+    """Submit a community temperature reading via Google Forms.
+    
+    Args:
+        date: Date of the temperature reading
+        temperature: Temperature in Celsius
+        submitted_by: Name/identifier of submitter
+        
+    Returns:
+        bool: True if submission successful, False otherwise
+    """
+    try:
+        # Store in session state for immediate use in the app
+        if 'community_temps' not in st.session_state:
+            st.session_state.community_temps = []
+        
+        submission = {
+            'Date': date.strftime('%d/%m/%Y'),
+            'Temperature': temperature,
+            'Submitted_By': submitted_by,
+            'Timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'Status': 'Pending Review'
+        }
+        
+        st.session_state.community_temps.append(submission)
+        
+        # Submit to Google Form (if configured)
+        if GOOGLE_FORM_URL != "https://docs.google.com/forms/d/YOUR_FORM_ID/formResponse":
+            form_data = {
+                FORM_FIELD_IDS['temperature']: str(temperature),
+                FORM_FIELD_IDS['name']: submitted_by,
+                FORM_FIELD_IDS['timestamp']: submission['Timestamp']
+            }
+            
+            add_log_message("info", f"🔧 Submitting to Google Form: {GOOGLE_FORM_URL}")
+            add_log_message("info", f"🔧 Form data: {form_data}")
+            
+            try:
+                # Submit to Google Form with proper headers and form encoding
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Referer': 'https://docs.google.com/forms/d/1CLtT5XQ_KrtW6SZGSdmYkHQQwMw0y8K2UP3x0IDhZrg/viewform'
+                }
+                
+                # Try the submission
+                response = requests.post(GOOGLE_FORM_URL, data=form_data, headers=headers, timeout=REQUEST_TIMEOUT, allow_redirects=False)
+                
+                add_log_message("info", f"🔧 Response status: {response.status_code}")
+                add_log_message("info", f"🔧 Response URL: {response.url}")
+                
+                # Create manual test URL for verification
+                from urllib.parse import quote
+                manual_test_url = f"{GOOGLE_FORM_URL}?{FORM_FIELD_IDS['temperature']}={temperature}&{FORM_FIELD_IDS['name']}={quote(submitted_by)}&{FORM_FIELD_IDS['timestamp']}={quote(submission['Timestamp'])}"
+                add_log_message("info", f"🔧 Manual test URL: {manual_test_url}")
+                add_log_message("info", f"🔧 Try this URL in your browser to test manually")
+                
+                # Google Forms often returns 302 redirect on successful submission
+                if response.status_code in [200, 302]:
+                    add_log_message("success", f"✅ Community temperature submitted to Google Sheets: {temperature}°C")
+                else:
+                    add_log_message("warning", f"Form submission returned status {response.status_code}")
+                    add_log_message("info", f"🔧 Response text: {response.text[:500]}...")
+                    
+            except Exception as e:
+                add_log_message("error", f"Form submission error: {e}")
+        else:
+            add_log_message("warning", "Google Form not configured - data stored locally only")
+        
+        add_log_message("info", f"Community temperature: {temperature}°C for {date.strftime('%d/%m/%Y')}")
+        return True
+        
+    except requests.exceptions.RequestException as e:
+        add_log_message("warning", f"Network error submitting to Google Form: {e}. Data stored locally.")
+        return True  # Still return True since we stored locally
+    except Exception as e:
+        add_log_message("error", f"Failed to submit community temperature: {e}")
+        return False
+
+
+def check_today_temperature_missing(df: pd.DataFrame) -> bool:
+    """Check if today's temperature is missing from the actual data.
+    
+    Args:
+        df: DataFrame with temperature data
+        
+    Returns:
+        bool: True if today's actual temperature is missing
+    """
+    today = pd.Timestamp(datetime.now().date())
+    
+    if df.empty:
+        return True
+    
+    # Check if we have actual data for today
+    today_data = df[df['Date'] == today]
+    if today_data.empty:
+        return True
+    
+    # Check if today's data is actual (not predicted)
+    if 'Type' in today_data.columns:
+        actual_today = today_data[today_data['Type'] == 'Actual']
+        return actual_today.empty
+    
+    return False
+
+
+def create_community_temp_form() -> None:
+    """Create a form for submitting community temperature data."""
+    st.warning("⚠️ Today's temperature is missing - help the community by submitting it!")
+    
+    # Get yesterday's temperature as default if available
+    yesterday = pd.Timestamp(datetime.now().date()) - pd.Timedelta(days=1)
+    default_temp = 15.0  # Fallback default
+    
+    # Try to get yesterday's actual temperature from session state or data
+    if 'main_df' in st.session_state and not st.session_state.main_df.empty:
+        df = st.session_state.main_df
+        yesterday_data = df[df['Date'] == yesterday]
+        if not yesterday_data.empty:
+            actual_yesterday = yesterday_data[yesterday_data['Type'] == 'Actual'] if 'Type' in yesterday_data.columns else yesterday_data
+            if not actual_yesterday.empty:
+                default_temp = float(actual_yesterday['Temperature'].iloc[0])
+    
+    with st.form("community_temp_form"):
+        st.markdown("**Submit Today's Water Temperature**")
+        
+        if default_temp != 15.0:
+            st.info(f"💡 Defaulted to yesterday's temperature: {default_temp:.1f}°C")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            temp_input = st.number_input(
+                "Water Temperature (°C)",
+                min_value=0.0,
+                max_value=30.0,
+                value=default_temp,
+                step=0.1,
+                help="Enter the water temperature in Celsius (defaulted to yesterday's reading)"
+            )
+        
+        with col2:
+            submitter_name = st.text_input(
+                "Your Name (Optional)",
+                placeholder="Anonymous",
+                help="Optional: Enter your name or identifier"
+            )
+        
+        st.markdown("**📝 Guidelines:**")
+        st.markdown("""
+        - If you're at the reservoir or on instagram, please add the temperature from the board.
+        """)
+        
+        submitted = st.form_submit_button("Submit Temperature", type="primary")
+        
+        if submitted:
+            if 0 <= temp_input <= 30:
+                submitter = submitter_name.strip() if submitter_name.strip() else "Anonymous"
+                today = datetime.now()
+                
+                success = submit_community_temperature(today, temp_input, submitter)
+                
+                if success:
+                    st.success(f"✅ THANK YOU! Temperature {temp_input}°C submitted for review.")
+                    st.info("Your submission will be reviewed and added to the official data if approved.")
+                    st.balloons()  # Celebration animation
+                    # Rerun to update the dashboard
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to submit temperature. Please try again.")
+            else:
+                st.error("❌ Please enter a temperature between 0°C and 30°C.")
 
 
 @st.cache_data
@@ -1857,95 +2087,109 @@ def create_temperature_dashboard(df: pd.DataFrame, weather_df: pd.DataFrame = No
                 hottest_water_date = hottest_water_row['Date'].strftime('%a %d')
                 hottest_water = f"{hottest_water_temp:.1f}°C on {hottest_water_date}"
     
-    # Air Temperature Row
-    st.markdown("**🌤️ Air Temperatures**")
-    air_col1, air_col2, air_col3, air_col4 = st.columns(4)
-    
-    with air_col1:
-        st.metric(
-            label="Yesterday Avg/High", 
-            value=yesterday_air,
-            help="Yesterday's air temperature (average / high)"
-        )
-    
-    with air_col2:
-        st.metric(
-            label="Today Avg/High",
-            value=today_air,
-            help="Today's air temperature (average / high)"
-        )
-    
-    with air_col3:
-        st.metric(
-            label="Highest Air (7 days)",
-            value=hottest_air,
-            help="Highest daily maximum air temperature in the next 7 days"
-        )
-    
-    with air_col4:
-        st.metric(
-            label="",
-            value="",
-            help=""
-        )
-    
-    # Water Temperature Row  
     st.markdown("**🌊 Water Temperatures**")
-    water_col1, water_col2, water_col3, water_col4 = st.columns(4)
-    
+    water_col1, graph_col = st.columns(2)
+
     with water_col1:
         st.metric(
-            label="Yesterday Water",
-            value=yesterday_water,
-            help="Yesterday's water temperature"
-        )
-    
-    with water_col2:
-        st.metric(
-            label="Today Water",
+            label="Todays Water Temp",
             value=today_water,
-            help="Today's water temperature (* = forecast if actual not available)"
+            help="Today's water temperature (* = forecast if actual not available)",
+            delta=None  # Remove problematic delta calculation for now
         )
     
-    with water_col3:
-        st.metric(
-            label="Hottest Water (7 days)",
-            value=hottest_water,
-            help="Highest forecasted water temperature in the next 7 days"
-        )
+    # with graph_col:
+
+
+    # # Air Temperature Row
+    # st.markdown("**🌤️ Air Temperatures**")
+    # air_col1, air_col2, air_col3, air_col4 = st.columns(4)
     
-    with water_col4:
-        # Neoprene recommendation based on today's water temperature
-        neoprene_advice = "Check water temp"
-        if not df.empty:
-            today_data = df[df['Date'] == today]
-            if not today_data.empty:
-                # Get today's water temp (prefer actual, fallback to forecast)
-                actual_today = today_data[today_data['Type'] == 'Actual']
-                if not actual_today.empty:
-                    water_temp = actual_today['Temperature'].iloc[0]
-                else:
-                    forecast_today = today_data[today_data['Type'].isin(['Predicted', 'Physics Model'])]
-                    if not forecast_today.empty:
-                        water_temp = forecast_today['Temperature'].iloc[0]
-                    else:
-                        water_temp = None
+    # with air_col1:
+    #     st.metric(
+    #         label="Yesterday Avg/High", 
+    #         value=yesterday_air,
+    #         help="Yesterday's air temperature (average / high)"
+    #     )
+    
+    # with air_col2:
+    #     st.metric(
+    #         label="Today Avg/High",
+    #         value=today_air,
+    #         help="Today's air temperature (average / high)"
+    #     )
+    
+    # with air_col3:
+    #     st.metric(
+    #         label="Highest Air (7 days)",
+    #         value=hottest_air,
+    #         help="Highest daily maximum air temperature in the next 7 days"
+    #     )
+    
+    # with air_col4:
+    #     st.metric(
+    #         label="",
+    #         value="",
+    #         help=""
+    #     )
+    
+    # # Water Temperature Row  
+    # st.markdown("**🌊 Water Temperatures**")
+    # water_col1, water_col2, water_col3, water_col4 = st.columns(4)
+    
+    # with water_col1:
+    #     st.metric(
+    #         label="Yesterday Water",
+    #         value=yesterday_water,
+    #         help="Yesterday's water temperature"
+    #     )
+    
+    # with water_col2:
+    #     st.metric(
+    #         label="Today Water",
+    #         value=today_water,
+    #         help="Today's water temperature (* = forecast if actual not available)"
+    #     )
+    
+    # with water_col3:
+    #     st.metric(
+    #         label="Hottest Water (7 days)",
+    #         value=hottest_water,
+    #         help="Highest forecasted water temperature in the next 7 days"
+    #     )
+    
+    # with water_col4:
+    #     # Neoprene recommendation based on today's water temperature
+    #     neoprene_advice = "Check water temp"
+    #     if not df.empty:
+    #         today_data = df[df['Date'] == today]
+    #         if not today_data.empty:
+    #             # Get today's water temp (prefer actual, fallback to forecast)
+    #             actual_today = today_data[today_data['Type'] == 'Actual']
+    #             if not actual_today.empty:
+    #                 water_temp = actual_today['Temperature'].iloc[0]
+    #             else:
+    #                 forecast_today = today_data[today_data['Type'].isin(['Predicted', 'Physics Model'])]
+    #                 if not forecast_today.empty:
+    #                     water_temp = forecast_today['Temperature'].iloc[0]
+    #                 else:
+    #                     water_temp = None
                 
-                if water_temp is not None:
-                    if water_temp > 16:
-                        neoprene_advice = "No Way! 🌊"
-                    elif water_temp > 10:
-                        neoprene_advice = "If you like 🤷"
-                    else:
-                        neoprene_advice = "Yes! Unless superhero 🦸"
+    #             if water_temp is not None:
+    #                 if water_temp > 16:
+    #                     neoprene_advice = "No Way! 🌊"
+    #                 elif water_temp > 10:
+    #                     neoprene_advice = "If you like 🤷"
+    #                 else:
+    #                     neoprene_advice = "Yes! Unless superhero 🦸"
         
-        st.metric(
-            label="Need Neoprene?",
-            value=neoprene_advice,
-            help="Neoprene wetsuit recommendation based on today's water temperature"
-        )
+    #     st.metric(
+    #         label="Need Neoprene?",
+    #         value=neoprene_advice,
+    #         help="Neoprene wetsuit recommendation based on today's water temperature"
+    #     )
     
-    st.divider()
+    # st.divider()
 
 
 def main() -> None:
@@ -1991,12 +2235,44 @@ def main() -> None:
         st.cache_data.clear()
         st.rerun()
     
+    # Debug: Test Google Form submission (if enabled)
+    if debug_mode:
+        st.sidebar.header("🧪 Debug Tools")
+        
+        # Community submissions toggle
+        if st.sidebar.button("Toggle Community Submissions"):
+            st.session_state.community_submissions_override = not st.session_state.get('community_submissions_override', ENABLE_COMMUNITY_SUBMISSIONS)
+            st.rerun()
+        
+        current_status = st.session_state.get('community_submissions_override', ENABLE_COMMUNITY_SUBMISSIONS)
+        st.sidebar.write(f"Community Submissions: {'✅ Enabled' if current_status else '❌ Disabled'}")
+        
+        if ENABLE_COMMUNITY_SUBMISSIONS or st.session_state.get('community_submissions_override', False):
+            if st.sidebar.button("Test Google Form Submission"):
+                success = submit_community_temperature(datetime.now(), 16.5, "Debug Test")
+                if success:
+                    st.sidebar.success("Test submission sent!")
+                else:
+                    st.sidebar.error("Test submission failed!")
+            
+            if st.sidebar.button("Check Form Field IDs"):
+                st.sidebar.write("**Current Field IDs:**")
+                for key, value in FORM_FIELD_IDS.items():
+                    st.sidebar.write(f"- {key}: {value}")
+                st.sidebar.write(f"**Form URL:** {GOOGLE_FORM_URL}")
+    
     # Load reservoir data
     df = load_data()
     
     if df.empty:
         add_log_message("error", "No data available. Please check the data source.")
         return
+    
+    # Incorporate any community temperature submissions
+    df = incorporate_community_temps(df)
+    
+    # Store main dataframe in session state for form access
+    st.session_state.main_df = df
     
     # Initialize weather_df
     weather_df = None
@@ -2037,6 +2313,13 @@ def main() -> None:
         start_date = df['Date'].min() - pd.Timedelta(days=7)
         end_date = datetime.now() + timedelta(days=14)
         weather_df = get_weather_data(start_date, end_date)
+    
+    # Check if today's temperature is missing and show community form (if enabled)
+    community_enabled = ENABLE_COMMUNITY_SUBMISSIONS or st.session_state.get('community_submissions_override', False)
+    if community_enabled:
+        actual_df = df[df['Type'] == 'Actual'] if 'Type' in df.columns else df
+        if check_today_temperature_missing(actual_df):
+            create_community_temp_form()
     
     # Display temperature dashboard at the top
     create_temperature_dashboard(df, weather_df)
