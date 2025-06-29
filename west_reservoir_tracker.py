@@ -1498,50 +1498,26 @@ def create_line_chart(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> None
 
     # Check if we have different data types
     if "Type" in df.columns:
-        # Separate different data types
-        actual_data = df[df["Type"] == "Actual"]
-        imputed_data = df[df["Type"] == "Imputed"]
-        predicted_data = df[df["Type"] == "Predicted"]
+        # Combine all water temperature data into single series
+        water_temp_data = df[df["Type"].isin(["Actual", "Imputed", "Predicted"])].copy()
 
-        # Start with actual data as scatter points
-        fig = px.scatter(
-            actual_data,
+        # Create chart with all water temperature data as single blue dotted line
+        fig = px.line(
+            water_temp_data,
             x="Date",
             y="Temperature",
             title="West Reservoir Water Temperature",
             labels={"Temperature": "Temperature (°C)", "Date": "Date"},
         )
 
-        # Update actual data trace to be points only
+        # Update to blue dotted line with markers
         fig.update_traces(
             name="Water Temperature",
-            marker=dict(color="#1f77b4", size=8),
+            line=dict(color="blue", dash="dot", width=2),
+            marker=dict(color="blue", size=4),
+            mode="lines+markers",
             showlegend=True,
         )
-
-        # Add imputed data as a separate trace
-        if not imputed_data.empty:
-            fig.add_scatter(
-                x=imputed_data["Date"],
-                y=imputed_data["Temperature"],
-                mode="lines+markers",
-                name="Imputed",
-                line=dict(color="green", dash="dot"),
-                marker=dict(size=4, color="green"),
-                showlegend=True,
-            )
-
-        # Add predicted data as a separate trace
-        if not predicted_data.empty:
-            fig.add_scatter(
-                x=predicted_data["Date"],
-                y=predicted_data["Temperature"],
-                mode="lines+markers",
-                name="Predicted",
-                line=dict(color="orange", dash="dash"),
-                marker=dict(size=5, color="orange"),
-                showlegend=True,
-            )
 
         # Add weather data if available
         if weather_df is not None and not weather_df.empty:
@@ -1602,7 +1578,7 @@ def create_line_chart(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> None
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
 
 
 def create_monthly_analysis(df: pd.DataFrame) -> None:
@@ -1625,7 +1601,7 @@ def create_monthly_analysis(df: pd.DataFrame) -> None:
                 labels={"Temperature": "Avg Temperature (°C)"},
             )
             fig_monthly.update_traces(marker_color="lightblue")
-            st.plotly_chart(fig_monthly, use_container_width=True)
+            st.plotly_chart(fig_monthly, use_container_width=True, config={'staticPlot': True})
         else:
             add_log_message("info", "Not enough data for monthly analysis")
 
@@ -1639,7 +1615,7 @@ def create_monthly_analysis(df: pd.DataFrame) -> None:
             labels={"Temperature": "Temperature (°C)", "count": "Frequency"},
         )
         fig_hist.update_traces(marker_color="lightcoral")
-        st.plotly_chart(fig_hist, use_container_width=True)
+        st.plotly_chart(fig_hist, use_container_width=True, config={'staticPlot': True})
 
 
 def display_recent_data(df: pd.DataFrame) -> None:
@@ -2149,90 +2125,69 @@ def create_forecast_tab(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> No
     st.subheader("Recent Temps and 14-Day Forecast")
 
     if "Type" in forecast_df.columns:
-        # Separate different data types for the forecast period
-        actual_data = forecast_df[forecast_df["Type"] == "Actual"]
-        imputed_data = forecast_df[forecast_df["Type"] == "Imputed"]
-        predicted_data = forecast_df[forecast_df["Type"] == "Predicted"]
+        # Combine all water temperature data into single series
+        water_temp_data = forecast_df[
+            forecast_df["Type"].isin(["Actual", "Imputed", "Predicted"])
+        ].copy()
 
-        # Create forecast chart
-        fig = px.scatter(
-            actual_data,
+        # Create forecast chart with all water temperature data as single blue dotted line
+        fig = px.line(
+            water_temp_data,
             x="Date",
             y="Temperature",
             # title='Temperature Forecast (Last 7 Days + Next 14 Days)',
             labels={"Temperature": "Temperature (°C)", "Date": "Date"},
         )
 
+        # Update to blue dotted line with markers
         fig.update_traces(
             name="Water Temperature",
-            marker=dict(color="#1f77b4", size=8),
+            line=dict(color="blue", dash="dot", width=2),
+            marker=dict(color="blue", size=4),
+            mode="lines+markers",
             showlegend=True,
         )
 
-        # Add imputed data
-        if not imputed_data.empty:
-            fig.add_scatter(
-                x=imputed_data["Date"],
-                y=imputed_data["Temperature"],
-                mode="lines+markers",
-                name="Imputed",
-                line=dict(color="green", dash="dot"),
-                marker=dict(size=4, color="green"),
-                showlegend=True,
-            )
+        # Add weather data if available
+        if weather_df is not None and not weather_df.empty:
+            # Filter weather data for the same period
+            weather_forecast = weather_df[
+                (weather_df["Date"] >= forecast_start)
+                & (weather_df["Date"] <= forecast_end)
+            ].copy()
 
-        # Add predicted data with emphasis
-        if not predicted_data.empty:
-            fig.add_scatter(
-                x=predicted_data["Date"],
-                y=predicted_data["Temperature"],
-                mode="lines+markers",
-                name="Predicted",
-                line=dict(color="orange", dash="dash", width=3),
-                marker=dict(size=6, color="orange"),
-                showlegend=True,
-            )
-
-            # Add weather data if available
-            if weather_df is not None and not weather_df.empty:
-                # Filter weather data for the same period
-                weather_forecast = weather_df[
-                    (weather_df["Date"] >= forecast_start)
-                    & (weather_df["Date"] <= forecast_end)
-                ].copy()
-
-                if not weather_forecast.empty:
-                    # Add high temperatures
-                    if "Air_Temp_Max" in weather_forecast.columns:
-                        fig.add_scatter(
-                            x=weather_forecast["Date"],
-                            y=weather_forecast["Air_Temp_Max"],
-                            mode="lines",
-                            name="Air Temp High",
-                            line=dict(color="red", width=1, dash="dot"),
-                            showlegend=True,
-                        )
-
-                    # Add low temperatures
-                    if "Air_Temp_Min" in weather_forecast.columns:
-                        fig.add_scatter(
-                            x=weather_forecast["Date"],
-                            y=weather_forecast["Air_Temp_Min"],
-                            mode="lines",
-                            name="Air Temp Low",
-                            line=dict(color="lightblue", width=1, dash="dot"),
-                            showlegend=True,
-                        )
-
-                    # Add average air temperature
+            if not weather_forecast.empty:
+                # Add high temperatures
+                if "Air_Temp_Max" in weather_forecast.columns:
                     fig.add_scatter(
                         x=weather_forecast["Date"],
-                        y=weather_forecast["Air_Temperature"],
+                        y=weather_forecast["Air_Temp_Max"],
                         mode="lines",
-                        name="Air Temp Avg",
-                        line=dict(color="gray", width=2, dash="dash"),
+                        name="Air Temp High",
+                        line=dict(color="red", width=1, dash="dot"),
                         showlegend=True,
                     )
+
+                # Add low temperatures
+                if "Air_Temp_Min" in weather_forecast.columns:
+                    fig.add_scatter(
+                        x=weather_forecast["Date"],
+                        y=weather_forecast["Air_Temp_Min"],
+                        mode="lines",
+                        name="Air Temp Low",
+                        line=dict(color="lightblue", width=1, dash="dot"),
+                        showlegend=True,
+                    )
+
+                # Add average air temperature
+                fig.add_scatter(
+                    x=weather_forecast["Date"],
+                    y=weather_forecast["Air_Temperature"],
+                    mode="lines",
+                    name="Air Temp Avg",
+                    line=dict(color="gray", width=2, dash="dash"),
+                    showlegend=True,
+                )
 
             # Add vertical line for "today" using shapes instead of add_vline
             fig.add_shape(
@@ -2270,7 +2225,7 @@ def create_forecast_tab(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> No
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
 
     # Show forecast summary
     if "Type" in forecast_df.columns:
@@ -2562,7 +2517,7 @@ def create_temperature_dashboard(
 
     with water_col1:
         st.metric(
-            label="Todays Water Temp",
+            label="Today's Water Temp",
             value=today_water,
             help="Today's water temperature (* = forecast if actual not available)",
             delta=None,  # Remove problematic delta calculation for now
@@ -2613,7 +2568,7 @@ def create_temperature_dashboard(
         )
     with col4:
         st.metric(
-            label="Hottest water in  next 7 days)",
+            label="Hottest water in  next 7 days",
             value=hottest_water,
             help="Highest forecasted water temperature in the next 7 days",
         )
