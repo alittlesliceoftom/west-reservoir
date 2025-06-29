@@ -58,7 +58,7 @@ class WaterTemperatureModel:
             seasonal = self.seasonal_offset(day_of_year)
             
             # Core differential equation: dT/dt = k*(T_air - T_water) + seasonal
-            temp_diff = air_temps[i] - water_temps[i-1]
+            temp_diff = air_temps[i-1] - water_temps[i-1]
             dT_dt = self.k * temp_diff + seasonal / 365  # Daily rate
             
             water_temps[i] = water_temps[i-1] + dT_dt

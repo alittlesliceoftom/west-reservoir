@@ -33,7 +33,7 @@ def add_log_message(message_type: str, message: str) -> None:
 def display_log_messages() -> None:
     """Display all accumulated log messages only in debug mode."""
     if st.session_state.log_messages and st.session_state.get('debug_mode', False):
-        st.subheader("📝 Processing Log")
+        st.subheader("Processing Log")
         for msg_type, msg in st.session_state.log_messages:
             if msg_type == "info":
                 st.info(msg)
@@ -571,7 +571,7 @@ def create_community_temp_form() -> None:
                 help="Optional: Enter your name or identifier"
             )
         
-        st.markdown("**📝 Guidelines:**")
+        st.markdown("**Guidelines:**")
         st.markdown("""
         - If you're at the reservoir or on instagram, please add the temperature from the board.
         """)
@@ -586,15 +586,15 @@ def create_community_temp_form() -> None:
                 success = submit_community_temperature(today, temp_input, submitter)
                 
                 if success:
-                    st.success(f"✅ THANK YOU! Temperature {temp_input}°C submitted for review.")
+                    st.success(f"Thank you! Temperature {temp_input}°C submitted for review.")
                     st.info("Your submission will be reviewed and added to the official data if approved.")
                     st.balloons()  # Celebration animation
                     # Rerun to update the dashboard
                     st.rerun()
                 else:
-                    st.error("❌ Failed to submit temperature. Please try again.")
+                    st.error("Failed to submit temperature. Please try again.")
             else:
-                st.error("❌ Please enter a temperature between 0°C and 30°C.")
+                st.error("Please enter a temperature between 0°C and 30°C.")
 
 
 @st.cache_data
@@ -1196,7 +1196,7 @@ def create_temperature_predictions(reservoir_df: pd.DataFrame, weather_df: pd.Da
 
 def display_statistics(df: pd.DataFrame) -> None:
     """Display temperature statistics in the sidebar."""
-    st.sidebar.header("📊 Statistics")
+    st.sidebar.header("Statistics")
     
     latest_temp = df.iloc[-1]['Temperature']
     latest_date = df.iloc[-1]['Date'].strftime('%d/%m/%Y')
@@ -1213,7 +1213,7 @@ def display_statistics(df: pd.DataFrame) -> None:
 
 def create_line_chart(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> None:
     """Create and display the main temperature line chart."""
-    st.subheader("📈 Temperature Over Time")
+    st.subheader("Temperature Over Time")
     
     # Check if we have different data types
     if 'Type' in df.columns:
@@ -1333,7 +1333,7 @@ def create_monthly_analysis(df: pd.DataFrame) -> None:
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("🗓️ Monthly Averages")
+        st.subheader("Monthly Averages")
         df_monthly = df.copy()
         df_monthly['Month'] = df_monthly['Date'].dt.to_period('M')
         monthly_avg = df_monthly.groupby('Month')['Temperature'].mean().reset_index()
@@ -1353,7 +1353,7 @@ def create_monthly_analysis(df: pd.DataFrame) -> None:
             add_log_message("info", "Not enough data for monthly analysis")
     
     with col2:
-        st.subheader("📊 Temperature Distribution")
+        st.subheader("Temperature Distribution")
         fig_hist = px.histogram(
             df, 
             x='Temperature', 
@@ -1367,7 +1367,7 @@ def create_monthly_analysis(df: pd.DataFrame) -> None:
 
 def display_recent_data(df: pd.DataFrame) -> None:
     """Display recent temperature readings table."""
-    st.subheader("📋 Recent Readings")
+    st.subheader("Recent Readings")
     recent_data = df.tail(10).copy()
     recent_data['Date'] = recent_data['Date'].dt.strftime('%d/%m/%Y')
     st.dataframe(recent_data.iloc[::-1], use_container_width=True, hide_index=True)
@@ -1375,7 +1375,7 @@ def display_recent_data(df: pd.DataFrame) -> None:
 
 def create_physics_model_analysis(df: pd.DataFrame, weather_df: pd.DataFrame) -> None:
     """Create physics model comparison and analysis section."""
-    st.subheader("🔬 Physics Model vs Daily Temperature Correlation")
+    st.subheader("Physics Model vs Daily Temperature Correlation")
     
     if weather_df is None or weather_df.empty:
         st.warning("No weather data available for physics model analysis.")
@@ -1538,7 +1538,7 @@ def create_physics_model_analysis(df: pd.DataFrame, weather_df: pd.DataFrame) ->
     st.pyplot(fig)
     
     # Analysis comparison table
-    st.markdown("### 📊 Model Comparison")
+    st.markdown("### Model Comparison")
     
     comparison_data = {
         'Metric': ['R² Score', 'RMSE (°C)', 'MAE (°C)', 'Simple Correlation', 'Parameters'],
@@ -1576,7 +1576,7 @@ def create_physics_model_analysis(df: pd.DataFrame, weather_df: pd.DataFrame) ->
 
 def create_correlation_analysis(df: pd.DataFrame, weather_df: pd.DataFrame) -> None:
     """Create correlation analysis between water and air temperature."""
-    st.subheader("🔬 Water vs Air Temperature Correlation Analysis")
+    st.subheader("Water vs Air Temperature Correlation Analysis")
     
     if weather_df is None or weather_df.empty:
         st.warning("No weather data available for correlation analysis.")
@@ -1674,7 +1674,7 @@ def create_correlation_analysis(df: pd.DataFrame, weather_df: pd.DataFrame) -> N
     st.pyplot(fig)
     
     # Interpretation text
-    st.markdown("**📊 Interpretation:**")
+    st.markdown("**Interpretation:**")
     
     # Correlation strength interpretation
     if abs(correlation) >= 0.8:
@@ -1716,7 +1716,7 @@ def create_download_button(df: pd.DataFrame) -> None:
 
 def create_forecast_tab(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> None:
     """Create the forecast tab content."""
-    st.header("🔮 Temperature Forecast")
+    st.header("Temperature Forecast")
     
     # Filter data for the last 7 days and next 14 days
     today = pd.Timestamp(datetime.now().date())
@@ -1730,7 +1730,7 @@ def create_forecast_tab(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> No
         return
     
     # Show forecast chart
-    st.subheader("📈 Recent temps & 14-Day Forecast")
+    st.subheader("Recent Temps and 14-Day Forecast")
     
     if 'Type' in forecast_df.columns:
         # Separate different data types for the forecast period
@@ -1743,7 +1743,7 @@ def create_forecast_tab(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> No
             actual_data, 
             x='Date', 
             y='Temperature',
-            title='Temperature Forecast (Last 7 Days + Next 14 Days)',
+            # title='Temperature Forecast (Last 7 Days + Next 14 Days)',
             labels={'Temperature': 'Temperature (°C)', 'Date': 'Date'}
         )
         
@@ -1861,49 +1861,49 @@ def create_forecast_tab(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> No
     if 'Type' in forecast_df.columns:
         predicted_data = forecast_df[forecast_df['Type'] == 'Predicted']
         if not predicted_data.empty:            
-            # Show forecast table
-            st.subheader("📅 Detailed Forecast")
-            forecast_table = predicted_data[['Date', 'Temperature']].copy()
-            
-            # Add air temperature data if available
-            if weather_df is not None and not weather_df.empty:
-                # Merge with weather data for the same dates
-                weather_forecast = weather_df[weather_df['Date'].isin(predicted_data['Date'])]
+            # Show forecast table in expandable section
+            with st.expander("Detailed Forecast", expanded=False):
+                forecast_table = predicted_data[['Date', 'Temperature']].copy()
                 
-                if not weather_forecast.empty:
-                    forecast_table = pd.merge(
-                        forecast_table, 
-                        weather_forecast[['Date', 'Air_Temperature', 'Air_Temp_Max']], 
-                        on='Date', 
-                        how='left'
-                    )
+                # Add air temperature data if available
+                if weather_df is not None and not weather_df.empty:
+                    # Merge with weather data for the same dates
+                    weather_forecast = weather_df[weather_df['Date'].isin(predicted_data['Date'])]
                     
-                    # Rename columns for display
-                    if 'Air_Temperature' in forecast_table.columns:
-                        forecast_table = forecast_table.rename(columns={'Air_Temperature': 'Air Temp Avg'})
-                    if 'Air_Temp_Max' in forecast_table.columns:
-                        forecast_table = forecast_table.rename(columns={'Air_Temp_Max': 'Air Temp High'})
-            
-            # Format the table
-            forecast_table.loc[:, 'Date'] = forecast_table['Date'].dt.strftime('%a %d/%m')
-            forecast_table.loc[:, 'Temperature'] = forecast_table['Temperature'].round(1)
-            
-            # Round air temperature columns if they exist
-            for col in ['Air Temp Avg', 'Air Temp High']:
-                if col in forecast_table.columns:
-                    forecast_table.loc[:, col] = forecast_table[col].round(1)
-            
-            # Rename water temperature column for clarity
-            forecast_table = forecast_table.rename(columns={'Temperature': 'Water Temp'})
-            
-            st.dataframe(forecast_table, use_container_width=True, hide_index=True)
+                    if not weather_forecast.empty:
+                        forecast_table = pd.merge(
+                            forecast_table, 
+                            weather_forecast[['Date', 'Air_Temperature', 'Air_Temp_Max']], 
+                            on='Date', 
+                            how='left'
+                        )
+                        
+                        # Rename columns for display
+                        if 'Air_Temperature' in forecast_table.columns:
+                            forecast_table = forecast_table.rename(columns={'Air_Temperature': 'Air Temp Avg'})
+                        if 'Air_Temp_Max' in forecast_table.columns:
+                            forecast_table = forecast_table.rename(columns={'Air_Temp_Max': 'Air Temp High'})
+                
+                # Format the table
+                forecast_table.loc[:, 'Date'] = forecast_table['Date'].dt.strftime('%a %d/%m')
+                forecast_table.loc[:, 'Temperature'] = forecast_table['Temperature'].round(1)
+                
+                # Round air temperature columns if they exist
+                for col in ['Air Temp Avg', 'Air Temp High']:
+                    if col in forecast_table.columns:
+                        forecast_table.loc[:, col] = forecast_table[col].round(1)
+                
+                # Rename water temperature column for clarity
+                forecast_table = forecast_table.rename(columns={'Temperature': 'Water Temp'})
+                
+                st.dataframe(forecast_table, use_container_width=True, hide_index=True)
         else:
             add_log_message("info", "No predictions available. Enable predictions in the sidebar to see forecasts.")
 
 
 def create_historical_tab(df: pd.DataFrame, actual_df: pd.DataFrame, weather_df: pd.DataFrame = None) -> None:
     """Create the historical data and statistics tab content."""
-    st.header("📊 Historical Data & Statistics")
+    st.header("Historical Data and Statistics")
     
     # Filter data to only show up to today's date (no future predictions/forecasts)
     today = pd.Timestamp(datetime.now().date())
@@ -2000,7 +2000,7 @@ def create_historical_tab(df: pd.DataFrame, actual_df: pd.DataFrame, weather_df:
 
 def create_temperature_dashboard(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> None:
     """Create a dashboard showing key temperature metrics."""
-    st.markdown("### 📊 Temperature Dashboard")
+    # st.markdown("### Temperature Dashboard")
     
     today = pd.Timestamp(datetime.now().date())
     yesterday = today - pd.Timedelta(days=1)
@@ -2087,8 +2087,8 @@ def create_temperature_dashboard(df: pd.DataFrame, weather_df: pd.DataFrame = No
                 hottest_water_date = hottest_water_row['Date'].strftime('%a %d')
                 hottest_water = f"{hottest_water_temp:.1f}°C on {hottest_water_date}"
     
-    st.markdown("**🌊 Water Temperatures**")
-    water_col1, graph_col = st.columns(2)
+    st.markdown("## Water Temperatures")
+    water_col1, col2 = st.columns(2)
 
     with water_col1:
         st.metric(
@@ -2096,6 +2096,37 @@ def create_temperature_dashboard(df: pd.DataFrame, weather_df: pd.DataFrame = No
             value=today_water,
             help="Today's water temperature (* = forecast if actual not available)",
             delta=None  # Remove problematic delta calculation for now
+        )
+
+    with col2:
+        # Neoprene recommendation based on today's water temperature
+        neoprene_advice = "Check water temp"
+        if not df.empty:
+            today_data = df[df['Date'] == today]
+            if not today_data.empty:
+                # Get today's water temp (prefer actual, fallback to forecast)
+                actual_today = today_data[today_data['Type'] == 'Actual']
+                if not actual_today.empty:
+                    water_temp = actual_today['Temperature'].iloc[0]
+                else:
+                    forecast_today = today_data[today_data['Type'].isin(['Predicted', 'Physics Model'])]
+                    if not forecast_today.empty:
+                        water_temp = forecast_today['Temperature'].iloc[0]
+                    else:
+                        water_temp = None
+                
+                if water_temp is not None:
+                    if water_temp > 16:
+                        neoprene_advice = "No Way! ☀️"
+                    elif water_temp > 10:
+                        neoprene_advice = "If you like 🤷"
+                    else:
+                        neoprene_advice = "Yes! Unless you're a superhero ❄️"
+        
+        st.metric(
+        label="Need Neoprene?",
+        value=neoprene_advice,
+        help="Neoprene wetsuit recommendation based on today's water temperature"
         )
     
     # with graph_col:
@@ -2194,7 +2225,8 @@ def create_temperature_dashboard(df: pd.DataFrame, weather_df: pd.DataFrame = No
 
 def main() -> None:
     """Main application function."""
-    st.title("🌡️ West Reservoir Temperature Tracker")
+    st.image("image.png")
+    st.title("West Reservoir Temperature Tracker")
     st.markdown("Tracking and forecasting water temperature at West Reservoir, London")
     
     # Add info explainer
@@ -2205,7 +2237,7 @@ def main() -> None:
     """)
     
     # Sidebar options
-    st.sidebar.header("🔮 Prediction Options")
+    st.sidebar.header("Prediction Options")
     enable_predictions = st.sidebar.checkbox("Enable temperature predictions", value=True)
     
     if enable_predictions:
@@ -2226,18 +2258,18 @@ def main() -> None:
         # Store in session state for use in prediction functions
         st.session_state.use_physics_imputation = (imputation_method == "Physics-based")
     
-    st.sidebar.header("🔧 Debug Options")
+    st.sidebar.header("Debug Options")
     debug_mode = st.sidebar.checkbox("Debug mode", value=False)
     st.session_state.debug_mode = debug_mode
     
-    st.sidebar.header("🔄 Data Management")
+    st.sidebar.header("Data Management")
     if st.sidebar.button("Clear Cache & Refresh Data"):
         st.cache_data.clear()
         st.rerun()
     
     # Debug: Test Google Form submission (if enabled)
     if debug_mode:
-        st.sidebar.header("🧪 Debug Tools")
+        st.sidebar.header("Debug Tools")
         
         # Community submissions toggle
         if st.sidebar.button("Toggle Community Submissions"):
@@ -2245,7 +2277,7 @@ def main() -> None:
             st.rerun()
         
         current_status = st.session_state.get('community_submissions_override', ENABLE_COMMUNITY_SUBMISSIONS)
-        st.sidebar.write(f"Community Submissions: {'✅ Enabled' if current_status else '❌ Disabled'}")
+        st.sidebar.write(f"Community Submissions: {'Enabled' if current_status else 'Disabled'}")
         
         if ENABLE_COMMUNITY_SUBMISSIONS or st.session_state.get('community_submissions_override', False):
             if st.sidebar.button("Test Google Form Submission"):
@@ -2329,7 +2361,7 @@ def main() -> None:
     display_statistics(actual_df)
     
     # Create tabs
-    tab1, tab2 = st.tabs(["🔮 Forecast", "📈 Historical Data & Statistics"])
+    tab1, tab2 = st.tabs(["Forecast", "Historical Data and Statistics"])
     
     with tab1:
         create_forecast_tab(df, weather_df)

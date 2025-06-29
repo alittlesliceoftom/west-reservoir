@@ -75,3 +75,16 @@ pip freeze > requirements.txt
 - Error handling is implemented for data loading failures
 - The app includes responsive design considerations
 - Monthly aggregations and statistical calculations are performed in-memory
+
+## UI/UX Guidelines
+
+### Text and Formatting
+- **Titles and Headers**: Use Title Case format (e.g., "Temperature Over Time", "Historical Data and Statistics")
+- **No Emojis**: Do not use emojis in titles, headers, or user-facing text elements
+- **Clean Interface**: Maintain a professional, clean appearance without decorative symbols
+
+### Examples
+- ✅ Correct: `st.header("Temperature Forecast")`
+- ❌ Incorrect: `st.header("🔮 Temperature Forecast")`
+- ✅ Correct: `st.subheader("Recent Readings")`
+- ❌ Incorrect: `st.subheader("📋 Recent readings")`
