@@ -10,13 +10,14 @@ from meteostat import Point, Daily
 
 class WaterTemperatureModel:
     """
-    Degree-day accumulation model for water temperature prediction
+    Simplified heat transfer model for water temperature prediction
 
-    dT/dt = k * (T_air - T_water) + seasonal_offset(DOY)
+    dT/dt = k * (T_air_yesterday - T_water)
 
     Where:
     - k: heat transfer coefficient (day^-1)
-    - seasonal_offset: sinusoidal adjustment for solar/seasonal effects
+    
+    Note: Seasonal offset component removed for experimentation
     """
 
     def __init__(self):
@@ -57,12 +58,12 @@ class WaterTemperatureModel:
         for i in range(1, n_days):
             day_of_year = dates[i].timetuple().tm_yday
 
-            # Seasonal offset calculation
-            seasonal = self.seasonal_offset(day_of_year)
+            # Seasonal offset calculation (disabled for experiment)
+            # seasonal = self.seasonal_offset(day_of_year)
 
-            # Core differential equation: dT/dt = k*(T_air - T_water) + seasonal
+            # Core differential equation: dT/dt = k*(T_air - T_water) [seasonal component removed]
             temp_diff = air_temps[i - 1] - water_temps[i - 1]
-            dT_dt = self.k * temp_diff + seasonal / 365  # Daily rate
+            dT_dt = self.k * temp_diff  # Pure heat transfer - Daily rate
 
             water_temps[i] = water_temps[i - 1] + dT_dt
 
@@ -86,20 +87,20 @@ class WaterTemperatureModel:
         """
 
         def objective(params):
-            self.k, self.seasonal_amp, self.seasonal_phase = params
+            self.k = params[0]  # Only optimize heat transfer coefficient
             predicted = self.predict_temperature(
                 air_temps, observed_water_temps[0], dates
             )
             return np.sum((predicted - observed_water_temps) ** 2)
 
-        # Parameter bounds: k (0.01-0.2), seasonal_amp (0-5), phase (0-365)
-        bounds = [(0.01, 0.5), (0, 5), (0, 365)]
-        initial_guess = [self.k, self.seasonal_amp, self.seasonal_phase]
+        # Parameter bounds: only k (0.01-0.5) - wider range for experimentation
+        bounds = [(0.01, 0.5)]
+        initial_guess = [self.k]
 
         result = minimize(objective, initial_guess, bounds=bounds, method="L-BFGS-B")
 
         if result.success:
-            self.k, self.seasonal_amp, self.seasonal_phase = result.x
+            self.k = result.x[0]  # Only assign heat transfer coefficient
             return result
         else:
             print("Warning: Optimization failed")

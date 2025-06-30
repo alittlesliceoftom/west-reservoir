@@ -1735,10 +1735,10 @@ def create_physics_model_analysis(df: pd.DataFrame, weather_df: pd.DataFrame) ->
     )[0, 1]
 
     # Create visualization comparing physics model vs correlation patterns
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
     # Plot 1: Temperature difference vs seasonal offset
-    ax1 = axes[0, 0]
+    ax1 = axes[0]
     seasonal_offsets = [
         model.seasonal_offset(doy) for doy in merged_data["Day_of_Year"]
     ]
@@ -1755,25 +1755,25 @@ def create_physics_model_analysis(df: pd.DataFrame, weather_df: pd.DataFrame) ->
     ax1.grid(True, alpha=0.3)
     plt.colorbar(scatter, ax=ax1, label="Day of Year")
 
-    # Plot 2: Heat transfer rate vs correlation
-    ax2 = axes[0, 1]
-    if "30d" in correlations:
-        heat_transfer_rate = model.k * merged_data["Air_Water_Diff"]
-        correlation_30d = correlations["30d"]
+    # # Plot 2: Heat transfer rate vs correlation
+    # ax2 = axes[0, 1]
+    # if "30d" in correlations:
+    #     heat_transfer_rate = model.k * merged_data["Air_Water_Diff"]
+    #     correlation_30d = correlations["30d"]
 
-        # Align data for comparison
-        min_len = min(len(heat_transfer_rate), len(correlation_30d))
-        if min_len > 0:
-            ax2.scatter(
-                heat_transfer_rate[-min_len:], correlation_30d[-min_len:], alpha=0.6
-            )
-            ax2.set_xlabel("Heat Transfer Rate (k × ΔT)")
-            ax2.set_ylabel("30-day Rolling Correlation")
-            ax2.set_title("Heat Transfer Rate vs Rolling Correlation")
-            ax2.grid(True, alpha=0.3)
+    #     # Align data for comparison
+    #     min_len = min(len(heat_transfer_rate), len(correlation_30d))
+    #     if min_len > 0:
+    #         ax2.scatter(
+    #             heat_transfer_rate[-min_len:], correlation_30d[-min_len:], alpha=0.6
+    #         )
+    #         ax2.set_xlabel("Heat Transfer Rate (k × ΔT)")
+    #         ax2.set_ylabel("30-day Rolling Correlation")
+    #         ax2.set_title("Heat Transfer Rate vs Rolling Correlation")
+    #         ax2.grid(True, alpha=0.3)
 
     # Plot 3: Physics predictions vs actual vs linear model
-    ax3 = axes[1, 0]
+    ax3 = axes[1]
     ax3.scatter(
         training_water_temps,
         physics_predictions,
@@ -1817,50 +1817,50 @@ def create_physics_model_analysis(df: pd.DataFrame, weather_df: pd.DataFrame) ->
     ax3.legend()
     ax3.grid(True, alpha=0.3)
 
-    # Plot 4: Time series of correlations and physics variables
-    ax4 = axes[1, 1]
+    # # Plot 4: Time series of correlations and physics variables
+    # ax4 = axes[1, 1]
 
-    # Plot 30-day rolling correlation if available
-    if "30d" in correlations and len(correlations["30d"]) > 0:
-        correlation_dates = merged_data["Date"].iloc[-len(correlations["30d"]) :]
-        ax4.plot(
-            correlation_dates,
-            correlations["30d"],
-            "b-",
-            label="30d Rolling Correlation",
-            linewidth=2,
-        )
+    # # Plot 30-day rolling correlation if available
+    # if "30d" in correlations and len(correlations["30d"]) > 0:
+    #     correlation_dates = merged_data["Date"].iloc[-len(correlations["30d"]) :]
+    #     ax4.plot(
+    #         correlation_dates,
+    #         correlations["30d"],
+    #         "b-",
+    #         label="30d Rolling Correlation",
+    #         linewidth=2,
+    #     )
 
-    # Plot normalized seasonal component
-    normalized_seasonal = np.array(seasonal_offsets) / max(
-        abs(np.array(seasonal_offsets))
-    )
-    ax4.plot(
-        merged_data["Date"],
-        normalized_seasonal,
-        "g--",
-        label="Normalized Seasonal Effect",
-        alpha=0.7,
-    )
+    # # Plot normalized seasonal component
+    # normalized_seasonal = np.array(seasonal_offsets) / max(
+    #     abs(np.array(seasonal_offsets))
+    # )
+    # ax4.plot(
+    #     merged_data["Date"],
+    #     normalized_seasonal,
+    #     "g--",
+    #     label="Normalized Seasonal Effect",
+    #     alpha=0.7,
+    # )
 
-    # Plot normalized heat transfer coefficient effect
-    normalized_k_effect = (model.k * merged_data["Air_Water_Diff"]) / max(
-        abs(model.k * merged_data["Air_Water_Diff"])
-    )
-    ax4.plot(
-        merged_data["Date"],
-        normalized_k_effect,
-        "r:",
-        label="Normalized Heat Transfer",
-        alpha=0.7,
-    )
+    # # Plot normalized heat transfer coefficient effect
+    # normalized_k_effect = (model.k * merged_data["Air_Water_Diff"]) / max(
+    #     abs(model.k * merged_data["Air_Water_Diff"])
+    # )
+    # ax4.plot(
+    #     merged_data["Date"],
+    #     normalized_k_effect,
+    #     "r:",
+    #     label="Normalized Heat Transfer",
+    #     alpha=0.7,
+    # )
 
-    ax4.set_xlabel("Date")
-    ax4.set_ylabel("Normalized Values")
-    ax4.set_title("Time Series: Correlation vs Physics Components")
-    ax4.legend()
-    ax4.grid(True, alpha=0.3)
-    ax4.tick_params(axis="x", rotation=45)
+    # ax4.set_xlabel("Date")
+    # ax4.set_ylabel("Normalized Values")
+    # ax4.set_title("Time Series: Correlation vs Physics Components")
+    # ax4.legend()
+    # ax4.grid(True, alpha=0.3)
+    # ax4.tick_params(axis="x", rotation=45)
 
     plt.tight_layout()
     st.pyplot(fig)
