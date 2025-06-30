@@ -93,7 +93,7 @@ class WaterTemperatureModel:
             return np.sum((predicted - observed_water_temps) ** 2)
 
         # Parameter bounds: k (0.01-0.2), seasonal_amp (0-5), phase (0-365)
-        bounds = [(0.01, 0.2), (0, 5), (0, 365)]
+        bounds = [(0.01, 0.5), (0, 5), (0, 365)]
         initial_guess = [self.k, self.seasonal_amp, self.seasonal_phase]
 
         result = minimize(objective, initial_guess, bounds=bounds, method="L-BFGS-B")
