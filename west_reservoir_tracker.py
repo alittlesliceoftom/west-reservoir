@@ -1207,6 +1207,14 @@ def create_temperature_predictions_physics(
         # Prepare forecast data
         forecast_dates = future_weather["Date"].dt.to_pydatetime()
         forecast_air_temps = future_weather["Air_Temperature"].values
+        
+        # Get today's air temperature for proper i-1 indexing
+        today = pd.Timestamp(datetime.now().date())
+        today_weather = historical_weather[historical_weather["Date"] == today]
+        today_air_temp = None
+        if not today_weather.empty:
+            today_air_temp = today_weather["Air_Temperature"].iloc[-1]
+            add_log_message("info", f"🌡️ Using today's air temperature: {today_air_temp:.1f}°C for forecast")
 
         # Generate water temperature forecast
         try:
@@ -1215,6 +1223,7 @@ def create_temperature_predictions_physics(
                 current_water_temp,
                 forecast_dates[0],
                 len(forecast_dates),
+                today_air_temp=today_air_temp,
             )
 
             # Create prediction dataframe

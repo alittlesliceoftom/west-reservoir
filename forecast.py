@@ -106,7 +106,7 @@ class WaterTemperatureModel:
             return None
 
     def forecast(
-        self, air_temp_forecast, current_water_temp, start_date, forecast_days=14
+        self, air_temp_forecast, current_water_temp, start_date, forecast_days=14, today_air_temp=None
     ):
         """
         Generate water temperature forecast
@@ -114,18 +114,38 @@ class WaterTemperatureModel:
         Parameters:
         -----------
         air_temp_forecast : array-like
-            Forecasted air temperatures
+            Forecasted air temperatures (starting from tomorrow)
         current_water_temp : float
             Current water temperature
         start_date : datetime
-            Start date for forecast
+            Start date for forecast (tomorrow)
         forecast_days : int
             Number of days to forecast
+        today_air_temp : float, optional
+            Today's air temperature (needed for i-1 indexing)
         """
         dates = [start_date + timedelta(days=i) for i in range(forecast_days)]
-        return self.predict_temperature(
-            air_temp_forecast[:forecast_days], current_water_temp, dates
-        )
+        
+        # If today's air temp is provided, prepend it to the forecast
+        # This ensures air_temps[i-1] works correctly for tomorrow's prediction
+        if today_air_temp is not None:
+            # Prepend today's air temperature to the forecast array
+            air_temps_with_today = [today_air_temp] + list(air_temp_forecast[:forecast_days])
+            # Prepend today's date to the dates array
+            today_date = start_date - timedelta(days=1)
+            dates_with_today = [today_date] + dates
+            
+            # Predict temperatures (this will use today's air temp for tomorrow's prediction)
+            predictions = self.predict_temperature(
+                air_temps_with_today, current_water_temp, dates_with_today
+            )
+            # Return only the forecast predictions (skip today's prediction)
+            return predictions[1:]
+        else:
+            # Fallback to original behavior if today's air temp not provided
+            return self.predict_temperature(
+                air_temp_forecast[:forecast_days], current_water_temp, dates
+            )
 
 
 # Data loading functions
