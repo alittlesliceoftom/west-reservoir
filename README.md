@@ -12,6 +12,11 @@ A Streamlit dashboard for tracking and predicting water temperature at West Rese
 
 ## Installation
 
+0. Create env: 
+```bash
+python -m venv env
+```
+
 1. Activate the virtual environment:
 ```bash
 source env/bin/activate  # On macOS/Linux

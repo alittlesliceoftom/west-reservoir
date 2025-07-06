@@ -189,11 +189,10 @@ def generate_synthetic_weather_fallback(
         synthetic_data = []
         for date in future_dates:
             day_of_year = date.timetuple().tm_yday
-            # London seasonal temperature pattern
+            # London seasonal temperature pattern (no random variation)
             seasonal_avg = 10 + 8 * np.sin(2 * np.pi * (day_of_year - 80) / 365.25)
-            daily_variation = np.random.normal(0, 3)
 
-            avg_temp = seasonal_avg + daily_variation
+            avg_temp = seasonal_avg
             synthetic_data.append(
                 {
                     "Date": pd.Timestamp(date),
@@ -227,12 +226,11 @@ def generate_synthetic_weather_fallback(
         day_of_year = date.timetuple().tm_yday
         seasonal_factor = (
             np.sin(2 * np.pi * day_of_year / 365.25) * 2
-        )  # +/- 2°C seasonal variation
-        daily_random = np.random.normal(0, std_temp * 0.4)  # Day-to-day variation
+        )  # +/- 2°C seasonal variation (no random component)
 
-        # Generate temperatures based on recent patterns
-        future_temp_max = recent_avg_high + seasonal_factor + daily_random
-        future_temp_min = recent_avg_low + seasonal_factor + daily_random
+        # Generate temperatures based on recent patterns (no random variation)
+        future_temp_max = recent_avg_high + seasonal_factor
+        future_temp_min = recent_avg_low + seasonal_factor
         future_temp_avg = (future_temp_max + future_temp_min) / 2
 
         synthetic_data.append(

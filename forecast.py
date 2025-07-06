@@ -247,19 +247,17 @@ def generate_synthetic_data():
     dates = pd.date_range("2023-01-01", "2023-12-31", freq="D")
     n_days = len(dates)
 
-    # Synthetic air temperature with seasonal cycle + noise
+    # Synthetic air temperature with seasonal cycle (no random noise)
     day_of_year = np.array([d.timetuple().tm_yday for d in dates])
     air_temps = (
         12
         + 8 * np.sin(2 * np.pi * (day_of_year - 80) / 365)
-        + np.random.normal(0, 3, n_days)
     )
 
-    # "True" water temperatures (for testing) - more damped, delayed
+    # "True" water temperatures (for testing) - more damped, delayed (no random noise)
     water_temps = (
         12
         + 5 * np.sin(2 * np.pi * (day_of_year - 120) / 365)
-        + np.random.normal(0, 1, n_days)
     )
 
     return dates, air_temps, water_temps
@@ -426,10 +424,10 @@ if __name__ == "__main__":
         print(f"📅 Starting from: {latest_date.strftime('%Y-%m-%d')}")
         print(f"🌡️  Current water temp: {current_water_temp:.1f}°C")
 
-        # Generate example future air temperatures (seasonal appropriate)
+        # Generate example future air temperatures (seasonal appropriate, no random noise)
         day_of_year = latest_date.timetuple().tm_yday
         base_temp = 12 + 8 * np.sin(2 * np.pi * (day_of_year - 80) / 365)
-        future_air_temps = [base_temp + np.random.normal(0, 2) for _ in range(14)]
+        future_air_temps = [base_temp + (i * 0.1) for i in range(14)]  # Small linear trend instead of random
 
         start_date = latest_date + timedelta(days=1)
         forecast = model.forecast(future_air_temps, current_water_temp, start_date, 14)
