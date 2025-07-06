@@ -16,7 +16,7 @@ class WaterTemperatureModel:
 
     Where:
     - k: heat transfer coefficient (day^-1)
-    
+
     Note: Seasonal offset component removed for experimentation
     """
 
@@ -107,7 +107,12 @@ class WaterTemperatureModel:
             return None
 
     def forecast(
-        self, air_temp_forecast, current_water_temp, start_date, forecast_days=14, today_air_temp=None
+        self,
+        air_temp_forecast,
+        current_water_temp,
+        start_date,
+        forecast_days=14,
+        today_air_temp=None,
     ):
         """
         Generate water temperature forecast
@@ -126,16 +131,18 @@ class WaterTemperatureModel:
             Today's air temperature (needed for i-1 indexing)
         """
         dates = [start_date + timedelta(days=i) for i in range(forecast_days)]
-        
+
         # If today's air temp is provided, prepend it to the forecast
         # This ensures air_temps[i-1] works correctly for tomorrow's prediction
         if today_air_temp is not None:
             # Prepend today's air temperature to the forecast array
-            air_temps_with_today = [today_air_temp] + list(air_temp_forecast[:forecast_days])
+            air_temps_with_today = [today_air_temp] + list(
+                air_temp_forecast[:forecast_days]
+            )
             # Prepend today's date to the dates array
             today_date = start_date - timedelta(days=1)
             dates_with_today = [today_date] + dates
-            
+
             # Predict temperatures (this will use today's air temp for tomorrow's prediction)
             predictions = self.predict_temperature(
                 air_temps_with_today, current_water_temp, dates_with_today
@@ -249,16 +256,10 @@ def generate_synthetic_data():
 
     # Synthetic air temperature with seasonal cycle (no random noise)
     day_of_year = np.array([d.timetuple().tm_yday for d in dates])
-    air_temps = (
-        12
-        + 8 * np.sin(2 * np.pi * (day_of_year - 80) / 365)
-    )
+    air_temps = 12 + 8 * np.sin(2 * np.pi * (day_of_year - 80) / 365)
 
     # "True" water temperatures (for testing) - more damped, delayed (no random noise)
-    water_temps = (
-        12
-        + 5 * np.sin(2 * np.pi * (day_of_year - 120) / 365)
-    )
+    water_temps = 12 + 5 * np.sin(2 * np.pi * (day_of_year - 120) / 365)
 
     return dates, air_temps, water_temps
 
@@ -427,7 +428,9 @@ if __name__ == "__main__":
         # Generate example future air temperatures (seasonal appropriate, no random noise)
         day_of_year = latest_date.timetuple().tm_yday
         base_temp = 12 + 8 * np.sin(2 * np.pi * (day_of_year - 80) / 365)
-        future_air_temps = [base_temp + (i * 0.1) for i in range(14)]  # Small linear trend instead of random
+        future_air_temps = [
+            base_temp + (i * 0.1) for i in range(14)
+        ]  # Small linear trend instead of random
 
         start_date = latest_date + timedelta(days=1)
         forecast = model.forecast(future_air_temps, current_water_temp, start_date, 14)

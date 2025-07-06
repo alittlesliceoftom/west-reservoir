@@ -1205,14 +1205,17 @@ def create_temperature_predictions_physics(
         # Prepare forecast data
         forecast_dates = future_weather["Date"].dt.to_pydatetime()
         forecast_air_temps = future_weather["Air_Temperature"].values
-        
+
         # Get today's air temperature for proper i-1 indexing
         today = pd.Timestamp(datetime.now().date())
         today_weather = historical_weather[historical_weather["Date"] == today]
         today_air_temp = None
         if not today_weather.empty:
             today_air_temp = today_weather["Air_Temperature"].iloc[-1]
-            add_log_message("info", f"🌡️ Using today's air temperature: {today_air_temp:.1f}°C for forecast")
+            add_log_message(
+                "info",
+                f"🌡️ Using today's air temperature: {today_air_temp:.1f}°C for forecast",
+            )
 
         # Generate water temperature forecast
         try:
@@ -1585,18 +1588,22 @@ def create_line_chart(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> None
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         dragmode=False,
         xaxis=dict(fixedrange=True),
-        yaxis=dict(fixedrange=True)
+        yaxis=dict(fixedrange=True),
     )
 
-    st.plotly_chart(fig, use_container_width=True, config={
-        'displayModeBar': False,
-        'scrollZoom': False,
-        'doubleClick': False,
-        'showTips': True,
-        'displaylogo': False,
-        'dragmode': False,
-        'staticPlot': False
-    })
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={
+            "displayModeBar": False,
+            "scrollZoom": False,
+            "doubleClick": False,
+            "showTips": True,
+            "displaylogo": False,
+            "dragmode": False,
+            "staticPlot": False,
+        },
+    )
 
 
 def create_monthly_analysis(df: pd.DataFrame) -> None:
@@ -1619,15 +1626,19 @@ def create_monthly_analysis(df: pd.DataFrame) -> None:
                 labels={"Temperature": "Avg Temperature (°C)"},
             )
             fig_monthly.update_traces(marker_color="lightblue")
-            st.plotly_chart(fig_monthly, use_container_width=True, config={
-        'displayModeBar': False,
-        'scrollZoom': False,
-        'doubleClick': False,
-        'showTips': True,
-        'displaylogo': False,
-        'dragmode': False,
-        'staticPlot': False
-    })
+            st.plotly_chart(
+                fig_monthly,
+                use_container_width=True,
+                config={
+                    "displayModeBar": False,
+                    "scrollZoom": False,
+                    "doubleClick": False,
+                    "showTips": True,
+                    "displaylogo": False,
+                    "dragmode": False,
+                    "staticPlot": False,
+                },
+            )
         else:
             add_log_message("info", "Not enough data for monthly analysis")
 
@@ -1641,15 +1652,19 @@ def create_monthly_analysis(df: pd.DataFrame) -> None:
             labels={"Temperature": "Temperature (°C)", "count": "Frequency"},
         )
         fig_hist.update_traces(marker_color="lightcoral")
-        st.plotly_chart(fig_hist, use_container_width=True, config={
-        'displayModeBar': False,
-        'scrollZoom': False,
-        'doubleClick': False,
-        'showTips': True,
-        'displaylogo': False,
-        'dragmode': False,
-        'staticPlot': False
-    })
+        st.plotly_chart(
+            fig_hist,
+            use_container_width=True,
+            config={
+                "displayModeBar": False,
+                "scrollZoom": False,
+                "doubleClick": False,
+                "showTips": True,
+                "displaylogo": False,
+                "dragmode": False,
+                "staticPlot": False,
+            },
+        )
 
 
 def display_recent_data(df: pd.DataFrame) -> None:
@@ -2259,18 +2274,22 @@ def create_forecast_tab(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> No
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         dragmode=False,
         xaxis=dict(fixedrange=True),
-        yaxis=dict(fixedrange=True)
+        yaxis=dict(fixedrange=True),
     )
 
-    st.plotly_chart(fig, use_container_width=True, config={
-        'displayModeBar': False,
-        'scrollZoom': False,
-        'doubleClick': False,
-        'showTips': True,
-        'displaylogo': False,
-        'dragmode': False,
-        'staticPlot': False
-    })
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={
+            "displayModeBar": False,
+            "scrollZoom": False,
+            "doubleClick": False,
+            "showTips": True,
+            "displaylogo": False,
+            "dragmode": False,
+            "staticPlot": False,
+        },
+    )
 
     # Show forecast summary
     if "Type" in forecast_df.columns:
