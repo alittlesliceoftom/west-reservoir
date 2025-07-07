@@ -925,12 +925,13 @@ def impute_missing_water_temperatures_physics(
     )
 
     try:
+        # Use same temperature for all components for imputation (simplified)
         result = model.fit_parameters(
-            training_air_temps, training_water_temps, training_dates
+            training_air_temps, training_air_temps, training_air_temps, training_water_temps, training_dates
         )
         if result and result.success:
             add_log_message(
-                "info", f"✅ Physics model trained for imputation (k={model.k:.4f})"
+                "info", f"✅ Physics model trained for imputation (k_avg={model.k_avg:.4f}, k_max={model.k_max:.4f}, k_min={model.k_min:.4f})"
             )
         else:
             add_log_message(
@@ -967,17 +968,14 @@ def impute_missing_water_temperatures_physics(
             # Use the trained physics model to estimate missing values
             for idx in imputed_data.index[still_missing]:
                 air_temp = imputed_data.loc[idx, "Air_Temperature"]
-                # Simple physics-based estimate: assume equilibrium with seasonal offset
-                day_of_year = imputed_data.loc[idx, "Date"].timetuple().tm_yday
-                seasonal_offset = model.seasonal_offset(day_of_year)
-
+                # Simple physics-based estimate: assume equilibrium
                 # Estimate based on recent average relationship
                 recent_data = available_data.tail(30)
                 if len(recent_data) > 0:
                     avg_diff = (
                         recent_data["Temperature"] - recent_data["Air_Temperature"]
                     ).mean()
-                    estimated_temp = air_temp + avg_diff + seasonal_offset
+                    estimated_temp = air_temp + avg_diff
                     imputed_data.loc[idx, "Temperature"] = max(0.1, estimated_temp)
 
     # Add a column to track which data was imputed
@@ -1146,15 +1144,27 @@ def create_temperature_predictions_physics(
     )
 
     try:
+        # Get min/max temperatures if available for main training
+        training_air_temps_min = (
+            merged_historical["Air_Temp_Min"].values 
+            if "Air_Temp_Min" in merged_historical.columns 
+            else training_air_temps
+        )
+        training_air_temps_max = (
+            merged_historical["Air_Temp_Max"].values 
+            if "Air_Temp_Max" in merged_historical.columns 
+            else training_air_temps
+        )
+        
         result = model.fit_parameters(
-            training_air_temps, training_water_temps, training_dates
+            training_air_temps, training_air_temps_min, training_air_temps_max, training_water_temps, training_dates
         )
 
         if result and result.success:
             add_log_message("success", f"✅ Model training successful!")
             add_log_message(
                 "info",
-                f"🔧 Heat transfer coeff: {model.k:.4f}, Seasonal amp: {model.seasonal_amp:.2f}°C",
+                f"🔧 Heat transfer coeffs - avg: {model.k_avg:.4f}, max: {model.k_max:.4f}, min: {model.k_min:.4f}",
             )
         else:
             add_log_message(
@@ -1208,22 +1218,52 @@ def create_temperature_predictions_physics(
         forecast_dates = future_weather["Date"].dt.to_pydatetime()
         forecast_air_temps = future_weather["Air_Temperature"].values
         
-        # Get today's air temperature for proper i-1 indexing
+        # Get forecast min/max temps if available
+        forecast_air_temps_min = (
+            future_weather["Air_Temp_Min"].values 
+            if "Air_Temp_Min" in future_weather.columns 
+            else forecast_air_temps
+        )
+        forecast_air_temps_max = (
+            future_weather["Air_Temp_Max"].values 
+            if "Air_Temp_Max" in future_weather.columns 
+            else forecast_air_temps
+        )
+        
+        # Get today's air temperatures for proper i-1 indexing
         today = pd.Timestamp(datetime.now().date())
         today_weather = historical_weather[historical_weather["Date"] == today]
         today_air_temp = None
+        today_air_temp_min = None
+        today_air_temp_max = None
+        
         if not today_weather.empty:
             today_air_temp = today_weather["Air_Temperature"].iloc[-1]
-            add_log_message("info", f"🌡️ Using today's air temperature: {today_air_temp:.1f}°C for forecast")
+            if "Air_Temp_Min" in today_weather.columns:
+                today_air_temp_min = today_weather["Air_Temp_Min"].iloc[-1]
+            if "Air_Temp_Max" in today_weather.columns:
+                today_air_temp_max = today_weather["Air_Temp_Max"].iloc[-1]
+                
+            # Use fallbacks if min/max not available
+            if today_air_temp_min is None:
+                today_air_temp_min = today_air_temp
+            if today_air_temp_max is None:
+                today_air_temp_max = today_air_temp
+            
+            add_log_message("info", f"🌡️ Using today's temperatures - avg: {today_air_temp:.1f}°C, min: {today_air_temp_min:.1f}°C, max: {today_air_temp_max:.1f}°C")
 
         # Generate water temperature forecast
         try:
             predicted_water_temps = model.forecast(
-                forecast_air_temps,
+                forecast_air_temps,      # avg
+                forecast_air_temps_min,  # min (actual minimum temps)
+                forecast_air_temps_max,  # max (actual maximum temps)
                 current_water_temp,
                 forecast_dates[0],
                 len(forecast_dates),
-                today_air_temp=today_air_temp,
+                today_air_temp_avg=today_air_temp,
+                today_air_temp_min=today_air_temp_min,
+                today_air_temp_max=today_air_temp_max,
             )
 
             # Create prediction dataframe
@@ -1704,8 +1744,20 @@ def create_physics_model_analysis(df: pd.DataFrame, weather_df: pd.DataFrame) ->
 
     # Fit the physics model
     try:
+        # Get min/max temperatures for physics model analysis
+        training_air_temps_min = (
+            merged_data["Air_Temp_Min"].values 
+            if "Air_Temp_Min" in merged_data.columns 
+            else training_air_temps
+        )
+        training_air_temps_max = (
+            merged_data["Air_Temp_Max"].values 
+            if "Air_Temp_Max" in merged_data.columns 
+            else training_air_temps
+        )
+        
         result = model.fit_parameters(
-            training_air_temps, training_water_temps, training_dates
+            training_air_temps, training_air_temps_min, training_air_temps_max, training_water_temps, training_dates
         )
         model_fitted = result and result.success
     except Exception as e:
@@ -1732,8 +1784,20 @@ def create_physics_model_analysis(df: pd.DataFrame, weather_df: pd.DataFrame) ->
             correlations[f"{window}d"] = rolling_corr.dropna()
 
     # Calculate physics model predictions
+    # Get min/max temperatures for predictions
+    training_air_temps_min = (
+        merged_data["Air_Temp_Min"].values 
+        if "Air_Temp_Min" in merged_data.columns 
+        else training_air_temps
+    )
+    training_air_temps_max = (
+        merged_data["Air_Temp_Max"].values 
+        if "Air_Temp_Max" in merged_data.columns 
+        else training_air_temps
+    )
+    
     physics_predictions = model.predict_temperature(
-        training_air_temps, training_water_temps[0], training_dates
+        training_air_temps, training_air_temps_min, training_air_temps_max, training_water_temps[0], training_dates
     )
 
     # Calculate physics model performance metrics
@@ -1748,11 +1812,11 @@ def create_physics_model_analysis(df: pd.DataFrame, weather_df: pd.DataFrame) ->
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        st.metric("Heat Transfer Coeff (k)", f"{model.k:.4f} day⁻¹")
+        st.metric("Heat Transfer Coeff (k_avg)", f"{model.k_avg:.4f} day⁻¹")
     with col2:
-        st.metric("Seasonal Amplitude", f"{model.seasonal_amp:.2f}°C")
+        st.metric("Heat Transfer Coeff (k_max)", f"{model.k_max:.4f} day⁻¹")
     with col3:
-        st.metric("Seasonal Phase", f"{model.seasonal_phase:.0f} days")
+        st.metric("Heat Transfer Coeff (k_min)", f"{model.k_min:.4f} day⁻¹")
     with col4:
         st.metric("Physics R²", f"{physics_r2:.3f}")
 
@@ -1764,14 +1828,11 @@ def create_physics_model_analysis(df: pd.DataFrame, weather_df: pd.DataFrame) ->
     # Create visualization comparing physics model vs correlation patterns
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
-    # Plot 1: Temperature difference vs seasonal offset
+    # Plot 1: Temperature difference vs day of year
     ax1 = axes[0]
-    seasonal_offsets = [
-        model.seasonal_offset(doy) for doy in merged_data["Day_of_Year"]
-    ]
     scatter = ax1.scatter(
         merged_data["Air_Water_Diff"],
-        seasonal_offsets,
+        merged_data["Day_of_Year"],
         c=merged_data["Day_of_Year"],
         cmap="viridis",
         alpha=0.6,
@@ -1908,7 +1969,7 @@ def create_physics_model_analysis(df: pd.DataFrame, weather_df: pd.DataFrame) ->
             f"{physics_rmse:.2f}",
             f"{physics_mae:.2f}",
             f"{simple_correlation:.3f}",
-            "3 (k, seasonal_amp, phase)",
+            "3 (k_avg, k_max, k_min)",
         ],
         "Linear Model": [
             f"{linear_r2:.3f}",
@@ -1926,20 +1987,24 @@ def create_physics_model_analysis(df: pd.DataFrame, weather_df: pd.DataFrame) ->
     st.markdown("### 🔍 Physics Model Insights")
 
     # Calculate key relationships
-    temp_responsiveness = (
-        model.k * 24
+    temp_responsiveness_avg = (
+        model.k_avg * 24
     )  # Convert to temperature change per day per degree difference
-    seasonal_range = 2 * model.seasonal_amp  # Peak-to-peak seasonal variation
+    temp_responsiveness_max = model.k_max * 24
+    temp_responsiveness_min = model.k_min * 24
 
     st.write(f"**Heat Transfer Dynamics:**")
     st.write(
-        f"- Water temperature adjusts at {temp_responsiveness:.3f}°C/day per 1°C air-water difference"
+        f"- Water temperature adjusts at {temp_responsiveness_avg:.3f}°C/day per 1°C avg air-water difference"
     )
     st.write(
-        f"- Seasonal variation: ±{model.seasonal_amp:.1f}°C (total range: {seasonal_range:.1f}°C)"
+        f"- Peak heating effect: {temp_responsiveness_max:.3f}°C/day per 1°C max air-water difference"
     )
     st.write(
-        f"- Seasonal peak occurs around day {model.seasonal_phase:.0f} ({pd.Timestamp('2024-01-01') + pd.Timedelta(days=int(model.seasonal_phase)):%B %d})"
+        f"- Cooling effect: {temp_responsiveness_min:.3f}°C/day per 1°C min air-water difference"
+    )
+    st.write(
+        f"- Multi-component model uses separate heat transfer coefficients for peak, average and minimum temperatures"
     )
 
     if physics_r2 > linear_r2:
@@ -2370,12 +2435,24 @@ def create_historical_tab(
                 training_water_temps = merged_data["Temperature"].values
 
                 # Fit physics model
+                # Get min/max temperatures for model comparison
+                training_air_temps_min = (
+                    merged_data["Air_Temp_Min"].values 
+                    if "Air_Temp_Min" in merged_data.columns 
+                    else training_air_temps
+                )
+                training_air_temps_max = (
+                    merged_data["Air_Temp_Max"].values 
+                    if "Air_Temp_Max" in merged_data.columns 
+                    else training_air_temps
+                )
+                
                 result = physics_model.fit_parameters(
-                    training_air_temps, training_water_temps, training_dates
+                    training_air_temps, training_air_temps_min, training_air_temps_max, training_water_temps, training_dates
                 )
                 if result and result.success:
                     physics_predictions = physics_model.predict_temperature(
-                        training_air_temps, training_water_temps[0], training_dates
+                        training_air_temps, training_air_temps_min, training_air_temps_max, training_water_temps[0], training_dates
                     )
 
                     # Add physics predictions to comparison dataframe

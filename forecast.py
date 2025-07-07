@@ -10,37 +10,37 @@ from meteostat import Point, Daily
 
 class WaterTemperatureModel:
     """
-    Simplified heat transfer model for water temperature prediction
+    Multi-component heat transfer model for water temperature prediction
 
-    dT/dt = k * (T_air_yesterday - T_water)
+    dT/dt = k_avg * (T_air_avg_yesterday - T_water) + 
+            k_max * (T_air_max_yesterday - T_water) + 
+            k_min * (T_air_min_yesterday - T_water)
 
     Where:
-    - k: heat transfer coefficient (day^-1)
-    
-    Note: Seasonal offset component removed for experimentation
+    - k_avg: heat transfer coefficient for average temperature (day^-1)
+    - k_max: heat transfer coefficient for peak temperature (day^-1) 
+    - k_min: heat transfer coefficient for minimum temperature (day^-1)
     """
 
     def __init__(self):
-        self.k = 0.05  # Heat transfer coefficient
-        self.seasonal_amp = 2.0  # Amplitude of seasonal variation (°C)
-        self.seasonal_phase = 100  # Phase shift (day of year)
+        self.k_avg = 0.03  # Heat transfer coefficient for average temperature
+        self.k_max = 0.02  # Heat transfer coefficient for peak temperature (heating)
+        self.k_min = 0.01  # Heat transfer coefficient for minimum temperature (cooling)
         self.baseline_temp = 12.0  # Annual mean water temperature
 
-    def seasonal_offset(self, day_of_year):
-        """Calculate seasonal temperature offset based on day of year"""
-        # Peak warming around day 180 (late June), cooling around day 360
-        return self.seasonal_amp * np.sin(
-            2 * np.pi * (day_of_year - self.seasonal_phase) / 365
-        )
 
-    def predict_temperature(self, air_temps, initial_water_temp, dates):
+    def predict_temperature(self, air_temps_avg, air_temps_min, air_temps_max, initial_water_temp, dates):
         """
-        Predict water temperature time series
+        Predict water temperature time series using multi-component heat transfer
 
         Parameters:
         -----------
-        air_temps : array-like
-            Daily air temperatures (°C)
+        air_temps_avg : array-like
+            Daily average air temperatures (°C)
+        air_temps_min : array-like
+            Daily minimum air temperatures (°C)
+        air_temps_max : array-like
+            Daily maximum air temperatures (°C)
         initial_water_temp : float
             Starting water temperature (°C)
         dates : array-like
@@ -51,19 +51,20 @@ class WaterTemperatureModel:
         water_temps : np.array
             Predicted water temperatures
         """
-        n_days = len(air_temps)
+        n_days = len(air_temps_avg)
         water_temps = np.zeros(n_days)
         water_temps[0] = initial_water_temp
 
         for i in range(1, n_days):
-            day_of_year = dates[i].timetuple().tm_yday
-
-            # Seasonal offset calculation (disabled for experiment)
-            # seasonal = self.seasonal_offset(day_of_year)
-
-            # Core differential equation: dT/dt = k*(T_air - T_water) [seasonal component removed]
-            temp_diff = air_temps[i - 1] - water_temps[i - 1]
-            dT_dt = self.k * temp_diff  # Pure heat transfer - Daily rate
+            # Multi-component heat transfer using yesterday's temperatures
+            temp_diff_avg = air_temps_avg[i - 1] - water_temps[i - 1]
+            temp_diff_max = air_temps_max[i - 1] - water_temps[i - 1]  # Peak heating effect
+            temp_diff_min = air_temps_min[i - 1] - water_temps[i - 1]  # Cooling effect
+            
+            # Combined heat transfer rate
+            dT_dt = (self.k_avg * temp_diff_avg + 
+                    self.k_max * temp_diff_max + 
+                    self.k_min * temp_diff_min)
 
             water_temps[i] = water_temps[i - 1] + dT_dt
 
@@ -72,14 +73,18 @@ class WaterTemperatureModel:
 
         return water_temps
 
-    def fit_parameters(self, air_temps, observed_water_temps, dates):
+    def fit_parameters(self, air_temps_avg, air_temps_min, air_temps_max, observed_water_temps, dates):
         """
         Fit model parameters to observed data using least squares
 
         Parameters:
         -----------
-        air_temps : array-like
-            Historical air temperatures
+        air_temps_avg : array-like
+            Historical average air temperatures
+        air_temps_min : array-like
+            Historical minimum air temperatures
+        air_temps_max : array-like
+            Historical maximum air temperatures
         observed_water_temps : array-like
             Historical water temperatures
         dates : array-like
@@ -87,65 +92,81 @@ class WaterTemperatureModel:
         """
 
         def objective(params):
-            self.k = params[0]  # Only optimize heat transfer coefficient
+            self.k_avg, self.k_max, self.k_min = params
             predicted = self.predict_temperature(
-                air_temps, observed_water_temps[0], dates
+                air_temps_avg, air_temps_min, air_temps_max, observed_water_temps[0], dates
             )
             return np.sum((predicted - observed_water_temps) ** 2)
 
-        # Parameter bounds: only k (0.01-0.5) - wider range for experimentation
-        bounds = [(0.01, 0.5)]
-        initial_guess = [self.k]
+        # Parameter bounds: k_avg, k_max, k_min (0.001-0.2 each)
+        bounds = [(0.001, 0.2), (0.001, 0.2), (0.001, 0.2)]
+        initial_guess = [self.k_avg, self.k_max, self.k_min]
 
         result = minimize(objective, initial_guess, bounds=bounds, method="L-BFGS-B")
 
         if result.success:
-            self.k = result.x[0]  # Only assign heat transfer coefficient
+            self.k_avg, self.k_max, self.k_min = result.x
             return result
         else:
             print("Warning: Optimization failed")
             return None
 
     def forecast(
-        self, air_temp_forecast, current_water_temp, start_date, forecast_days=14, today_air_temp=None
+        self, air_temp_avg_forecast, air_temp_min_forecast, air_temp_max_forecast, 
+        current_water_temp, start_date, forecast_days=14, 
+        today_air_temp_avg=None, today_air_temp_min=None, today_air_temp_max=None
     ):
         """
-        Generate water temperature forecast
+        Generate water temperature forecast using multi-component heat transfer
 
         Parameters:
         -----------
-        air_temp_forecast : array-like
-            Forecasted air temperatures (starting from tomorrow)
+        air_temp_avg_forecast : array-like
+            Forecasted average air temperatures (starting from tomorrow)
+        air_temp_min_forecast : array-like
+            Forecasted minimum air temperatures (starting from tomorrow)
+        air_temp_max_forecast : array-like
+            Forecasted maximum air temperatures (starting from tomorrow)
         current_water_temp : float
             Current water temperature
         start_date : datetime
             Start date for forecast (tomorrow)
         forecast_days : int
             Number of days to forecast
-        today_air_temp : float, optional
-            Today's air temperature (needed for i-1 indexing)
+        today_air_temp_avg : float, optional
+            Today's average air temperature (needed for i-1 indexing)
+        today_air_temp_min : float, optional
+            Today's minimum air temperature (needed for i-1 indexing)
+        today_air_temp_max : float, optional
+            Today's maximum air temperature (needed for i-1 indexing)
         """
         dates = [start_date + timedelta(days=i) for i in range(forecast_days)]
         
-        # If today's air temp is provided, prepend it to the forecast
+        # If today's air temps are provided, prepend them to the forecast arrays
         # This ensures air_temps[i-1] works correctly for tomorrow's prediction
-        if today_air_temp is not None:
-            # Prepend today's air temperature to the forecast array
-            air_temps_with_today = [today_air_temp] + list(air_temp_forecast[:forecast_days])
+        if all(temp is not None for temp in [today_air_temp_avg, today_air_temp_min, today_air_temp_max]):
+            # Prepend today's temperatures to the forecast arrays
+            air_temps_avg_with_today = [today_air_temp_avg] + list(air_temp_avg_forecast[:forecast_days])
+            air_temps_min_with_today = [today_air_temp_min] + list(air_temp_min_forecast[:forecast_days])
+            air_temps_max_with_today = [today_air_temp_max] + list(air_temp_max_forecast[:forecast_days])
             # Prepend today's date to the dates array
             today_date = start_date - timedelta(days=1)
             dates_with_today = [today_date] + dates
             
-            # Predict temperatures (this will use today's air temp for tomorrow's prediction)
+            # Predict temperatures using multi-component model
             predictions = self.predict_temperature(
-                air_temps_with_today, current_water_temp, dates_with_today
+                air_temps_avg_with_today, air_temps_min_with_today, air_temps_max_with_today,
+                current_water_temp, dates_with_today
             )
             # Return only the forecast predictions (skip today's prediction)
             return predictions[1:]
         else:
-            # Fallback to original behavior if today's air temp not provided
+            # Fallback: use average temps for all components if today's data not fully available
             return self.predict_temperature(
-                air_temp_forecast[:forecast_days], current_water_temp, dates
+                air_temp_avg_forecast[:forecast_days], 
+                air_temp_avg_forecast[:forecast_days],  # Use avg as fallback for min
+                air_temp_avg_forecast[:forecast_days],  # Use avg as fallback for max
+                current_water_temp, dates
             )
 
 
@@ -192,8 +213,8 @@ def load_weather_data(start_date, end_date):
 
         if not weather_df.empty:
             weather_df = weather_df.reset_index()
-            weather_df = weather_df[["time", "tavg"]].copy()
-            weather_df.columns = ["Date", "Air_Temperature"]
+            weather_df = weather_df[["time", "tavg", "tmin", "tmax"]].copy()
+            weather_df.columns = ["Date", "Air_Temperature", "Air_Temp_Min", "Air_Temp_Max"]
             weather_df = weather_df.dropna()
 
             print(f"✅ Loaded {len(weather_df)} weather readings")
@@ -235,10 +256,12 @@ def prepare_real_data():
     )
 
     dates = merged_df["Date"].dt.to_pydatetime()
-    air_temps = merged_df["Air_Temperature"].values
+    air_temps_avg = merged_df["Air_Temperature"].values
+    air_temps_min = merged_df["Air_Temp_Min"].values
+    air_temps_max = merged_df["Air_Temp_Max"].values
     water_temps = merged_df["Temperature"].values
 
-    return dates, air_temps, water_temps
+    return dates, air_temps_avg, air_temps_min, air_temps_max, water_temps
 
 
 # Example usage and testing
@@ -249,11 +272,16 @@ def generate_synthetic_data():
 
     # Synthetic air temperature with seasonal cycle + noise
     day_of_year = np.array([d.timetuple().tm_yday for d in dates])
-    air_temps = (
+    air_temps_avg = (
         12
         + 8 * np.sin(2 * np.pi * (day_of_year - 80) / 365)
         + np.random.normal(0, 3, n_days)
     )
+    
+    # Generate min/max based on average with realistic daily variation
+    daily_range = 3 + np.random.normal(0, 1, n_days)  # Variable daily temperature range
+    air_temps_max = air_temps_avg + daily_range
+    air_temps_min = air_temps_avg - daily_range * 0.6  # Min is closer to average than max
 
     # "True" water temperatures (for testing) - more damped, delayed
     water_temps = (
@@ -262,7 +290,7 @@ def generate_synthetic_data():
         + np.random.normal(0, 1, n_days)
     )
 
-    return dates, air_temps, water_temps
+    return dates, air_temps_avg, air_temps_min, air_temps_max, water_temps
 
 
 def demo_model(use_real_data=True):
@@ -312,22 +340,22 @@ def demo_model(use_real_data=True):
 
     # Fit model
     print("\nFitting model parameters...")
-    result = model.fit_parameters(train_air, train_water, train_dates)
+    result = model.fit_parameters(train_air, train_air, train_air, train_water, train_dates)
 
     if result and result.success:
         print(f"\n✅ MODEL PARAMETERS (Optimized):")
-        print(f"  🔧 Heat transfer coefficient (k): {model.k:.4f} day⁻¹")
-        print(f"  🌊 Seasonal amplitude: {model.seasonal_amp:.2f} °C")
-        print(f"  📅 Seasonal phase shift: {model.seasonal_phase:.0f} days")
+        print(f"  🔧 Heat transfer coefficient (k_avg): {model.k_avg:.4f} day⁻¹")
+        print(f"  🔧 Heat transfer coefficient (k_max): {model.k_max:.4f} day⁻¹")
+        print(f"  🔧 Heat transfer coefficient (k_min): {model.k_min:.4f} day⁻¹")
         print(f"  🎯 Optimization success: {result.success}")
         print(f"  📉 Final cost: {result.fun:.2f}")
     else:
         print("⚠️  Optimization failed, using default parameters")
 
     # Generate predictions
-    predicted_train = model.predict_temperature(train_air, train_water[0], train_dates)
+    predicted_train = model.predict_temperature(train_air, train_air, train_air, train_water[0], train_dates)
     predicted_test = model.predict_temperature(
-        test_air, predicted_train[-1], test_dates
+        test_air, test_air, test_air, predicted_train[-1], test_dates
     )
 
     # Calculate performance metrics
@@ -432,7 +460,7 @@ if __name__ == "__main__":
         future_air_temps = [base_temp + np.random.normal(0, 2) for _ in range(14)]
 
         start_date = latest_date + timedelta(days=1)
-        forecast = model.forecast(future_air_temps, current_water_temp, start_date, 14)
+        forecast = model.forecast(future_air_temps, future_air_temps, future_air_temps, current_water_temp, start_date, 14)
 
         print(f"\n📈 14-Day Water Temperature Forecast:")
         print("Date        | Air Temp | Water Temp")
@@ -461,7 +489,7 @@ if __name__ == "__main__":
         current_water_temp = 11.5
         start_date = datetime(2024, 6, 17)
 
-        forecast = model.forecast(future_air_temps, current_water_temp, start_date, 14)
+        forecast = model.forecast(future_air_temps, future_air_temps, future_air_temps, current_water_temp, start_date, 14)
 
         print("Date        | Air Temp | Water Temp")
         print("-" * 36)
