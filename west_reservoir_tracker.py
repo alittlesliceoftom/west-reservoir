@@ -756,51 +756,33 @@ def get_weather_data(start_date: datetime, end_date: datetime) -> pd.DataFrame:
                             f"✅ Added {len(forecast_filtered)} days of real weather forecast",
                         )
 
-                    # For dates beyond 5-day forecast, fall back to synthetic
-                    if future_end > (today + timedelta(days=5)):
-                        remaining_dates = pd.date_range(
-                            start=today + timedelta(days=6), end=future_end, freq="D"
-                        )
-                        if len(remaining_dates) > 0:
-                            synthetic_weather = generate_synthetic_weather_fallback(
-                                weather_df, remaining_dates
-                            )
-                            weather_df = pd.concat(
-                                [weather_df, synthetic_weather], ignore_index=True
-                            )
-                            add_log_message(
-                                "info",
-                                f"🔮 Added {len(remaining_dates)} days of synthetic weather for extended forecast",
-                            )
+                    # Add a marker to indicate where real forecast data ends
+                    real_forecast_end = min(future_end, today + timedelta(days=5))
+                    weather_df["Forecast_Type"] = "Historical"
+                    
+                    # Mark real forecast data
+                    if not forecast_filtered.empty:
+                        forecast_mask = weather_df["Date"] > today
+                        real_forecast_mask = weather_df["Date"] <= real_forecast_end
+                        weather_df.loc[forecast_mask & real_forecast_mask, "Forecast_Type"] = "Real_Forecast"
+                    
+                    add_log_message(
+                        "info",
+                        f"📅 Real weather forecast available through {real_forecast_end.date()}",
+                    )
                 else:
-                    # Forecast API failed, use synthetic for all future dates
-                    future_dates = pd.date_range(
-                        start=today + timedelta(days=1), end=future_end, freq="D"
-                    )
-                    synthetic_weather = generate_synthetic_weather_fallback(
-                        weather_df, future_dates
-                    )
-                    weather_df = pd.concat(
-                        [weather_df, synthetic_weather], ignore_index=True
-                    )
+                    # Forecast API failed, no real forecast available
+                    weather_df["Forecast_Type"] = "Historical"
                     add_log_message(
                         "warning",
-                        "📡 Weather forecast failed, using synthetic data for future dates",
+                        "📡 Weather forecast failed - showing historical data only",
                     )
             else:
-                # No API key, use synthetic for all future dates
-                future_dates = pd.date_range(
-                    start=today + timedelta(days=1), end=future_end, freq="D"
-                )
-                synthetic_weather = generate_synthetic_weather_fallback(
-                    weather_df, future_dates
-                )
-                weather_df = pd.concat(
-                    [weather_df, synthetic_weather], ignore_index=True
-                )
+                # No API key, no real forecast available
+                weather_df["Forecast_Type"] = "Historical"
                 add_log_message(
                     "info",
-                    f"🔑 No weather API key found, using synthetic data for {len(future_dates)} future days",
+                    "🔑 No weather API key found - showing historical data only",
                 )
 
         return weather_df.sort_values("Date").reset_index(drop=True)
@@ -1185,6 +1167,27 @@ def create_temperature_predictions_physics(
             result_parts.append(imputed_only[["Date", "Temperature", "Type"]])
 
     # Create predictions if we have future weather data
+    # Filter future_weather to only include real forecast data (not synthetic)
+    if not future_weather.empty and len(future_weather) > 0:
+        if "Forecast_Type" in future_weather.columns:
+            # Only use real forecast data for predictions
+            real_forecast_weather = future_weather[
+                future_weather["Forecast_Type"] == "Real_Forecast"
+            ].copy()
+            
+            if real_forecast_weather.empty:
+                add_log_message(
+                    "info", 
+                    "📅 No real weather forecast available - skipping temperature predictions"
+                )
+                future_weather = pd.DataFrame()  # Skip predictions
+            else:
+                future_weather = real_forecast_weather
+                add_log_message(
+                    "info", 
+                    f"🎯 Using {len(future_weather)} days of real weather forecast for predictions"
+                )
+    
     if not future_weather.empty and len(future_weather) > 0:
         # Get the most recent water temperature as starting point (from imputed data if available)
         if "imputed_historical" in locals() and len(imputed_historical) > 0:
@@ -2155,10 +2158,21 @@ def create_forecast_tab(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> No
     """Create the forecast tab content."""
     st.header("Temperature Forecast")
 
-    # Filter data for the last 7 days and next 14 days
+    # Filter data for the last 7 days and real forecast period only
     today = pd.Timestamp(datetime.now().date())
     forecast_start = today - pd.Timedelta(days=7)
-    forecast_end = today + pd.Timedelta(days=14)
+    
+    # Determine the actual forecast end based on real weather data availability
+    if weather_df is not None and "Forecast_Type" in weather_df.columns:
+        real_forecast_data = weather_df[weather_df["Forecast_Type"] == "Real_Forecast"]
+        if not real_forecast_data.empty:
+            forecast_end = real_forecast_data["Date"].max()
+            st.info(f"📅 Real weather forecast available through {forecast_end.date()}")
+        else:
+            forecast_end = today  # No real forecast, only show historical
+            st.warning("📅 No real weather forecast available - showing historical data only")
+    else:
+        forecast_end = today + pd.Timedelta(days=5)  # Default fallback
 
     forecast_df = df[
         (df["Date"] >= forecast_start) & (df["Date"] <= forecast_end)
@@ -2170,8 +2184,12 @@ def create_forecast_tab(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> No
         )
         return
 
-    # Show forecast chart
-    st.subheader("Recent Temps and 14-Day Forecast")
+    # Show forecast chart with dynamic title
+    forecast_days = (forecast_end - today).days
+    if forecast_days > 0:
+        st.subheader(f"Recent Temps and {forecast_days}-Day Real Forecast")
+    else:
+        st.subheader("Recent Temps (No Real Forecast Available)")
 
     if "Type" in forecast_df.columns:
         # Combine all water temperature data into single series
@@ -2488,7 +2506,7 @@ def create_temperature_dashboard(
     # Get yesterday's data
     if not df.empty:
         yesterday_data = df[df["Date"] == yesterday]
-        if not yesterday_data.empty and yesterday_data["Type"].iloc[0] == "Actual":
+        if not yesterday_data.empty and ("Type" not in yesterday_data.columns or yesterday_data["Type"].iloc[0] == "Actual"):
             yesterday_water = f"{yesterday_data['Temperature'].iloc[0]:.1f}°C"
 
     # Get today's data - prefer actual, fallback to forecast
@@ -2496,14 +2514,20 @@ def create_temperature_dashboard(
         today_data = df[df["Date"] == today]
         if not today_data.empty:
             # Prefer actual data
-            actual_today = today_data[today_data["Type"] == "Actual"]
+            if "Type" in today_data.columns:
+                actual_today = today_data[today_data["Type"] == "Actual"]
+            else:
+                actual_today = today_data
             if not actual_today.empty:
                 today_water = f"{actual_today['Temperature'].iloc[0]:.1f}°C"
             else:
                 # Use forecast/predicted data if actual not available
-                forecast_today = today_data[
-                    today_data["Type"].isin(["Predicted", "Physics Model"])
-                ]
+                if "Type" in today_data.columns:
+                    forecast_today = today_data[
+                        today_data["Type"].isin(["Predicted", "Physics Model"])
+                    ]
+                else:
+                    forecast_today = pd.DataFrame()  # Empty if no Type column
                 if not forecast_today.empty:
                     today_water = f"{forecast_today['Temperature'].iloc[0]:.1f}°C*"
 
@@ -2565,10 +2589,13 @@ def create_temperature_dashboard(
         if not future_water.empty:
             # Limit to next 7 days and only forecast data
             week_ahead = today + pd.Timedelta(days=7)
-            future_week = future_water[
-                (future_water["Date"] <= week_ahead)
-                & (future_water["Type"].isin(["Predicted", "Physics Model"]))
-            ]
+            if "Type" in future_water.columns:
+                future_week = future_water[
+                    (future_water["Date"] <= week_ahead)
+                    & (future_water["Type"].isin(["Predicted", "Physics Model"]))
+                ]
+            else:
+                future_week = future_water[future_water["Date"] <= week_ahead]
 
             if not future_week.empty:
                 hottest_water_row = future_week.loc[future_week["Temperature"].idxmax()]
@@ -2594,13 +2621,19 @@ def create_temperature_dashboard(
             today_data = df[df["Date"] == today]
             if not today_data.empty:
                 # Get today's water temp (prefer actual, fallback to forecast)
-                actual_today = today_data[today_data["Type"] == "Actual"]
+                if "Type" in today_data.columns:
+                    actual_today = today_data[today_data["Type"] == "Actual"]
+                else:
+                    actual_today = today_data
                 if not actual_today.empty:
                     water_temp = actual_today["Temperature"].iloc[0]
                 else:
-                    forecast_today = today_data[
-                        today_data["Type"].isin(["Predicted", "Physics Model"])
-                    ]
+                    if "Type" in today_data.columns:
+                        forecast_today = today_data[
+                            today_data["Type"].isin(["Predicted", "Physics Model"])
+                        ]
+                    else:
+                        forecast_today = pd.DataFrame()  # Empty if no Type column
                     if not forecast_today.empty:
                         water_temp = forecast_today["Temperature"].iloc[0]
                     else:
