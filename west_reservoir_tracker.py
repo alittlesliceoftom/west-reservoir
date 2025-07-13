@@ -165,80 +165,6 @@ def get_weather_forecast(api_key: str, days: int = 5) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def generate_synthetic_weather_fallback(
-    historical_weather_df: pd.DataFrame, future_dates: pd.DatetimeIndex
-) -> pd.DataFrame:
-    """Generate synthetic weather data as fallback when real forecast is unavailable.
-
-    Args:
-        historical_weather_df: Historical weather data to base patterns on
-        future_dates: Dates to generate synthetic weather for
-
-    Returns:
-        pd.DataFrame: Synthetic weather data
-    """
-    if len(historical_weather_df) == 0:
-        # No historical data, use London seasonal averages
-        synthetic_data = []
-        for date in future_dates:
-            day_of_year = date.timetuple().tm_yday
-            # London seasonal temperature pattern (no random variation)
-            seasonal_avg = 10 + 8 * np.sin(2 * np.pi * (day_of_year - 80) / 365.25)
-
-            avg_temp = seasonal_avg
-            synthetic_data.append(
-                {
-                    "Date": pd.Timestamp(date),
-                    "Air_Temperature": avg_temp,
-                    "Air_Temp_Min": avg_temp - 4,
-                    "Air_Temp_Max": avg_temp + 6,
-                }
-            )
-
-        return pd.DataFrame(synthetic_data)
-
-    # Use recent patterns from historical data
-    recent_data = historical_weather_df.tail(30)
-    recent_temps_avg = recent_data["Air_Temperature"]
-    recent_temps_min = recent_data["Air_Temp_Min"].dropna()
-    recent_temps_max = recent_data["Air_Temp_Max"].dropna()
-
-    mean_temp = recent_temps_avg.mean()
-    std_temp = recent_temps_avg.std() if len(recent_temps_avg) > 1 else 3.0
-
-    # Calculate recent patterns
-    if len(recent_temps_min) > 0 and len(recent_temps_max) > 0:
-        recent_avg_high = recent_temps_max.mean()
-        recent_avg_low = recent_temps_min.mean()
-    else:
-        recent_avg_high = mean_temp + 5.0
-        recent_avg_low = mean_temp - 5.0
-
-    synthetic_data = []
-    for date in future_dates:
-        day_of_year = date.timetuple().tm_yday
-        seasonal_factor = (
-            np.sin(2 * np.pi * day_of_year / 365.25) * 2
-        )  # +/- 2°C seasonal variation (no random component)
-
-        # Generate temperatures based on recent patterns (no random variation)
-        future_temp_max = recent_avg_high + seasonal_factor
-        future_temp_min = recent_avg_low + seasonal_factor
-        future_temp_avg = (future_temp_max + future_temp_min) / 2
-
-        synthetic_data.append(
-            {
-                "Date": pd.Timestamp(date),
-                "Air_Temperature": future_temp_avg,
-                "Air_Temp_Min": future_temp_min,
-                "Air_Temp_Max": future_temp_max,
-            }
-        )
-
-    return pd.DataFrame(synthetic_data)
-
-
-
 def validate_and_clean_data(df: pd.DataFrame, debug_mode: bool = False) -> pd.DataFrame:
     """Validate and clean the raw temperature data.
 
@@ -722,52 +648,6 @@ def get_weather_data(start_date: datetime, end_date: datetime) -> pd.DataFrame:
                             f"✅ Added {len(forecast_filtered)} days of real weather forecast",
                         )
 
-                    # For dates beyond 5-day forecast, fall back to synthetic
-                    if future_end > (today + timedelta(days=5)):
-                        remaining_dates = pd.date_range(
-                            start=today + timedelta(days=6), end=future_end, freq="D"
-                        )
-                        if len(remaining_dates) > 0:
-                            synthetic_weather = generate_synthetic_weather_fallback(
-                                weather_df, remaining_dates
-                            )
-                            weather_df = pd.concat(
-                                [weather_df, synthetic_weather], ignore_index=True
-                            )
-                            add_log_message(
-                                "info",
-                                f"🔮 Added {len(remaining_dates)} days of synthetic weather for extended forecast",
-                            )
-                else:
-                    # Forecast API failed, use synthetic for all future dates
-                    future_dates = pd.date_range(
-                        start=today + timedelta(days=1), end=future_end, freq="D"
-                    )
-                    synthetic_weather = generate_synthetic_weather_fallback(
-                        weather_df, future_dates
-                    )
-                    weather_df = pd.concat(
-                        [weather_df, synthetic_weather], ignore_index=True
-                    )
-                    add_log_message(
-                        "warning",
-                        "📡 Weather forecast failed, using synthetic data for future dates",
-                    )
-            else:
-                # No API key, use synthetic for all future dates
-                future_dates = pd.date_range(
-                    start=today + timedelta(days=1), end=future_end, freq="D"
-                )
-                synthetic_weather = generate_synthetic_weather_fallback(
-                    weather_df, future_dates
-                )
-                weather_df = pd.concat(
-                    [weather_df, synthetic_weather], ignore_index=True
-                )
-                add_log_message(
-                    "info",
-                    f"🔑 No weather API key found, using synthetic data for {len(future_dates)} future days",
-                )
 
         return weather_df.sort_values("Date").reset_index(drop=True)
 
