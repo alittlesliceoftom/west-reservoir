@@ -77,20 +77,13 @@ RESERVOIR_LON = -0.090492
 def get_weather_api_key():
     """Get weather API key from environment or Streamlit secrets."""
     import os
-
-    # Try environment variable first
     api_key = os.getenv("OPENWEATHER_API_KEY")
-
-    # Only try Streamlit secrets if environment variable is not set
     if not api_key:
         try:
-            # Check if secrets are available
             if hasattr(st, "secrets") and "OPENWEATHER_API_KEY" in st.secrets:
                 api_key = st.secrets["OPENWEATHER_API_KEY"]
         except Exception:
-            # Secrets not available or configured, that's fine
-            pass
-
+            add_log_message("info", "OpenWeather API key not found in Streamlit secrets, using environment variable or no forecast")
     return api_key
 
 
@@ -170,98 +163,6 @@ def get_weather_forecast(api_key: str, days: int = 5) -> pd.DataFrame:
     except Exception as e:
         add_log_message("warning", f"Weather forecast processing failed: {e}")
         return pd.DataFrame()
-
-
-def generate_synthetic_weather_fallback(
-    historical_weather_df: pd.DataFrame, future_dates: pd.DatetimeIndex
-) -> pd.DataFrame:
-    """Generate synthetic weather data as fallback when real forecast is unavailable.
-
-    Args:
-        historical_weather_df: Historical weather data to base patterns on
-        future_dates: Dates to generate synthetic weather for
-
-    Returns:
-        pd.DataFrame: Synthetic weather data
-    """
-    if len(historical_weather_df) == 0:
-        # No historical data, use London seasonal averages
-        synthetic_data = []
-        for date in future_dates:
-            day_of_year = date.timetuple().tm_yday
-            # London seasonal temperature pattern
-            seasonal_avg = 10 + 8 * np.sin(2 * np.pi * (day_of_year - 80) / 365.25)
-            daily_variation = np.random.normal(0, 3)
-
-            avg_temp = seasonal_avg + daily_variation
-            synthetic_data.append(
-                {
-                    "Date": pd.Timestamp(date),
-                    "Air_Temperature": avg_temp,
-                    "Air_Temp_Min": avg_temp - 4,
-                    "Air_Temp_Max": avg_temp + 6,
-                }
-            )
-
-        return pd.DataFrame(synthetic_data)
-
-    # Use recent patterns from historical data
-    recent_data = historical_weather_df.tail(30)
-    recent_temps_avg = recent_data["Air_Temperature"]
-    recent_temps_min = recent_data["Air_Temp_Min"].dropna()
-    recent_temps_max = recent_data["Air_Temp_Max"].dropna()
-
-    mean_temp = recent_temps_avg.mean()
-    std_temp = recent_temps_avg.std() if len(recent_temps_avg) > 1 else 3.0
-
-    # Calculate recent patterns
-    if len(recent_temps_min) > 0 and len(recent_temps_max) > 0:
-        recent_avg_high = recent_temps_max.mean()
-        recent_avg_low = recent_temps_min.mean()
-    else:
-        recent_avg_high = mean_temp + 5.0
-        recent_avg_low = mean_temp - 5.0
-
-    synthetic_data = []
-    for date in future_dates:
-        day_of_year = date.timetuple().tm_yday
-        seasonal_factor = (
-            np.sin(2 * np.pi * day_of_year / 365.25) * 2
-        )  # +/- 2°C seasonal variation
-        daily_random = np.random.normal(0, std_temp * 0.4)  # Day-to-day variation
-
-        # Generate temperatures based on recent patterns
-        future_temp_max = recent_avg_high + seasonal_factor + daily_random
-        future_temp_min = recent_avg_low + seasonal_factor + daily_random
-        future_temp_avg = (future_temp_max + future_temp_min) / 2
-
-        synthetic_data.append(
-            {
-                "Date": pd.Timestamp(date),
-                "Air_Temperature": future_temp_avg,
-                "Air_Temp_Min": future_temp_min,
-                "Air_Temp_Max": future_temp_max,
-            }
-        )
-
-    return pd.DataFrame(synthetic_data)
-
-
-# Sample data for fallback
-SAMPLE_DATA = [
-    {"Date": "01/01/2024", "Temperature": 8.5},
-    {"Date": "02/01/2024", "Temperature": 7.2},
-    {"Date": "03/01/2024", "Temperature": 6.8},
-    {"Date": "04/01/2024", "Temperature": 9.1},
-    {"Date": "05/01/2024", "Temperature": 10.3},
-    {"Date": "06/01/2024", "Temperature": 12.7},
-    {"Date": "07/01/2024", "Temperature": 15.2},
-    {"Date": "08/01/2024", "Temperature": 17.8},
-    {"Date": "09/01/2024", "Temperature": 16.4},
-    {"Date": "10/01/2024", "Temperature": 13.9},
-    {"Date": "11/01/2024", "Temperature": 11.2},
-    {"Date": "12/01/2024", "Temperature": 9.6},
-]
 
 
 def validate_and_clean_data(df: pd.DataFrame, debug_mode: bool = False) -> pd.DataFrame:
@@ -361,7 +262,7 @@ def validate_and_clean_data(df: pd.DataFrame, debug_mode: bool = False) -> pd.Da
     return df.sort_values("Date").reset_index(drop=True)
 
 
-@st.cache_data
+@st.cache_data(ttl=60*60*24) # get new data every day
 def load_data() -> pd.DataFrame:
     """Load and process temperature data from Google Sheets.
 
@@ -387,36 +288,25 @@ def load_data() -> pd.DataFrame:
         else:
             loading_placeholder.empty()
             add_log_message(
-                "warning", "No valid data in Google Sheets, using sample data"
+                "error", "No valid data found in Google Sheets"
             )
-            return load_sample_data()
+            return pd.DataFrame()
 
     except requests.exceptions.Timeout:
         loading_placeholder.empty()
-        add_log_message("warning", "Request timed out. Using sample data instead.")
-        return load_sample_data()
+        add_log_message("error", "Request timed out while loading data from Google Sheets")
+        return pd.DataFrame()
     except requests.exceptions.RequestException as e:
         loading_placeholder.empty()
-        add_log_message("warning", f"Network error: {e}. Using sample data instead.")
-        return load_sample_data()
+        add_log_message("error", f"Network error loading data: {e}")
+        return pd.DataFrame()
     except Exception as e:
         loading_placeholder.empty()
         add_log_message(
-            "warning", f"Error processing data: {e}. Using sample data instead."
+            "error", f"Error processing data: {e}"
         )
-        return load_sample_data()
+        return pd.DataFrame()
 
-
-def load_sample_data() -> pd.DataFrame:
-    """Load sample temperature data as fallback.
-
-    Returns:
-        pd.DataFrame: Sample temperature data
-    """
-    df = pd.DataFrame(SAMPLE_DATA)
-    return validate_and_clean_data(
-        df, debug_mode=st.session_state.get("debug_mode", False)
-    )
 
 
 def incorporate_community_temps(df: pd.DataFrame) -> pd.DataFrame:
@@ -687,7 +577,7 @@ def create_community_temp_form() -> None:
                 st.error("Please enter a temperature between 0°C and 30°C.")
 
 
-@st.cache_data
+@st.cache_data(ttl=60*60*23.5) # get new data every day
 def get_weather_data(start_date: datetime, end_date: datetime) -> pd.DataFrame:
     """Get local weather data for the specified date range.
 
@@ -758,52 +648,6 @@ def get_weather_data(start_date: datetime, end_date: datetime) -> pd.DataFrame:
                             f"✅ Added {len(forecast_filtered)} days of real weather forecast",
                         )
 
-                    # For dates beyond 5-day forecast, fall back to synthetic
-                    if future_end > (today + timedelta(days=5)):
-                        remaining_dates = pd.date_range(
-                            start=today + timedelta(days=6), end=future_end, freq="D"
-                        )
-                        if len(remaining_dates) > 0:
-                            synthetic_weather = generate_synthetic_weather_fallback(
-                                weather_df, remaining_dates
-                            )
-                            weather_df = pd.concat(
-                                [weather_df, synthetic_weather], ignore_index=True
-                            )
-                            add_log_message(
-                                "info",
-                                f"🔮 Added {len(remaining_dates)} days of synthetic weather for extended forecast",
-                            )
-                else:
-                    # Forecast API failed, use synthetic for all future dates
-                    future_dates = pd.date_range(
-                        start=today + timedelta(days=1), end=future_end, freq="D"
-                    )
-                    synthetic_weather = generate_synthetic_weather_fallback(
-                        weather_df, future_dates
-                    )
-                    weather_df = pd.concat(
-                        [weather_df, synthetic_weather], ignore_index=True
-                    )
-                    add_log_message(
-                        "warning",
-                        "📡 Weather forecast failed, using synthetic data for future dates",
-                    )
-            else:
-                # No API key, use synthetic for all future dates
-                future_dates = pd.date_range(
-                    start=today + timedelta(days=1), end=future_end, freq="D"
-                )
-                synthetic_weather = generate_synthetic_weather_fallback(
-                    weather_df, future_dates
-                )
-                weather_df = pd.concat(
-                    [weather_df, synthetic_weather], ignore_index=True
-                )
-                add_log_message(
-                    "info",
-                    f"🔑 No weather API key found, using synthetic data for {len(future_dates)} future days",
-                )
 
         return weather_df.sort_values("Date").reset_index(drop=True)
 
@@ -1207,14 +1051,17 @@ def create_temperature_predictions_physics(
         # Prepare forecast data
         forecast_dates = future_weather["Date"].dt.to_pydatetime()
         forecast_air_temps = future_weather["Air_Temperature"].values
-        
+
         # Get today's air temperature for proper i-1 indexing
         today = pd.Timestamp(datetime.now().date())
         today_weather = historical_weather[historical_weather["Date"] == today]
         today_air_temp = None
         if not today_weather.empty:
             today_air_temp = today_weather["Air_Temperature"].iloc[-1]
-            add_log_message("info", f"🌡️ Using today's air temperature: {today_air_temp:.1f}°C for forecast")
+            add_log_message(
+                "info",
+                f"🌡️ Using today's air temperature: {today_air_temp:.1f}°C for forecast",
+            )
 
         # Generate water temperature forecast
         try:
@@ -1587,18 +1434,22 @@ def create_line_chart(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> None
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         dragmode=False,
         xaxis=dict(fixedrange=True),
-        yaxis=dict(fixedrange=True)
+        yaxis=dict(fixedrange=True),
     )
 
-    st.plotly_chart(fig, use_container_width=True, config={
-        'displayModeBar': False,
-        'scrollZoom': False,
-        'doubleClick': False,
-        'showTips': True,
-        'displaylogo': False,
-        'dragmode': False,
-        'staticPlot': False
-    })
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={
+            "displayModeBar": False,
+            "scrollZoom": False,
+            "doubleClick": False,
+            "showTips": True,
+            "displaylogo": False,
+            "dragmode": False,
+            "staticPlot": False,
+        },
+    )
 
 
 def create_monthly_analysis(df: pd.DataFrame) -> None:
@@ -1621,15 +1472,19 @@ def create_monthly_analysis(df: pd.DataFrame) -> None:
                 labels={"Temperature": "Avg Temperature (°C)"},
             )
             fig_monthly.update_traces(marker_color="lightblue")
-            st.plotly_chart(fig_monthly, use_container_width=True, config={
-        'displayModeBar': False,
-        'scrollZoom': False,
-        'doubleClick': False,
-        'showTips': True,
-        'displaylogo': False,
-        'dragmode': False,
-        'staticPlot': False
-    })
+            st.plotly_chart(
+                fig_monthly,
+                use_container_width=True,
+                config={
+                    "displayModeBar": False,
+                    "scrollZoom": False,
+                    "doubleClick": False,
+                    "showTips": True,
+                    "displaylogo": False,
+                    "dragmode": False,
+                    "staticPlot": False,
+                },
+            )
         else:
             add_log_message("info", "Not enough data for monthly analysis")
 
@@ -1643,15 +1498,19 @@ def create_monthly_analysis(df: pd.DataFrame) -> None:
             labels={"Temperature": "Temperature (°C)", "count": "Frequency"},
         )
         fig_hist.update_traces(marker_color="lightcoral")
-        st.plotly_chart(fig_hist, use_container_width=True, config={
-        'displayModeBar': False,
-        'scrollZoom': False,
-        'doubleClick': False,
-        'showTips': True,
-        'displaylogo': False,
-        'dragmode': False,
-        'staticPlot': False
-    })
+        st.plotly_chart(
+            fig_hist,
+            use_container_width=True,
+            config={
+                "displayModeBar": False,
+                "scrollZoom": False,
+                "doubleClick": False,
+                "showTips": True,
+                "displaylogo": False,
+                "dragmode": False,
+                "staticPlot": False,
+            },
+        )
 
 
 def display_recent_data(df: pd.DataFrame) -> None:
@@ -2261,18 +2120,22 @@ def create_forecast_tab(df: pd.DataFrame, weather_df: pd.DataFrame = None) -> No
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         dragmode=False,
         xaxis=dict(fixedrange=True),
-        yaxis=dict(fixedrange=True)
+        yaxis=dict(fixedrange=True),
     )
 
-    st.plotly_chart(fig, use_container_width=True, config={
-        'displayModeBar': False,
-        'scrollZoom': False,
-        'doubleClick': False,
-        'showTips': True,
-        'displaylogo': False,
-        'dragmode': False,
-        'staticPlot': False
-    })
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={
+            "displayModeBar": False,
+            "scrollZoom": False,
+            "doubleClick": False,
+            "showTips": True,
+            "displaylogo": False,
+            "dragmode": False,
+            "staticPlot": False,
+        },
+    )
 
     # Show forecast summary
     if "Type" in forecast_df.columns:
@@ -2478,17 +2341,22 @@ def create_temperature_dashboard(
     if not df.empty:
         today_data = df[df["Date"] == today]
         if not today_data.empty:
-            # Prefer actual data
-            actual_today = today_data[today_data["Type"] == "Actual"]
-            if not actual_today.empty:
-                today_water = f"{actual_today['Temperature'].iloc[0]:.1f}°C"
+            # Check if Type column exists (for backwards compatibility)
+            if "Type" in today_data.columns:
+                # Prefer actual data
+                actual_today = today_data[today_data["Type"] == "Actual"]
+                if not actual_today.empty:
+                    today_water = f"{actual_today['Temperature'].iloc[0]:.1f}°C"
+                else:
+                    # Use forecast/predicted data if actual not available
+                    forecast_today = today_data[
+                        today_data["Type"].isin(["Predicted", "Physics Model", "Imputed"])
+                    ]
+                    if not forecast_today.empty:
+                        today_water = f"{forecast_today['Temperature'].iloc[0]:.1f}°C*"
             else:
-                # Use forecast/predicted data if actual not available
-                forecast_today = today_data[
-                    today_data["Type"].isin(["Predicted", "Physics Model"])
-                ]
-                if not forecast_today.empty:
-                    today_water = f"{forecast_today['Temperature'].iloc[0]:.1f}°C*"
+                # No Type column, use any available data for today
+                today_water = f"{today_data['Temperature'].iloc[0]:.1f}°C"
 
     # Get air temperature data and find hottest forecasts
     if weather_df is not None and not weather_df.empty:
@@ -2577,17 +2445,20 @@ def create_temperature_dashboard(
             today_data = df[df["Date"] == today]
             if not today_data.empty:
                 # Get today's water temp (prefer actual, fallback to forecast)
-                actual_today = today_data[today_data["Type"] == "Actual"]
-                if not actual_today.empty:
-                    water_temp = actual_today["Temperature"].iloc[0]
-                else:
-                    forecast_today = today_data[
-                        today_data["Type"].isin(["Predicted", "Physics Model"])
-                    ]
-                    if not forecast_today.empty:
-                        water_temp = forecast_today["Temperature"].iloc[0]
+                water_temp = None
+                if "Type" in today_data.columns:
+                    actual_today = today_data[today_data["Type"] == "Actual"]
+                    if not actual_today.empty:
+                        water_temp = actual_today["Temperature"].iloc[0]
                     else:
-                        water_temp = None
+                        forecast_today = today_data[
+                            today_data["Type"].isin(["Predicted", "Physics Model", "Imputed"])
+                        ]
+                        if not forecast_today.empty:
+                            water_temp = forecast_today["Temperature"].iloc[0]
+                else:
+                    # No Type column, use any available data for today
+                    water_temp = today_data["Temperature"].iloc[0]
 
                 if water_temp is not None:
                     if water_temp > 16:
