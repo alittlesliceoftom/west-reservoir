@@ -4,7 +4,7 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta
 from io import StringIO
-from meteostat import Point, Daily
+from meteostat import Point, Daily, Hourly
 
 from config import GOOGLE_SHEETS_URL, RESERVOIR_LAT, RESERVOIR_LON, REQUEST_TIMEOUT, get_openweather_api_key
 
@@ -81,7 +81,7 @@ def load_historical_air_temps(start_date: datetime, end_date: datetime) -> pd.Da
         end_date: End date for historical data
 
     Returns:
-        pd.DataFrame: DataFrame with 'date' and 'air_temp' columns
+        pd.DataFrame: DataFrame with 'date', 'air_temp', 'air_temp_min', 'air_temp_max' columns
 
     Raises:
         DataLoadError: If data cannot be loaded
@@ -100,12 +100,12 @@ def load_historical_air_temps(start_date: datetime, end_date: datetime) -> pd.Da
         # Reset index to get date as column
         weather_df = weather_df.reset_index()
 
-        # Select and rename columns
-        weather_df = weather_df[["time", "tavg"]].copy()
-        weather_df.columns = ["date", "air_temp"]
+        # Select and rename columns (avg, min, max)
+        weather_df = weather_df[["time", "tavg", "tmin", "tmax"]].copy()
+        weather_df.columns = ["date", "air_temp", "air_temp_min", "air_temp_max"]
 
-        # Remove rows with missing temperature data
-        weather_df = weather_df.dropna()
+        # Remove rows with missing average temperature data
+        weather_df = weather_df.dropna(subset=["air_temp"])
 
         if weather_df.empty:
             raise DataLoadError(
@@ -124,6 +124,58 @@ def load_historical_air_temps(start_date: datetime, end_date: datetime) -> pd.Da
         raise DataLoadError(f"Failed to load historical weather data from Meteostat: {e}")
 
 
+def load_hourly_air_temps(start_date: datetime, end_date: datetime) -> pd.DataFrame:
+    """
+    Load hourly air temperature data from Meteostat.
+
+    Args:
+        start_date: Start datetime for historical data
+        end_date: End datetime for historical data
+
+    Returns:
+        pd.DataFrame: DataFrame with 'datetime' and 'air_temp' columns
+
+    Raises:
+        DataLoadError: If data cannot be loaded
+    """
+    try:
+        location = Point(RESERVOIR_LAT, RESERVOIR_LON)
+        weather_data = Hourly(location, start_date, end_date)
+        weather_df = weather_data.fetch()
+
+        if weather_df.empty:
+            raise DataLoadError(
+                f"No hourly weather data available from Meteostat for "
+                f"{start_date} to {end_date}"
+            )
+
+        # Reset index to get datetime as column
+        weather_df = weather_df.reset_index()
+
+        # Select and rename columns
+        weather_df = weather_df[["time", "temp"]].copy()
+        weather_df.columns = ["datetime", "air_temp"]
+
+        # Remove rows with missing temperature data
+        weather_df = weather_df.dropna()
+
+        if weather_df.empty:
+            raise DataLoadError(
+                f"Hourly weather data contains no valid temperature readings for "
+                f"{start_date} to {end_date}"
+            )
+
+        # Ensure datetime is datetime type
+        weather_df["datetime"] = pd.to_datetime(weather_df["datetime"])
+
+        return weather_df.sort_values("datetime").reset_index(drop=True)
+
+    except DataLoadError:
+        raise
+    except Exception as e:
+        raise DataLoadError(f"Failed to load hourly weather data from Meteostat: {e}")
+
+
 def load_forecast_air_temps(days: int = 5) -> pd.DataFrame:
     """
     Load future air temperature forecast from OpenWeatherMap.
@@ -132,7 +184,7 @@ def load_forecast_air_temps(days: int = 5) -> pd.DataFrame:
         days: Number of days to forecast (max 5 for free tier)
 
     Returns:
-        pd.DataFrame: DataFrame with 'date' and 'air_temp' columns
+        pd.DataFrame: DataFrame with 'date', 'air_temp', 'air_temp_min', 'air_temp_max' columns
 
     Raises:
         DataLoadError: If forecast cannot be loaded or API key is missing
@@ -176,19 +228,21 @@ def load_forecast_air_temps(days: int = 5) -> pd.DataFrame:
 
             temp = item["main"]["temp"]
 
-            # Group by date to get daily average
+            # Group by date
             if date_key not in daily_data:
                 daily_data[date_key] = []
 
             daily_data[date_key].append(temp)
 
-        # Create daily aggregated data
+        # Create daily aggregated data with min/max
         forecast_data = []
         for date_key, temps in daily_data.items():
             forecast_data.append(
                 {
                     "date": pd.Timestamp(date_key),
                     "air_temp": sum(temps) / len(temps),  # Daily average
+                    "air_temp_min": min(temps),
+                    "air_temp_max": max(temps),
                 }
             )
 

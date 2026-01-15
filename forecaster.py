@@ -1,75 +1,159 @@
-"""Water temperature forecasting using simple physics model"""
+"""Water temperature forecasting using hourly physics simulation"""
 
 import pandas as pd
 import numpy as np
 from scipy.optimize import minimize
-from typing import Dict
+from typing import Dict, List, Optional
+from datetime import datetime, timedelta
 
 
 class WaterTempForecaster:
     """
-    Simple physics-based water temperature forecaster.
+    Physics-based water temperature forecaster using hourly simulation.
 
-    Uses heat transfer equation: dT/dt = k * (T_air_yesterday - T_water)
+    Uses heat transfer equation applied hour-by-hour:
+        T_water(t+1h) = T_water(t) + k * (T_air(t) - T_water(t))
 
-    Where:
-    - k: heat transfer coefficient (day^-1)
-    - T_air_yesterday: Previous day's air temperature
-    - T_water: Current water temperature
+    Water temperature measurements are at 7am, so the model simulates
+    the 24 hours from 7am to 7am to predict the next day's reading.
     """
 
-    def __init__(self, heat_transfer_coeff: float = 0.05):
+    MEASUREMENT_HOUR = 7  # Water temp is measured at 7am
+
+    def __init__(self, heat_transfer_coeff: float = 0.02):
         """
-        Initialize forecaster with heat transfer coefficient.
+        Initialize forecaster with hourly heat transfer coefficient.
 
         Args:
-            heat_transfer_coeff: Heat transfer coefficient k (default: 0.05 day^-1)
+            heat_transfer_coeff: Heat transfer coefficient k per hour
+                                 (default: 0.02, meaning ~40% daily response)
         """
         self.k = heat_transfer_coeff
+        self.hourly_air_temps: Optional[pd.DataFrame] = None
+
+    def set_hourly_air_temps(self, hourly_air_temps: pd.DataFrame) -> None:
+        """
+        Set the hourly air temperature data for simulation.
+
+        Args:
+            hourly_air_temps: DataFrame with 'datetime' and 'air_temp' columns
+        """
+        self.hourly_air_temps = hourly_air_temps.copy()
+        self.hourly_air_temps = self.hourly_air_temps.set_index("datetime").sort_index()
+
+    def _get_hourly_temps_for_period(
+        self, start_dt: datetime, end_dt: datetime
+    ) -> List[float]:
+        """
+        Get hourly air temperatures for a time period.
+
+        Args:
+            start_dt: Start datetime (inclusive)
+            end_dt: End datetime (exclusive)
+
+        Returns:
+            List of hourly air temperatures
+        """
+        if self.hourly_air_temps is None:
+            return []
+
+        # Get hourly temps between start and end
+        mask = (self.hourly_air_temps.index >= start_dt) & (
+            self.hourly_air_temps.index < end_dt
+        )
+        temps = self.hourly_air_temps.loc[mask, "air_temp"].tolist()
+        return temps
+
+    def _simulate_24h(
+        self, start_water_temp: float, hourly_air_temps: List[float]
+    ) -> float:
+        """
+        Simulate water temperature change over a period using hourly air temps.
+
+        Args:
+            start_water_temp: Starting water temperature
+            hourly_air_temps: List of hourly air temperatures
+
+        Returns:
+            Final water temperature after simulation
+        """
+        water_temp = start_water_temp
+
+        for air_temp in hourly_air_temps:
+            temp_diff = air_temp - water_temp
+            water_temp += self.k * temp_diff
+
+        return water_temp
 
     def fit(self, temperatures: pd.DataFrame) -> None:
         """
-        Train the model on measured water temperatures.
+        Train the model on measured water temperatures using hourly simulation.
 
         Optimizes the heat transfer coefficient k to minimize prediction error.
 
         Args:
-            temperatures: DataFrame with columns: date, water_temp, air_temp, source
-                         Only rows with source == 'MEASURED' will be used for training.
+            temperatures: DataFrame with columns: date, water_temp, source
+                         Only rows with source == 'MEASURED' will be used.
         """
+        if self.hourly_air_temps is None:
+            return
+
         # Filter to measured data only
         training_data = temperatures[temperatures["source"] == "MEASURED"].copy()
 
         if len(training_data) < 10:
-            # Not enough data to train, use default coefficient
             return
 
         # Sort by date
         training_data = training_data.sort_values("date").reset_index(drop=True)
 
-        # Extract arrays for training
-        air_temps = training_data["air_temp"].values
-        water_temps = training_data["water_temp"].values
+        # Build training pairs: (start_water_temp, hourly_airs, actual_end_temp)
+        training_pairs = []
+
+        for i in range(1, len(training_data)):
+            prev_row = training_data.iloc[i - 1]
+            curr_row = training_data.iloc[i]
+
+            prev_date = prev_row["date"]
+            curr_date = curr_row["date"]
+
+            # Get 7am datetime for each measurement
+            start_dt = pd.Timestamp(prev_date).replace(hour=self.MEASUREMENT_HOUR)
+            end_dt = pd.Timestamp(curr_date).replace(hour=self.MEASUREMENT_HOUR)
+
+            # Get hourly temps for this period
+            hourly_temps = self._get_hourly_temps_for_period(start_dt, end_dt)
+
+            if len(hourly_temps) >= 20:  # Need at least ~20 hours of data
+                training_pairs.append(
+                    {
+                        "start_water": prev_row["water_temp"],
+                        "hourly_airs": hourly_temps,
+                        "actual_end": curr_row["water_temp"],
+                    }
+                )
+
+        if len(training_pairs) < 5:
+            return
 
         def objective(params):
             """Objective function: minimize sum of squared errors"""
             k = params[0]
+            total_error = 0
 
-            # Predict water temps using current k
-            predicted = np.zeros(len(water_temps))
-            predicted[0] = water_temps[0]  # Start with first measurement
+            for pair in training_pairs:
+                # Simulate with this k value
+                water_temp = pair["start_water"]
+                for air_temp in pair["hourly_airs"]:
+                    water_temp += k * (air_temp - water_temp)
 
-            for i in range(1, len(water_temps)):
-                # Use yesterday's air temp (i-1) to predict today's water temp
-                temp_diff = air_temps[i - 1] - predicted[i - 1]
-                temp_change = k * temp_diff
-                predicted[i] = predicted[i - 1] + temp_change
+                # Add squared error
+                total_error += (water_temp - pair["actual_end"]) ** 2
 
-            # Return sum of squared errors
-            return np.sum((predicted - water_temps) ** 2)
+            return total_error
 
-        # Optimize k (bounds: 0.01 to 0.5)
-        bounds = [(0.01, 0.5)]
+        # Optimize k (bounds: 0.001 to 0.1 per hour)
+        bounds = [(0.001, 0.1)]
         initial_guess = [self.k]
 
         result = minimize(objective, initial_guess, bounds=bounds, method="L-BFGS-B")
@@ -78,67 +162,80 @@ class WaterTempForecaster:
             self.k = result.x[0]
 
     def predict_next_day(
-        self, current_water_temp: float, yesterday_air_temp: float
+        self, current_water_temp: float, hourly_air_temps: List[float]
     ) -> float:
         """
-        Predict tomorrow's water temperature.
+        Predict tomorrow's water temperature using hourly simulation.
 
         Args:
-            current_water_temp: Today's water temperature (°C)
-            yesterday_air_temp: Yesterday's air temperature (°C)
+            current_water_temp: Today's water temperature at 7am
+            hourly_air_temps: List of hourly air temps from 7am to 7am (24 values)
 
         Returns:
-            float: Predicted water temperature for tomorrow (°C)
+            Predicted water temperature for tomorrow at 7am
         """
-        # Calculate temperature difference
-        temp_diff = yesterday_air_temp - current_water_temp
-
-        # Calculate temperature change
-        temp_change = self.k * temp_diff
-
-        # Predicted temperature (no clamping)
-        predicted = current_water_temp + temp_change
-
-        return predicted
+        return self._simulate_24h(current_water_temp, hourly_air_temps)
 
     def explain_prediction(
-        self, current_water_temp: float, yesterday_air_temp: float
-    ) -> Dict[str, float]:
+        self, current_water_temp: float, hourly_air_temps: List[float]
+    ) -> Dict:
         """
-        Returns a breakdown of tomorrow's prediction for debugging.
+        Returns a detailed breakdown of the 24-hour simulation.
 
         Args:
-            current_water_temp: Today's water temperature (°C)
-            yesterday_air_temp: Yesterday's air temperature (°C)
+            current_water_temp: Today's water temperature at 7am
+            hourly_air_temps: List of hourly air temps from 7am to 7am
 
         Returns:
-            dict: Dictionary containing:
-                - current_water_temp: Current water temperature
-                - yesterday_air_temp: Yesterday's air temperature
-                - temperature_difference: Difference between air and water
-                - heat_transfer_coefficient: Model's k value
-                - temperature_change: Predicted change in water temp
-                - predicted_water_temp: Tomorrow's predicted temperature
+            dict: Dictionary containing simulation details
         """
-        temp_diff = yesterday_air_temp - current_water_temp
-        temp_change = self.k * temp_diff
-        predicted = current_water_temp + temp_change
+        if not hourly_air_temps:
+            return {
+                "current_water_temp": current_water_temp,
+                "hours_simulated": 0,
+                "predicted_water_temp": current_water_temp,
+                "hourly_breakdown": [],
+            }
+
+        # Simulate and track each hour
+        water_temp = current_water_temp
+        hourly_breakdown = []
+
+        for i, air_temp in enumerate(hourly_air_temps):
+            hour = (self.MEASUREMENT_HOUR + i) % 24
+            temp_diff = air_temp - water_temp
+            temp_change = self.k * temp_diff
+            new_water_temp = water_temp + temp_change
+
+            hourly_breakdown.append(
+                {
+                    "hour": hour,
+                    "air_temp": air_temp,
+                    "water_temp_before": water_temp,
+                    "temp_change": temp_change,
+                    "water_temp_after": new_water_temp,
+                }
+            )
+
+            water_temp = new_water_temp
 
         return {
             "current_water_temp": current_water_temp,
-            "yesterday_air_temp": yesterday_air_temp,
-            "temperature_difference": temp_diff,
+            "hours_simulated": len(hourly_air_temps),
+            "air_temp_avg": sum(hourly_air_temps) / len(hourly_air_temps),
+            "air_temp_min": min(hourly_air_temps),
+            "air_temp_max": max(hourly_air_temps),
             "heat_transfer_coefficient": self.k,
-            "temperature_change": temp_change,
-            "predicted_water_temp": predicted,
+            "total_temp_change": water_temp - current_water_temp,
+            "predicted_water_temp": water_temp,
+            "hourly_breakdown": hourly_breakdown,
         }
 
     def predict(self, temperatures: pd.DataFrame) -> pd.DataFrame:
         """
         Predict water temps for all rows where source == 'AIR_ONLY'.
 
-        Iterates day by day, using each prediction as input for the next day.
-        Updates the DataFrame in place.
+        Uses hourly simulation for each day.
 
         Args:
             temperatures: DataFrame with columns: date, water_temp, air_temp, source
@@ -147,31 +244,42 @@ class WaterTempForecaster:
             pd.DataFrame: Updated DataFrame with predictions filled in
         """
         result = temperatures.copy()
-
-        # Sort by date to ensure correct temporal order
         result = result.sort_values("date").reset_index(drop=True)
 
-        # Find where predictions start
         for i in range(len(result)):
             if result.loc[i, "source"] == "AIR_ONLY":
-                # Get the previous row (most recent measured or predicted value)
                 if i == 0:
-                    # Can't predict if this is the first row
                     continue
 
                 prev_row = result.iloc[i - 1]
+                curr_date = result.loc[i, "date"]
+
+                # Get start water temp from previous day
                 current_water_temp = prev_row["water_temp"]
 
-                # Get yesterday's air temp (from previous row)
-                yesterday_air_temp = prev_row["air_temp"]
-
-                # Predict tomorrow's water temp
-                predicted_water_temp = self.predict_next_day(
-                    current_water_temp, yesterday_air_temp
+                # Get 7am to 7am period
+                start_dt = pd.Timestamp(prev_row["date"]).replace(
+                    hour=self.MEASUREMENT_HOUR
                 )
+                end_dt = pd.Timestamp(curr_date).replace(hour=self.MEASUREMENT_HOUR)
 
-                # Update the DataFrame
-                result.loc[i, "water_temp"] = predicted_water_temp
+                # Get hourly temps for this period
+                hourly_temps = self._get_hourly_temps_for_period(start_dt, end_dt)
+
+                if hourly_temps:
+                    predicted = self._simulate_24h(current_water_temp, hourly_temps)
+                else:
+                    # Fallback: use daily air temp with equivalent daily k
+                    daily_k = 1 - (1 - self.k) ** 24
+                    air_temp = result.loc[i, "air_temp"]
+                    if pd.notna(air_temp):
+                        predicted = current_water_temp + daily_k * (
+                            air_temp - current_water_temp
+                        )
+                    else:
+                        predicted = current_water_temp
+
+                result.loc[i, "water_temp"] = predicted
                 result.loc[i, "source"] = "PREDICTED"
 
         return result
