@@ -109,7 +109,7 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                                     "Water After (C)": "{:.2f}",
                                 }
                             ),
-                            width="stretch",
+                            use_container_width=True,
                         )
                 else:
                     st.info("Waiting for hourly air temperature data")
@@ -136,7 +136,7 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                 height=300,
                 margin=dict(l=0, r=0, t=20, b=0),
             )
-            st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fig, use_container_width=True)
 
         # Section 5: Raw DataFrame
         st.subheader("Raw Data (Last 10 Rows)")
@@ -144,7 +144,7 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
             ["date", "water_temp", "air_temp", "source"]
         ].copy()
         display_df["date"] = display_df["date"].dt.strftime("%Y-%m-%d")
-        st.dataframe(display_df, width="stretch")
+        st.dataframe(display_df, use_container_width=True)
 
 
 def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
@@ -277,7 +277,7 @@ def main():
             "by both position and depth - this is just a snapshot of conditions."
         )
     with col_image:
-        st.image("image.png", width="stretch")
+        st.image("image.png", use_container_width=True)
 
     try:
         # Step 1: Load water temperature measurements
@@ -365,7 +365,7 @@ def main():
         # Display: Temperature chart
         st.header("Temperature History and Forecast")
         chart = create_temperature_chart(temperatures)
-        st.plotly_chart(chart, width="stretch")
+        st.plotly_chart(chart, use_container_width=True)
 
         # Display: Summary statistics
         st.header("Summary Statistics")
