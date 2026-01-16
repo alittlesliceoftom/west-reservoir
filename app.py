@@ -277,7 +277,7 @@ def main():
             "by both position and depth - this is just a snapshot of conditions."
         )
     with col_image:
-        st.image("image.png", use_container_width=True)
+        st.image("image.png")
 
     try:
         # Step 1: Load water temperature measurements
