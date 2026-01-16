@@ -277,7 +277,7 @@ def main():
             "by both position and depth - this is just a snapshot of conditions."
         )
     with col_image:
-        st.image("image.png", use_container_width=True)
+        st.image("image.png")
 
     try:
         # Step 1: Load water temperature measurements
@@ -366,6 +366,38 @@ def main():
         st.header("Temperature History and Forecast")
         chart = create_temperature_chart(temperatures)
         st.plotly_chart(chart, use_container_width=True)
+
+        # Display: Forecast table dropdown
+        with st.expander("View Daily Forecast Table"):
+            today = datetime.now().date()
+            forecast_data = temperatures[
+                (temperatures["date"].dt.date >= today) &
+                (temperatures["water_temp"].notna())
+            ].copy()
+
+            if not forecast_data.empty:
+                display_forecast = forecast_data[["date", "water_temp", "air_temp", "air_temp_min", "air_temp_max", "source"]].copy()
+                display_forecast["date"] = display_forecast["date"].dt.strftime("%a %d %b")
+                display_forecast = display_forecast.rename(columns={
+                    "date": "Date",
+                    "water_temp": "Water (C)",
+                    "air_temp": "Air Avg (C)",
+                    "air_temp_min": "Air Low (C)",
+                    "air_temp_max": "Air High (C)",
+                    "source": "Source",
+                })
+                st.dataframe(
+                    display_forecast.style.format({
+                        "Water (C)": "{:.1f}",
+                        "Air Avg (C)": "{:.1f}",
+                        "Air Low (C)": "{:.1f}",
+                        "Air High (C)": "{:.1f}",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("No forecast data available")
 
         # Display: Summary statistics
         st.header("Summary Statistics")
