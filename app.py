@@ -28,7 +28,7 @@ def display_debug_panel(
     hourly_air_temps: pd.DataFrame,
 ):
     """Display comprehensive debug information."""
-    with st.expander("Debug Information", expanded=True):
+    with st.expander("Details for nerds", expanded=False):
         # Section 1: Data Overview
         st.subheader("Data Overview")
         col1, col2, col3 = st.columns(3)
@@ -237,7 +237,8 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
         y0=0,
         y1=1,
         yref="paper",
-        line=dict(color="gray", width=2),
+        line=dict(color="gray", width=15),
+        opacity = 0.3
     )
     fig.add_annotation(
         x=str(today),
@@ -277,7 +278,7 @@ def main():
             "by both position and depth - this is just a snapshot of conditions."
         )
     with col_image:
-        st.image("image.png")
+        st.image("image.png",)
 
     try:
         # Step 1: Load water temperature measurements
@@ -338,79 +339,50 @@ def main():
         # Step 8: Generate predictions
         temperatures = forecaster.predict(temperatures)
 
-        # Display: Current temperature with clear date labeling
-        today = datetime.now().date()
-        st.header("Current Temperature")
 
-        # Find today's data
-        today_data = temperatures[temperatures["date"].dt.date == today]
+        with col_info:
+            # Display: Current temperature with clear date labeling
+            today = datetime.now().date()
+            st.header("Current Temperature")
 
-        if not today_data.empty:
-            latest = today_data.iloc[0]
-            st.metric("Today's Temperature", f"{latest['water_temp']:.1f}C")
-        else:
-            # No data for today, show latest reading
-            measured_data = temperatures[temperatures["source"] == "MEASURED"]
-            if not measured_data.empty:
-                latest = measured_data.iloc[-1]
-                latest_date = latest["date"].strftime("%Y-%m-%d")
-                st.warning(
-                    f"No measurement for today yet. Showing latest reading from {latest_date}"
-                )
-                st.metric(
-                    f"Latest Reading ({latest_date})",
-                    f"{latest['water_temp']:.1f}C",
-                )
+            # Find today's data
+            today_data = temperatures[temperatures["date"].dt.date == today]
+
+            if any(today_data["source"] == "MEASURED"):
+                latest = today_data.iloc[0]
+                st.metric("Today's Temperature", f"{latest['water_temp']:.1f}C")
+            else:
+                # No data for today, show latest reading
+                measured_data = temperatures[temperatures["source"] == "MEASURED"]
+                if not measured_data.empty:
+                    latest = measured_data.iloc[-1]
+                    latest_date = latest["date"].strftime("%Y-%m-%d")
+                    st.warning(
+                        f"No measurement for today yet. Showing latest reading from {latest_date}. \n\n"
+                        f"Please contribute the temperature to the spreadsheet [here](https://docs.google.com/spreadsheets/d/1HNnucep6pv2jCFg2bYR_gV78XbYvWYyjx9y9tTNVapw/edit?usp=sharing"
+                    )
+                    st.metric(
+                        f"Latest Reading ({latest_date})",
+                        f"{latest['water_temp']:.1f}C",
+                    )
 
         # Display: Temperature chart
         st.header("Temperature History and Forecast")
+        st.text("""The chart shows the temperature history and forecast for the last 10 days, and next 5 days.
+         Red bar shows the air temp range each day, with the black line being the average. The blue line is the water tempterature. It is dotted for forecast days.""")
         chart = create_temperature_chart(temperatures)
         st.plotly_chart(chart, use_container_width=True)
-
-        # Display: Forecast table dropdown
-        with st.expander("View Daily Forecast Table"):
-            today = datetime.now().date()
-            forecast_data = temperatures[
-                (temperatures["date"].dt.date >= today) &
-                (temperatures["water_temp"].notna())
-            ].copy()
-
-            if not forecast_data.empty:
-                display_forecast = forecast_data[["date", "water_temp", "air_temp", "air_temp_min", "air_temp_max", "source"]].copy()
-                display_forecast["date"] = display_forecast["date"].dt.strftime("%a %d %b")
-                display_forecast = display_forecast.rename(columns={
-                    "date": "Date",
-                    "water_temp": "Water (C)",
-                    "air_temp": "Air Avg (C)",
-                    "air_temp_min": "Air Low (C)",
-                    "air_temp_max": "Air High (C)",
-                    "source": "Source",
-                })
-                st.dataframe(
-                    display_forecast.style.format({
-                        "Water (C)": "{:.1f}",
-                        "Air Avg (C)": "{:.1f}",
-                        "Air Low (C)": "{:.1f}",
-                        "Air High (C)": "{:.1f}",
-                    }),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-            else:
-                st.info("No forecast data available")
 
         # Display: Summary statistics
         st.header("Summary Statistics")
         measured = temperatures[temperatures["source"] == "MEASURED"]
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Average", f"{measured['water_temp'].mean():.1f}C")
+            st.metric("Lowest Recorded at West Reservoir! ❄️", f"{measured['water_temp'].min():.1f}C")
         with col2:
-            st.metric("Minimum", f"{measured['water_temp'].min():.1f}C")
+            st.metric("Hottest Recorded at West Reservoir! 🥵", f"{measured['water_temp'].max():.1f}C")
         with col3:
-            st.metric("Maximum", f"{measured['water_temp'].max():.1f}C")
-        with col4:
-            st.metric("Total Readings", len(measured))
+            st.metric("Total Readings Taken", len(measured))
 
         # Display: Debug panel (always visible)
         display_debug_panel(temperatures, forecaster, hourly_air_temps)
