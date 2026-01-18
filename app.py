@@ -359,7 +359,7 @@ def main():
                     latest_date = latest["date"].strftime("%Y-%m-%d")
                     st.warning(
                         f"No measurement for today yet. Showing latest reading from {latest_date}. \n\n"
-                        f"Please contribute the temperature to the spreadsheet [here](https://docs.google.com/spreadsheets/d/1HNnucep6pv2jCFg2bYR_gV78XbYvWYyjx9y9tTNVapw/edit?usp=sharing"
+                        f"Please contribute the temperature to the spreadsheet [here](https://docs.google.com/spreadsheets/d/1HNnucep6pv2jCFg2bYR_gV78XbYvWYyjx9y9tTNVapw/edit?usp=sharing)"
                     )
                     st.metric(
                         f"Latest Reading ({latest_date})",
