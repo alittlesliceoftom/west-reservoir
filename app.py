@@ -14,6 +14,33 @@ from data import (
 )
 from forecaster import WaterTempForecaster
 
+# Cache TTL for data (6 hours)
+CACHE_TTL = timedelta(hours=6)
+
+
+@st.cache_data(ttl=CACHE_TTL)
+def cached_load_water_temps():
+    """Load water temps with 6-hour cache."""
+    return load_water_temps()
+
+
+@st.cache_data(ttl=CACHE_TTL)
+def cached_load_historical_air_temps(start_date, end_date):
+    """Load historical air temps with 6-hour cache."""
+    return load_historical_air_temps(start_date, end_date)
+
+
+@st.cache_data(ttl=CACHE_TTL)
+def cached_load_hourly_air_temps(start_date, end_date):
+    """Load hourly air temps with 6-hour cache."""
+    return load_hourly_air_temps(start_date, end_date)
+
+
+@st.cache_data(ttl=CACHE_TTL)
+def cached_load_forecast_air_temps(days):
+    """Load forecast air temps with 6-hour cache."""
+    return load_forecast_air_temps(days=days)
+
 
 st.set_page_config(
     page_title="West Reservoir Water Temperature Tracker",
@@ -280,17 +307,23 @@ def main():
     with col_image:
         st.image("image.png",)
 
+    # Refresh button to clear cache
+    if st.button("Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
+
     try:
         # Step 1: Load water temperature measurements
-        water_temps = load_water_temps()
+        water_temps = cached_load_water_temps()
 
         # Step 2: Load historical air temperatures (daily for chart)
-        start_date = water_temps["date"].min()
-        end_date = datetime.now()
-        air_temps_hist = load_historical_air_temps(start_date, end_date)
+        # Normalize dates to day-level for consistent caching
+        start_date = pd.Timestamp(water_temps["date"].min()).normalize()
+        end_date = pd.Timestamp.now().normalize()
+        air_temps_hist = cached_load_historical_air_temps(start_date, end_date)
 
         # Step 3: Load hourly air temperatures (for model)
-        hourly_air_temps = load_hourly_air_temps(start_date, end_date)
+        hourly_air_temps = cached_load_hourly_air_temps(start_date, end_date)
 
         # Step 3b: Fill missing daily temps from hourly data
         # (Daily API has ~2 day lag, but hourly is more current)
@@ -323,7 +356,7 @@ def main():
 
         # Step 6: Add forecast dates
         try:
-            forecast = load_forecast_air_temps(days=5)
+            forecast = cached_load_forecast_air_temps(days=5)
             forecast["source"] = "AIR_ONLY"
             temperatures = pd.concat([temperatures, forecast], ignore_index=True)
             temperatures = temperatures.sort_values("date").reset_index(drop=True)
@@ -343,33 +376,70 @@ def main():
         with col_info:
             # Display: Current temperature with clear date labeling
             today = datetime.now().date()
+            yesterday = today - timedelta(days=1)
+            tomorrow = today + timedelta(days=1)
+
             st.header("Current Temperature")
 
-            # Find today's data
+            # Get measured data
+            measured_data = temperatures[temperatures["source"] == "MEASURED"]
             today_data = temperatures[temperatures["date"].dt.date == today]
+            has_today_measurement = any(today_data["source"] == "MEASURED")
 
-            if any(today_data["source"] == "MEASURED"):
-                latest = today_data.iloc[0]
-                st.metric("Today's Temperature", f"{latest['water_temp']:.1f}C")
+            # Show measured temperature status
+            if has_today_measurement:
+                today_measured = today_data[today_data["source"] == "MEASURED"].iloc[0]
+                st.metric("Today's Measured", f"{today_measured['water_temp']:.1f}C")
             else:
-                # No data for today, show latest reading
-                measured_data = temperatures[temperatures["source"] == "MEASURED"]
                 if not measured_data.empty:
                     latest = measured_data.iloc[-1]
                     latest_date = latest["date"].strftime("%Y-%m-%d")
                     st.warning(
-                        f"No measurement for today yet. Showing latest reading from {latest_date}. \n\n"
+                        f"No measurement for today yet. Last measured: {latest_date}\n\n"
                         f"Please contribute the temperature to the spreadsheet [here](https://docs.google.com/spreadsheets/d/1HNnucep6pv2jCFg2bYR_gV78XbYvWYyjx9y9tTNVapw/edit?usp=sharing)"
                     )
-                    st.metric(
-                        f"Latest Reading ({latest_date})",
-                        f"{latest['water_temp']:.1f}C",
+
+            # Compute forecasts independently (always from yesterday's measurement)
+            st.subheader("Forecasts")
+
+            # Find yesterday's measurement for today's forecast
+            yesterday_data = measured_data[measured_data["date"].dt.date == yesterday]
+            today_forecast_temp = None
+            tomorrow_forecast_temp = None
+
+            if not yesterday_data.empty:
+                # Compute today's forecast from yesterday's measurement
+                yesterday_temp = yesterday_data.iloc[-1]["water_temp"]
+                yesterday_dt = pd.Timestamp(yesterday).replace(hour=forecaster.MEASUREMENT_HOUR)
+                today_dt = pd.Timestamp(today).replace(hour=forecaster.MEASUREMENT_HOUR)
+                hourly_temps = forecaster._get_hourly_temps_for_period(yesterday_dt, today_dt)
+                if hourly_temps:
+                    today_forecast_temp = forecaster._simulate_24h(
+                        yesterday_temp, hourly_temps
                     )
+
+            # Get tomorrow's forecast from the predictions DataFrame
+            tomorrow_data = temperatures[temperatures["date"].dt.date == tomorrow]
+            if not tomorrow_data.empty and tomorrow_data.iloc[0]["source"] == "PREDICTED":
+                tomorrow_forecast_temp = tomorrow_data.iloc[0]["water_temp"]
+
+            # Display forecasts
+            col_today_fc, col_tomorrow_fc = st.columns(2)
+            with col_today_fc:
+                if today_forecast_temp is not None:
+                    st.metric("Today's Forecast (excludes today's measurement)", f"{today_forecast_temp:.1f}C")
+                else:
+                    st.metric("Today's Forecast (excludes today's measurement)", "N/A")
+            with col_tomorrow_fc:
+                if tomorrow_forecast_temp is not None:
+                    st.metric("Tomorrow's Forecast", f"{tomorrow_forecast_temp:.1f}C")
+                else:
+                    st.metric("Tomorrow's Forecast", "N/A")
 
         # Display: Temperature chart
         st.header("Temperature History and Forecast")
         st.text("""The chart shows the temperature history and forecast for the last 10 days, and next 5 days.
-         Red bar shows the air temp range each day, with the black line being the average. The blue line is the water tempterature. It is dotted for forecast days.""")
+        Red bar shows the air temp range each day, with the black line being the average. The blue line is the water tempterature. It is dotted for forecast days.""")
         chart = create_temperature_chart(temperatures)
         st.plotly_chart(chart, use_container_width=True)
 
