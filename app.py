@@ -43,10 +43,13 @@ def display_debug_panel(
 
         # Section 2: Model Parameters
         st.subheader("Model Parameters")
-        st.write(f"**Heat transfer coefficient (k)**: {forecaster.k:.4f} per hour")
+        st.write(f"**Base heat transfer coefficient (k)**: {forecaster.k:.4f} per hour")
+        st.write(f"**Seasonal amplitude (k_seasonal)**: {forecaster.k_seasonal:.3f}")
         daily_response = 1 - (1 - forecaster.k) ** 24
-        st.write(f"**Daily response**: {daily_response:.1%} of temperature difference")
-        st.write("**Physics**: T_water(t+1h) = T_water(t) + k * (T_air(t) - T_water(t))")
+        st.write(f"**Daily response (base)**: {daily_response:.1%} of temperature difference")
+        if forecaster.k_seasonal != 0:
+            st.write(f"**Seasonal variation**: k varies ±{abs(forecaster.k_seasonal)*100:.0f}% from winter to summer")
+        st.write("**Physics**: T_water(t+1h) = T_water(t) + k_eff * (T_air(t) - T_water(t))")
 
         # Section 3: Tomorrow's Calculation (if available)
         has_predictions = any(temperatures["source"] == "PREDICTED")
@@ -67,9 +70,12 @@ def display_debug_panel(
                 hourly_temps = forecaster._get_hourly_temps_for_period(start_dt, end_dt)
 
                 if hourly_temps:
+                    # Prediction is for the day after latest measurement
+                    prediction_date = latest_date + timedelta(days=1)
                     explanation = forecaster.explain_prediction(
                         current_water_temp=latest["water_temp"],
                         hourly_air_temps=hourly_temps,
+                        date=prediction_date,
                     )
 
                     st.code(
@@ -78,7 +84,10 @@ Current water temp (7am):  {explanation['current_water_temp']:.2f} C
 Hours simulated:           {explanation['hours_simulated']}
 Air temp range:            {explanation['air_temp_min']:.1f} C to {explanation['air_temp_max']:.1f} C
 Air temp average:          {explanation['air_temp_avg']:.1f} C
-Heat transfer rate (k):    {explanation['heat_transfer_coefficient']:.4f} per hour
+Base k:                    {explanation['heat_transfer_coefficient']:.4f} per hour
+Seasonal amplitude:        {explanation['seasonal_amplitude']:.3f}
+Seasonal factor:           {explanation['seasonal_factor']:.3f} (day {prediction_date.timetuple().tm_yday} of year)
+Effective k:               {explanation['effective_k']:.4f} per hour
 Total temp change:         {explanation['total_temp_change']:.2f} C
 --------------------------------------------
 Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
