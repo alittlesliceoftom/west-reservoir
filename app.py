@@ -307,11 +307,6 @@ def main():
     with col_image:
         st.image("image.png",)
 
-    # Refresh button to clear cache
-    if st.button("Refresh Data"):
-        st.cache_data.clear()
-        st.rerun()
-
     try:
         # Step 1: Load water temperature measurements
         water_temps = cached_load_water_temps()
@@ -435,6 +430,12 @@ def main():
                     st.metric("Tomorrow's Forecast", f"{tomorrow_forecast_temp:.1f}C")
                 else:
                     st.metric("Tomorrow's Forecast", "N/A")
+
+                        # Refresh button to clear cache
+            if st.button("Data looks old? Press to refresh weather forecast and water temperature data", icon = '🔄' ):
+                st.cache_data.clear()
+                st.rerun()
+
 
         # Display: Temperature chart
         st.header("Temperature History and Forecast")
