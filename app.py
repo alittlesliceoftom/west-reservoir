@@ -503,12 +503,12 @@ def main():
 
         # Display: Summary statistics
         st.header("Summary Statistics")
-            measured = temperatures[temperatures["source"] == "MEASURED"]
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Lowest Recorded at West Reservoir! ❄️", f"{measured['water_temp'].min():.1f}C")
-            with col2:
-                st.metric("Hottest Recorded at West Reservoir! 🥵", f"{measured['water_temp'].max():.1f}C")
+        measured = temperatures[temperatures["source"] == "MEASURED"]
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Lowest Recorded at West Reservoir! ❄️", f"{measured['water_temp'].min():.1f}C")
+        with col2:
+            st.metric("Hottest Recorded at West Reservoir! 🥵", f"{measured['water_temp'].max():.1f}C")
         with col3:
             st.metric("Total Readings Taken", len(measured))
 
