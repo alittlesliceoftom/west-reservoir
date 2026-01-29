@@ -136,7 +136,7 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                                     "Water After (C)": "{:.2f}",
                                 }
                             ),
-                            use_container_width=True,
+                            width='stretch',
                         )
                 else:
                     st.info("Waiting for hourly air temperature data")
@@ -163,7 +163,7 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                 height=300,
                 margin=dict(l=0, r=0, t=20, b=0),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
         # Section 5: Raw DataFrame
         st.subheader("Raw Data (Last 10 Rows)")
@@ -171,7 +171,7 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
             ["date", "water_temp", "air_temp", "source"]
         ].copy()
         display_df["date"] = display_df["date"].dt.strftime("%Y-%m-%d")
-        st.dataframe(display_df, use_container_width=True)
+        st.dataframe(display_df, width='stretch')
 
 
 def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
@@ -289,23 +289,29 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
 
 def main():
     """Main application."""
-    st.title("West Reservoir Temperature Tracker + Forecaster")
-    st.markdown("Tracking and forecasting water temperature at West Reservoir, London.")
+    # Check for forecast_graph view query parameter
+    view = st.query_params.get("view")
+    forecast_graph_only = (view == "forecast_graph")
+
+    if not forecast_graph_only:
+        st.title("West Reservoir Temperature Tracker + Forecaster")
+        st.markdown("Tracking and forecasting water temperature at West Reservoir, London.")
 
     # Header with info and image
-    col_info, col_image = st.columns([1, 1])
-    with col_info:
-        st.info(
-            "Water temperatures are taken each morning around 7am. "
-            "The water will often be warmer by the time you get in!\n\n "
-            "The forecast is based on the weather forecast and the water temperature history. "
-            "Currently the forecast is only based on temperature exchange between air and water. "
-            "It does not take into account other factors such as wind, cloud cover, or solar radiation.\n\n"
-            "Additionally, temperature varies throughout the reservoir "
-            "by both position and depth - this is just a snapshot of conditions."
-        )
-    with col_image:
-        st.image("image.png",)
+    if not forecast_graph_only:
+        col_info, col_image = st.columns([1, 1])
+        with col_info:
+            st.info(
+                "Water temperatures are taken each morning around 7am. "
+                "The water will often be warmer by the time you get in!\n\n "
+                "The forecast is based on the weather forecast and the water temperature history. "
+                "Currently the forecast is only based on temperature exchange between air and water. "
+                "It does not take into account other factors such as wind, cloud cover, or solar radiation.\n\n"
+                "Additionally, temperature varies throughout the reservoir "
+                "by both position and depth - this is just a snapshot of conditions."
+            )
+        with col_image:
+            st.image("image.png",)
 
     try:
         # Step 1: Load water temperature measurements
@@ -367,102 +373,104 @@ def main():
         # Step 8: Generate predictions
         temperatures = forecaster.predict(temperatures)
 
+        if not forecast_graph_only:
+            with col_info:
+                # Display: Current temperature with clear date labeling
+                today = datetime.now().date()
+                yesterday = today - timedelta(days=1)
+                tomorrow = today + timedelta(days=1)
 
-        with col_info:
-            # Display: Current temperature with clear date labeling
-            today = datetime.now().date()
-            yesterday = today - timedelta(days=1)
-            tomorrow = today + timedelta(days=1)
+                st.header("Current Temperature")
 
-            st.header("Current Temperature")
+                # Get measured data
+                measured_data = temperatures[temperatures["source"] == "MEASURED"]
+                today_data = temperatures[temperatures["date"].dt.date == today]
+                has_today_measurement = any(today_data["source"] == "MEASURED")
 
-            # Get measured data
-            measured_data = temperatures[temperatures["source"] == "MEASURED"]
-            today_data = temperatures[temperatures["date"].dt.date == today]
-            has_today_measurement = any(today_data["source"] == "MEASURED")
-
-            # Show measured temperature status
-            if has_today_measurement:
-                today_measured = today_data[today_data["source"] == "MEASURED"].iloc[0]
-                st.metric("Today's Measured", f"{today_measured['water_temp']:.1f}C")
-            else:
-                if not measured_data.empty:
-                    latest = measured_data.iloc[-1]
-                    latest_date = latest["date"].strftime("%Y-%m-%d")
-                    st.warning(
-                        f"No measurement for today yet. Last measured: {latest_date}\n\n"
-                        f"Please contribute the temperature to the spreadsheet [here](https://docs.google.com/spreadsheets/d/1HNnucep6pv2jCFg2bYR_gV78XbYvWYyjx9y9tTNVapw/edit?usp=sharing)"
-                    )
-
-            # Compute forecasts independently (always from yesterday's measurement)
-            st.subheader("Forecasts")
-
-            # Find yesterday's measurement for today's forecast
-            yesterday_data = measured_data[measured_data["date"].dt.date == yesterday]
-            today_forecast_temp = None
-            tomorrow_forecast_temp = None
-
-            if not yesterday_data.empty:
-                # Compute today's forecast from yesterday's measurement
-                yesterday_temp = yesterday_data.iloc[-1]["water_temp"]
-                yesterday_dt = pd.Timestamp(yesterday).replace(hour=forecaster.MEASUREMENT_HOUR)
-                today_dt = pd.Timestamp(today).replace(hour=forecaster.MEASUREMENT_HOUR)
-                hourly_temps = forecaster._get_hourly_temps_for_period(yesterday_dt, today_dt)
-                if hourly_temps:
-                    today_forecast_temp = forecaster._simulate_24h(
-                        yesterday_temp, hourly_temps
-                    )
-
-            # Get tomorrow's forecast from the predictions DataFrame
-            tomorrow_data = temperatures[temperatures["date"].dt.date == tomorrow]
-            if not tomorrow_data.empty and tomorrow_data.iloc[0]["source"] == "PREDICTED":
-                tomorrow_forecast_temp = tomorrow_data.iloc[0]["water_temp"]
-
-            # Display forecasts
-            col_today_fc, col_tomorrow_fc = st.columns(2)
-            with col_today_fc:
-                if today_forecast_temp is not None:
-                    st.metric("Today's Forecast (excludes today's measurement)", f"{today_forecast_temp:.1f}C")
+                # Show measured temperature status
+                if has_today_measurement:
+                    today_measured = today_data[today_data["source"] == "MEASURED"].iloc[0]
+                    st.metric("Today's Measured", f"{today_measured['water_temp']:.1f}C")
                 else:
-                    st.metric("Today's Forecast (excludes today's measurement)", "N/A")
-            with col_tomorrow_fc:
-                if tomorrow_forecast_temp is not None:
-                    st.metric("Tomorrow's Forecast", f"{tomorrow_forecast_temp:.1f}C")
-                else:
-                    st.metric("Tomorrow's Forecast", "N/A")
+                    if not measured_data.empty:
+                        latest = measured_data.iloc[-1]
+                        latest_date = latest["date"].strftime("%Y-%m-%d")
+                        st.warning(
+                            f"No measurement for today yet. Last measured: {latest_date}\n\n"
+                            f"Please contribute the temperature to the spreadsheet [here](https://docs.google.com/spreadsheets/d/1HNnucep6pv2jCFg2bYR_gV78XbYvWYyjx9y9tTNVapw/edit?usp=sharing)"
+                        )
 
-                        # Refresh button to clear cache
-            if st.button("Data looks old? Press to refresh weather forecast and water temperature data", icon = '🔄' ):
-                st.cache_data.clear()
-                st.rerun()
+                # Compute forecasts independently (always from yesterday's measurement)
+                st.subheader("Forecasts")
 
+                # Find yesterday's measurement for today's forecast
+                yesterday_data = measured_data[measured_data["date"].dt.date == yesterday]
+                today_forecast_temp = None
+                tomorrow_forecast_temp = None
 
-        # Display: Temperature chart
-        st.header("Temperature History and Forecast")
-        st.text("""The chart shows the temperature history and forecast for the last 10 days, and next 5 days.
+                if not yesterday_data.empty:
+                    # Compute today's forecast from yesterday's measurement
+                    yesterday_temp = yesterday_data.iloc[-1]["water_temp"]
+                    yesterday_dt = pd.Timestamp(yesterday).replace(hour=forecaster.MEASUREMENT_HOUR)
+                    today_dt = pd.Timestamp(today).replace(hour=forecaster.MEASUREMENT_HOUR)
+                    hourly_temps = forecaster._get_hourly_temps_for_period(yesterday_dt, today_dt)
+                    if hourly_temps:
+                        today_forecast_temp = forecaster._simulate_24h(
+                            yesterday_temp, hourly_temps
+                        )
+
+                # Get tomorrow's forecast from the predictions DataFrame
+                tomorrow_data = temperatures[temperatures["date"].dt.date == tomorrow]
+                if not tomorrow_data.empty and tomorrow_data.iloc[0]["source"] == "PREDICTED":
+                    tomorrow_forecast_temp = tomorrow_data.iloc[0]["water_temp"]
+
+                # Display forecasts
+                col_today_fc, col_tomorrow_fc = st.columns(2)
+                with col_today_fc:
+                    if today_forecast_temp is not None:
+                        st.metric("Today's Forecast (excludes today's measurement)", f"{today_forecast_temp:.1f}C")
+                    else:
+                        st.metric("Today's Forecast (excludes today's measurement)", "N/A")
+                with col_tomorrow_fc:
+                    if tomorrow_forecast_temp is not None:
+                        st.metric("Tomorrow's Forecast", f"{tomorrow_forecast_temp:.1f}C")
+                    else:
+                        st.metric("Tomorrow's Forecast", "N/A")
+
+                            # Refresh button to clear cache
+                if st.button("Data looks old? Press to refresh weather forecast and water temperature data", icon = '🔄' ):
+                    st.cache_data.clear()
+                    st.rerun()
+
+        # Display: Temperature chart (always shown, but with conditional header/text)
+        if not forecast_graph_only:
+            st.header("Temperature History and Forecast")
+            st.text("""The chart shows the temperature history and forecast for the last 10 days, and next 5 days.
         Red bar shows the air temp range each day, with the black line being the average. The blue line is the water tempterature. It is dotted for forecast days.""")
+
         chart = create_temperature_chart(temperatures)
-        st.plotly_chart(chart, use_container_width=True)
+        st.plotly_chart(chart, width='stretch')
 
-        # Display: Summary statistics
-        st.header("Summary Statistics")
-        measured = temperatures[temperatures["source"] == "MEASURED"]
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Lowest Recorded at West Reservoir! ❄️", f"{measured['water_temp'].min():.1f}C")
-        with col2:
-            st.metric("Hottest Recorded at West Reservoir! 🥵", f"{measured['water_temp'].max():.1f}C")
-        with col3:
-            st.metric("Total Readings Taken", len(measured))
+        if not forecast_graph_only:
+            # Display: Summary statistics
+            st.header("Summary Statistics")
+            measured = temperatures[temperatures["source"] == "MEASURED"]
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Lowest Recorded at West Reservoir! ❄️", f"{measured['water_temp'].min():.1f}C")
+            with col2:
+                st.metric("Hottest Recorded at West Reservoir! 🥵", f"{measured['water_temp'].max():.1f}C")
+            with col3:
+                st.metric("Total Readings Taken", len(measured))
 
-        # Display: Debug panel (always visible)
-        display_debug_panel(temperatures, forecaster, hourly_air_temps)
+            # Display: Debug panel (always visible)
+            display_debug_panel(temperatures, forecaster, hourly_air_temps)
 
-        # About section
-        st.divider()
-        st.subheader("About the Project")
-        st.markdown(
-            """
+            # About section
+            st.divider()
+            st.subheader("About the Project")
+            st.markdown(
+                """
 Hi! I'm Tom, a local and regular swimmer at the reservoir for over a year.
 
 I enjoy tracking the temperatures so I decided to make this app. I've recorded
@@ -472,8 +480,8 @@ simple physics model to predict future temperatures.
 The model simulates hour-by-hour heat transfer between air and water. Forecast
 weather data from OpenWeatherMap and historic data from Meteostat inform the
 predictions.
-            """
-        )
+                """
+            )
 
     except DataLoadError as e:
         st.error(f"Cannot load required data: {e}")
