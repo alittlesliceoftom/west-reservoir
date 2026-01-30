@@ -13,6 +13,7 @@ from data import (
     DataLoadError,
 )
 from forecaster import WaterTempForecaster
+from forecast_storage import ForecastStorage, ForecastStorageError
 
 # Cache TTL for data (6 hours)
 CACHE_TTL = timedelta(hours=6)
@@ -173,6 +174,38 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
         display_df["date"] = display_df["date"].dt.strftime("%Y-%m-%d")
         st.dataframe(display_df, width='stretch')
 
+        # Section 6: Forecast Storage Status
+        st.subheader("Forecast Storage (MotherDuck)")
+
+        try:
+            storage = ForecastStorage()
+            conn = storage._get_connection()
+
+            result = conn.execute("""
+                SELECT
+                    MAX(forecast_created_timestamp) as last_stored,
+                    COUNT(DISTINCT forecast_created_date) as forecast_runs,
+                    COUNT(*) as total_forecasts
+                FROM air_temp_forecasts
+            """).fetchone()
+
+            if result and result[0]:
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Last Stored", result[0].strftime("%Y-%m-%d %H:%M"))
+                with col2:
+                    st.metric("Forecast Runs", result[1])
+                with col3:
+                    st.metric("Total Forecasts", result[2])
+            else:
+                st.info("No forecasts stored yet. Will store on next forecast fetch.")
+
+        except ForecastStorageError as e:
+            st.warning(f"Storage not configured: {e}")
+            st.info("Set MOTHERDUCK_TOKEN to enable forecast storage")
+        except Exception as e:
+            st.warning(f"Could not retrieve storage status: {e}")
+
 
 def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
     """Create temperature chart with last 10 days + forecast."""
@@ -189,6 +222,27 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
     # Split data by source
     measured = filtered[filtered["source"] == "MEASURED"]
     predicted = filtered[filtered["source"] == "PREDICTED"]
+
+    # Add vertical line for today (FIRST so it renders behind data)
+    fig.add_shape(
+        type="line",
+        x0=str(today),
+        x1=str(today),
+        y0=0,
+        y1=1,
+        yref="paper",
+        line=dict(color="gray", width=15),
+        opacity = 0.3,
+        layer="below"  # Explicitly render below traces
+    )
+    fig.add_annotation(
+        x=str(today),
+        y=1,
+        yref="paper",
+        text="Today",
+        showarrow=False,
+        yshift=10,
+    )
 
     # Daily air temperature as whisker plot (min-avg-max)
     all_with_air = filtered[filtered["air_temp"].notna()].copy()
@@ -227,10 +281,13 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
             go.Scatter(
                 x=measured["date"],
                 y=measured["water_temp"],
-                mode="lines+markers",
+                mode="lines+markers+text",
                 name="Water Temp",
                 line=dict(color="blue", width=2),
                 marker=dict(size=6),
+                text=[f"{v:.1f}" for v in measured["water_temp"]],
+                textposition="top center",
+                textfont=dict(size=10, color="blue"),
                 legendgroup="water",
                 hovertemplate="Water: %{y:.1f}C<extra></extra>",
             )
@@ -246,35 +303,18 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
             go.Scatter(
                 x=predicted_with_connection["date"],
                 y=predicted_with_connection["water_temp"],
-                mode="lines+markers",
+                mode="lines+markers+text",
                 name="Water Temp (Forecast)",
                 line=dict(color="blue", width=2, dash="dash"),
                 marker=dict(size=6),
+                text=[f"{v:.1f}" for v in predicted_with_connection["water_temp"]],
+                textposition="top center",
+                textfont=dict(size=10, color="blue"),
                 legendgroup="water",
                 showlegend=False,
                 hovertemplate="Water (forecast): %{y:.1f}C<extra></extra>",
             )
         )
-
-    # Add vertical line for today
-    fig.add_shape(
-        type="line",
-        x0=str(today),
-        x1=str(today),
-        y0=0,
-        y1=1,
-        yref="paper",
-        line=dict(color="gray", width=15),
-        opacity = 0.3
-    )
-    fig.add_annotation(
-        x=str(today),
-        y=1,
-        yref="paper",
-        text="Today",
-        showarrow=False,
-        yshift=10,
-    )
 
     fig.update_layout(
         title="Water Temperature (Last 10 Days + Forecast)",
@@ -410,6 +450,22 @@ def main():
         # Step 6: Add forecast dates
         try:
             forecast = cached_load_forecast_air_temps(days=5)
+
+            # Store air forecast in MotherDuck (only once per day)
+            if 'last_forecast_fetch_date' not in st.session_state or \
+               st.session_state['last_forecast_fetch_date'] != datetime.now().date():
+                try:
+                    storage = ForecastStorage()
+                    storage.initialize_schema()
+                    forecast_timestamp = datetime.now()
+                    storage.store_air_forecast(forecast, forecast_timestamp)
+                    st.session_state['last_forecast_fetch_date'] = datetime.now().date()
+                    st.session_state['last_forecast_timestamp'] = forecast_timestamp
+                except ForecastStorageError as e:
+                    st.warning(f"Could not store forecast: {e}")
+                except Exception as e:
+                    st.warning(f"Forecast storage error: {e}")
+
             forecast["source"] = "AIR_ONLY"
             temperatures = pd.concat([temperatures, forecast], ignore_index=True)
             temperatures = temperatures.sort_values("date").reset_index(drop=True)
@@ -424,6 +480,31 @@ def main():
 
         # Step 8: Generate predictions
         temperatures = forecaster.predict(temperatures)
+
+        # Store water predictions in MotherDuck (only once per day)
+        if 'last_prediction_store_date' not in st.session_state or \
+           st.session_state['last_prediction_store_date'] != datetime.now().date():
+            try:
+                storage = ForecastStorage()
+                predictions_df = temperatures[temperatures["source"] == "PREDICTED"].copy()
+                measured_temps = temperatures[temperatures["source"] == "MEASURED"]
+
+                if not predictions_df.empty and not measured_temps.empty:
+                    forecast_timestamp = st.session_state.get(
+                        'last_forecast_timestamp',
+                        datetime.now()
+                    )
+                    storage.store_water_predictions(
+                        predictions_df=predictions_df,
+                        forecast_created_timestamp=forecast_timestamp,
+                        heat_transfer_coeff=forecaster.k,
+                        start_water_temp=measured_temps.iloc[-1]["water_temp"]
+                    )
+                    st.session_state['last_prediction_store_date'] = datetime.now().date()
+            except ForecastStorageError as e:
+                st.warning(f"Could not store predictions: {e}")
+            except Exception as e:
+                st.warning(f"Prediction storage error: {e}")
 
         with col_info:
             # Display: Current temperature with clear date labeling
