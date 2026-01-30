@@ -48,3 +48,33 @@ def get_openweather_api_key() -> str:
         )
 
     return api_key
+
+
+def get_motherduck_token() -> str:
+    """
+    Get MotherDuck token from environment or Streamlit secrets.
+
+    Returns:
+        str: MotherDuck token
+
+    Raises:
+        ConfigError: If token is not found
+    """
+    # Try environment variable first
+    token = os.getenv("MOTHERDUCK_TOKEN")
+
+    # Try Streamlit secrets if environment variable not set
+    if not token:
+        try:
+            if hasattr(st, "secrets") and "MOTHERDUCK_TOKEN" in st.secrets:
+                token = st.secrets["MOTHERDUCK_TOKEN"]
+        except Exception:
+            pass
+
+    if not token:
+        raise ConfigError(
+            "MotherDuck token not found. "
+            "Set MOTHERDUCK_TOKEN environment variable or add to .streamlit/secrets.toml"
+        )
+
+    return token
