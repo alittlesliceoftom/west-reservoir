@@ -169,6 +169,24 @@ if data.empty:
 - Raise errors with helpful messages
 - No silent failures
 
+### Agent Workflow
+
+**Use subagents whenever possible** to handle complex, multi-step tasks:
+
+- **When to use subagents:**
+  - Multi-step operations (testing, deployment, exploration)
+  - Parallel tasks (can run multiple subagents simultaneously)
+  - Complex searches or codebase exploration
+  - Any task that can be delegated independently
+
+- **Benefits:**
+  - Reduces context usage in main conversation
+  - Allows parallel execution
+  - Specialized agents for specific tasks (Bash, Explore, Plan, etc.)
+  - Cleaner conversation flow
+
+- **Example:** Instead of running multiple grep/read commands directly, spawn an Explore subagent to investigate the codebase and return findings.
+
 ### UI/UX Guidelines
 
 - **No Emojis**: Keep interface professional and clean
