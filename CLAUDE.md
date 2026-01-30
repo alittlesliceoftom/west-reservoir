@@ -168,6 +168,7 @@ if data.empty:
 - Avoid creating intermediate DataFrames
 - Raise errors with helpful messages
 - No silent failures
+- **Debug scripts**: Place debug/test scripts in `debug/` directory (not in project root)
 
 ### Agent Workflow
 
