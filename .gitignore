@@ -128,3 +128,6 @@ cython_debug/
 
 # Project-specific
 prompt_stash.txt
+
+# Streamlit secrets 
+.streamlit/secrets.toml

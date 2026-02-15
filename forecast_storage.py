@@ -25,6 +25,11 @@ class ForecastStorage:
         if self._conn is None:
             try:
                 token = get_motherduck_token()
+                # Connect without database first to ensure it exists
+                conn = duckdb.connect(f"md:?motherduck_token={token}")
+                conn.execute(f"CREATE DATABASE IF NOT EXISTS {self.database}")
+                conn.close()
+                # Now connect to the database
                 connection_string = f"md:{self.database}?motherduck_token={token}"
                 self._conn = duckdb.connect(connection_string)
             except ConfigError as e:
@@ -74,6 +79,22 @@ class ForecastStorage:
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_prediction_for_date
             ON water_temp_predictions(target_date, forecast_created_date)
+        """)
+
+        # Create air_temp_forecasts_3hourly table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS air_temp_forecasts_3hourly (
+                forecast_created_timestamp TIMESTAMP NOT NULL,
+                target_datetime TIMESTAMP NOT NULL,
+                air_temp DOUBLE NOT NULL,
+                source VARCHAR DEFAULT 'OpenWeatherMap',
+                PRIMARY KEY (forecast_created_timestamp, target_datetime)
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_forecast_3h_target
+            ON air_temp_forecasts_3hourly(target_datetime, forecast_created_timestamp)
         """)
 
     def store_air_forecast(
@@ -170,6 +191,124 @@ class ForecastStorage:
                 pass  # Silently ignore duplicates
             else:
                 raise ForecastStorageError(f"Failed to store water predictions: {e}")
+
+    def store_air_forecast_3hourly(
+        self,
+        forecast_df: pd.DataFrame,
+        forecast_created_timestamp: datetime
+    ) -> None:
+        """
+        Store raw 3-hourly air temperature forecast.
+
+        Args:
+            forecast_df: DataFrame with columns: datetime, air_temp
+            forecast_created_timestamp: When this forecast was fetched
+        """
+        conn = self._get_connection()
+
+        forecast_to_store = forecast_df.copy()
+        forecast_to_store['forecast_created_timestamp'] = forecast_created_timestamp
+        forecast_to_store['target_datetime'] = forecast_to_store['datetime']
+        forecast_to_store['source'] = 'OpenWeatherMap'
+
+        forecast_to_store = forecast_to_store[[
+            'forecast_created_timestamp',
+            'target_datetime',
+            'air_temp',
+            'source'
+        ]]
+
+        try:
+            conn.execute("""
+                INSERT INTO air_temp_forecasts_3hourly
+                SELECT * FROM forecast_to_store
+            """)
+        except Exception as e:
+            if "PRIMARY KEY" in str(e) or "UNIQUE" in str(e):
+                pass  # Silently ignore duplicates
+            else:
+                raise ForecastStorageError(f"Failed to store 3-hourly air forecast: {e}")
+
+    def get_forecast_for_date(self, target_date: datetime) -> Optional[pd.DataFrame]:
+        """
+        Retrieve the most recent 3-hourly forecast covering a specific date.
+
+        Args:
+            target_date: The date to get forecast for
+
+        Returns:
+            DataFrame with datetime and air_temp columns, or None if not found
+        """
+        conn = self._get_connection()
+
+        # Find the most recent forecast that covers this date
+        result = conn.execute("""
+            WITH latest_forecast AS (
+                SELECT MAX(forecast_created_timestamp) as latest_ts
+                FROM air_temp_forecasts_3hourly
+                WHERE DATE(target_datetime) = ?
+            )
+            SELECT target_datetime as datetime, air_temp
+            FROM air_temp_forecasts_3hourly
+            WHERE forecast_created_timestamp = (SELECT latest_ts FROM latest_forecast)
+              AND DATE(target_datetime) = ?
+            ORDER BY target_datetime
+        """, [target_date.date(), target_date.date()]).fetchdf()
+
+        if result.empty:
+            return None
+
+        return result
+
+    def get_forecasts_for_gap(
+        self,
+        gap_start: datetime,
+        gap_end: datetime
+    ) -> Optional[pd.DataFrame]:
+        """
+        Retrieve stored 3-hourly forecasts that cover a time gap.
+
+        Finds the most recent forecast run that has data covering the gap period.
+        This is used to fill gaps between Meteostat historical data and live OWM forecast.
+
+        Args:
+            gap_start: Start of the gap (exclusive - data after this time)
+            gap_end: End of the gap (exclusive - data before this time)
+
+        Returns:
+            DataFrame with datetime and air_temp columns, or None if not found
+        """
+        conn = self._get_connection()
+
+        # Find forecasts that cover any part of the gap period
+        # Use the most recent forecast run that has data in this range
+        result = conn.execute("""
+            WITH forecasts_in_gap AS (
+                SELECT
+                    forecast_created_timestamp,
+                    target_datetime,
+                    air_temp
+                FROM air_temp_forecasts_3hourly
+                WHERE target_datetime > ?
+                  AND target_datetime < ?
+            ),
+            latest_forecast AS (
+                SELECT MAX(forecast_created_timestamp) as latest_ts
+                FROM forecasts_in_gap
+            )
+            SELECT target_datetime as datetime, air_temp
+            FROM forecasts_in_gap
+            WHERE forecast_created_timestamp = (SELECT latest_ts FROM latest_forecast)
+            ORDER BY target_datetime
+        """, [gap_start, gap_end]).fetchdf()
+
+        if result.empty:
+            return None
+
+        # Ensure datetime column is proper datetime type
+        result["datetime"] = pd.to_datetime(result["datetime"])
+
+        return result
 
     def close(self) -> None:
         """Close database connection."""
