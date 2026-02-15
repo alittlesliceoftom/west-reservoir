@@ -1,12 +1,25 @@
 """Configuration for West Reservoir Temperature Tracker"""
 
 import os
+import re
+from pathlib import Path
 import streamlit as st
 
 
 class ConfigError(Exception):
     """Raised when configuration is invalid or missing"""
     pass
+
+
+def _read_secrets_file(key: str) -> str | None:
+    """Read a key directly from .streamlit/secrets.toml as fallback"""
+    secrets_path = Path(__file__).parent / ".streamlit" / "secrets.toml"
+    if secrets_path.exists():
+        content = secrets_path.read_text()
+        match = re.search(rf'{key}\s*=\s*"([^"]+)"', content)
+        if match:
+            return match.group(1)
+    return None
 
 
 # Google Sheets configuration
@@ -18,6 +31,9 @@ RESERVOIR_LON = -0.090492
 
 # Request timeout for API calls
 REQUEST_TIMEOUT = 30
+
+# Feature flags
+ENABLE_MOTHERDUCK = True  # Enable MotherDuck storage for forecast history
 
 
 def get_openweather_api_key() -> str:
@@ -36,10 +52,10 @@ def get_openweather_api_key() -> str:
     # Try Streamlit secrets if environment variable not set
     if not api_key:
         try:
-            if hasattr(st, "secrets") and "OPENWEATHER_API_KEY" in st.secrets:
-                api_key = st.secrets["OPENWEATHER_API_KEY"]
+            api_key = st.secrets["OPENWEATHER_API_KEY"]
         except Exception:
-            pass
+            # Fallback: read directly from secrets file
+            api_key = _read_secrets_file("OPENWEATHER_API_KEY")
 
     if not api_key:
         raise ConfigError(
@@ -66,10 +82,10 @@ def get_motherduck_token() -> str:
     # Try Streamlit secrets if environment variable not set
     if not token:
         try:
-            if hasattr(st, "secrets") and "MOTHERDUCK_TOKEN" in st.secrets:
-                token = st.secrets["MOTHERDUCK_TOKEN"]
+            token = st.secrets["MOTHERDUCK_TOKEN"]
         except Exception:
-            pass
+            # Fallback: read directly from secrets file
+            token = _read_secrets_file("MOTHERDUCK_TOKEN")
 
     if not token:
         raise ConfigError(

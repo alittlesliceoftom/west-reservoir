@@ -264,3 +264,98 @@ def load_forecast_air_temps(days: int = 5) -> pd.DataFrame:
         raise DataLoadError(f"Failed to fetch forecast from OpenWeatherMap: {e}")
     except Exception as e:
         raise DataLoadError(f"Error processing OpenWeatherMap forecast: {e}")
+
+
+def load_forecast_air_temps_3hourly(days: int = 5) -> pd.DataFrame:
+    """
+    Load raw 3-hourly air temperature forecast from OpenWeatherMap.
+
+    Args:
+        days: Number of days to forecast (max 5 for free tier)
+
+    Returns:
+        pd.DataFrame: DataFrame with 'datetime' and 'air_temp' columns
+                      Up to 40 records (8 per day for 5 days)
+
+    Raises:
+        DataLoadError: If forecast cannot be loaded or API key is missing
+    """
+    try:
+        from config import ConfigError
+        try:
+            api_key = get_openweather_api_key()
+        except ConfigError as e:
+            raise DataLoadError(str(e))
+
+        url = "https://api.openweathermap.org/data/2.5/forecast"
+        params = {
+            "lat": RESERVOIR_LAT,
+            "lon": RESERVOIR_LON,
+            "appid": api_key,
+            "units": "metric",
+            "cnt": min(days * 8, 40),
+        }
+
+        response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+
+        data = response.json()
+
+        if "list" not in data:
+            raise DataLoadError(
+                f"Invalid response from OpenWeatherMap API: {data.get('message', 'Unknown error')}"
+            )
+
+        # Extract 3-hourly data without aggregation
+        forecast_data = []
+        for item in data["list"]:
+            dt = datetime.fromtimestamp(item["dt"])
+            temp = item["main"]["temp"]
+            forecast_data.append({
+                "datetime": pd.Timestamp(dt),
+                "air_temp": temp,
+            })
+
+        forecast_df = pd.DataFrame(forecast_data)
+        forecast_df = forecast_df.sort_values("datetime").reset_index(drop=True)
+
+        if forecast_df.empty:
+            raise DataLoadError("OpenWeatherMap API returned no forecast data")
+
+        return forecast_df
+
+    except DataLoadError:
+        raise
+    except requests.exceptions.Timeout:
+        raise DataLoadError(
+            f"Request to OpenWeatherMap timed out after {REQUEST_TIMEOUT} seconds"
+        )
+    except requests.exceptions.RequestException as e:
+        raise DataLoadError(f"Failed to fetch 3-hourly forecast from OpenWeatherMap: {e}")
+    except Exception as e:
+        raise DataLoadError(f"Error processing 3-hourly OpenWeatherMap forecast: {e}")
+
+
+def interpolate_to_hourly(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Interpolate 3-hourly data to hourly using linear interpolation.
+
+    Args:
+        df: DataFrame with 'datetime' and 'air_temp' columns (3-hourly intervals)
+
+    Returns:
+        pd.DataFrame: DataFrame with hourly 'datetime' and 'air_temp' columns
+    """
+    if df.empty:
+        return df.copy()
+
+    # Set datetime as index for resampling
+    df_indexed = df.set_index("datetime").sort_index()
+
+    # Resample to hourly and interpolate
+    hourly = df_indexed.resample("h").interpolate(method="linear")
+
+    # Reset index to get datetime as column
+    hourly = hourly.reset_index()
+
+    return hourly

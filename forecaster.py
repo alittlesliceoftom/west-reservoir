@@ -268,18 +268,8 @@ class WaterTempForecaster:
 
                 if hourly_temps:
                     predicted = self._simulate_24h(current_water_temp, hourly_temps)
-                else:
-                    # Fallback: use daily air temp with equivalent daily k
-                    daily_k = 1 - (1 - self.k) ** 24
-                    air_temp = result.loc[i, "air_temp"]
-                    if pd.notna(air_temp):
-                        predicted = current_water_temp + daily_k * (
-                            air_temp - current_water_temp
-                        )
-                    else:
-                        predicted = current_water_temp
-
-                result.loc[i, "water_temp"] = predicted
+                    result.loc[i, "water_temp"] = predicted
+                # No fallback - we always expect hourly data now
                 result.loc[i, "source"] = "PREDICTED"
 
         return result
