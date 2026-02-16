@@ -746,6 +746,8 @@ def main():
                 try:
                     storage = ForecastStorage()
                     predictions_df = temperatures[temperatures["source"] == "PREDICTED"].copy()
+                    # Filter out any rows with NULL water_temp (shouldn't happen but safety check)
+                    predictions_df = predictions_df.dropna(subset=["water_temp"])
                     measured_temps = temperatures[temperatures["source"] == "MEASURED"]
 
                     if not predictions_df.empty and not measured_temps.empty:

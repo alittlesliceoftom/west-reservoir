@@ -269,7 +269,7 @@ class WaterTempForecaster:
                 if hourly_temps:
                     predicted = self._simulate_24h(current_water_temp, hourly_temps)
                     result.loc[i, "water_temp"] = predicted
-                # No fallback - we always expect hourly data now
-                result.loc[i, "source"] = "PREDICTED"
+                    result.loc[i, "source"] = "PREDICTED"
+                # If no hourly data, leave source as AIR_ONLY (not predicted)
 
         return result

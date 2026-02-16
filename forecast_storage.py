@@ -258,6 +258,9 @@ class ForecastStorage:
         if result.empty:
             return None
 
+        # Ensure datetime column is timezone-naive
+        result["datetime"] = pd.to_datetime(result["datetime"]).dt.tz_localize(None)
+
         return result
 
     def get_forecasts_for_gap(
@@ -305,8 +308,9 @@ class ForecastStorage:
         if result.empty:
             return None
 
-        # Ensure datetime column is proper datetime type
-        result["datetime"] = pd.to_datetime(result["datetime"])
+        # Ensure datetime column is proper datetime type and timezone-naive
+        # MotherDuck returns timezone-aware timestamps, but our local data is naive
+        result["datetime"] = pd.to_datetime(result["datetime"]).dt.tz_localize(None)
 
         return result
 
