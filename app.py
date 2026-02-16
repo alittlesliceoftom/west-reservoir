@@ -301,12 +301,9 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
 
             # Gap fill from MotherDuck stored forecasts
             if gap_fill_hourly is not None and not gap_fill_hourly.empty:
-                gap_dt = pd.to_datetime(gap_fill_hourly["datetime"]).astype("datetime64[s]")
-                gap_window = gap_fill_hourly.copy()
-                gap_window["datetime"] = gap_dt
-                gap_window = gap_window[
-                    (gap_window["datetime"] >= pd.Timestamp(cutoff_past)) &
-                    (gap_window["datetime"] <= pd.Timestamp(cutoff_future))
+                gap_window = gap_fill_hourly[
+                    (gap_fill_hourly["datetime"] >= cutoff_past) &
+                    (gap_fill_hourly["datetime"] <= cutoff_future)
                 ]
                 if not gap_window.empty:
                     fig.add_trace(
@@ -412,13 +409,13 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
 
 
 def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
-    """Create temperature chart with last 10 days + forecast."""
+    """Create temperature chart with last 5 days + forecast."""
     fig = go.Figure()
 
     today = datetime.now().date()
-    cutoff_date = today - timedelta(days=10)
+    cutoff_date = today - timedelta(days=5)
 
-    # Filter to last 10 days + any future dates
+    # Filter to last 5 days + any future dates
     filtered = temperatures[
         (temperatures["date"].dt.date >= cutoff_date)
     ].copy()
@@ -901,7 +898,7 @@ def main():
 
         # Display: Temperature chart
         st.header("Temperature History and Forecast")
-        st.text("""The chart shows the temperature history and forecast for the last 10 days, and next 5 days.
+        st.text("""The chart shows the temperature history and forecast for the last 5 days, and next 5 days.
         Red bar shows the air temp range each day, with the black line being the average. The blue line is the water tempterature. It is dotted for forecast days.""")
 
         chart = create_temperature_chart(temperatures)
