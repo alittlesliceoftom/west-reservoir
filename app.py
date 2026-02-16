@@ -445,8 +445,9 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
                 go.Scatter(
                     x=all_with_air["date"],
                     y=all_with_air["air_temp"],
-                    mode="lines",
+                    mode="markers",
                     name="Air temperature range",
+                    marker=dict(size=0),  # Hide markers, only show error bars
                     # line=dict(color="rgba(255, 100, 100, 0.4)", width=10),
                     error_y=dict(
                         type="data",
@@ -472,7 +473,7 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
                     name="Air temperature (avg)",
                     marker=dict(color="black", size=6, symbol="line-ew", line=dict(width=2)),
                     legendgroup="air",
-                    showlegend=True,
+                    showlegend=False,
                     customdata=list(zip(all_with_air["air_temp_min"], all_with_air["air_temp_max"])),
                     hovertemplate="Air: %{y:.1f}C (Low: %{customdata[0]:.1f}, High: %{customdata[1]:.1f})<extra></extra>",
                 )
@@ -835,12 +836,12 @@ def main():
             # Display forecasts
             col_today_fc, col_tomorrow_fc, col_hottest, col_coldest = st.columns(4)
             with col_today_fc:
-                if today_forecast_temp is not None:
+                if today_forecast_temp is not None and pd.notna(today_forecast_temp):
                     st.metric("Today's Forecast (excludes today's measurement)", f"{today_forecast_temp:.1f}C")
                 else:
                     st.metric("Today's Forecast (excludes today's measurement)", "N/A")
             with col_tomorrow_fc:
-                if tomorrow_forecast_temp is not None:
+                if tomorrow_forecast_temp is not None and pd.notna(tomorrow_forecast_temp):
                     st.metric("Tomorrow's Forecast", f"{tomorrow_forecast_temp:.1f}C")
                 else:
                     st.metric("Tomorrow's Forecast", "N/A")
