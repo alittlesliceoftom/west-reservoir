@@ -125,9 +125,15 @@ def combine_hourly_temps(
     if forecast.empty:
         return historical.copy()
 
-    # Normalize column names
+    # Normalize column names and ensure timezone-naive datetimes
     hist = historical[["datetime", "air_temp"]].copy()
     fore = forecast[["datetime", "air_temp"]].copy()
+
+    # Normalize timezones to naive (different sources may have different tz info)
+    if hist["datetime"].dt.tz is not None:
+        hist["datetime"] = hist["datetime"].dt.tz_localize(None)
+    if fore["datetime"].dt.tz is not None:
+        fore["datetime"] = fore["datetime"].dt.tz_localize(None)
 
     # Find where historical ends and forecast begins
     hist_end = hist["datetime"].max()
@@ -137,14 +143,22 @@ def combine_hourly_temps(
     fore_future = fore[fore["datetime"] > hist_end].copy()
 
     # Process gap-fill data if available
-    gap_data = pd.DataFrame(columns=["datetime", "air_temp"])
+    gap_data = None
     if gap_fill is not None and not gap_fill.empty:
         gap = gap_fill[["datetime", "air_temp"]].copy()
+        # Normalize timezone
+        if gap["datetime"].dt.tz is not None:
+            gap["datetime"] = gap["datetime"].dt.tz_localize(None)
         # Only use gap data that's after historical and before forecast
-        gap_data = gap[(gap["datetime"] > hist_end) & (gap["datetime"] < fore_start)].copy()
+        filtered = gap[(gap["datetime"] > hist_end) & (gap["datetime"] < fore_start)]
+        if not filtered.empty:
+            gap_data = filtered.copy()
 
-    # Combine all sources: historical + gap_fill + forecast
-    combined = pd.concat([hist, gap_data, fore_future], ignore_index=True)
+    # Combine all sources: historical + gap_fill + forecast (only non-empty)
+    to_concat = [hist, fore_future]
+    if gap_data is not None:
+        to_concat.insert(1, gap_data)  # Insert between hist and fore
+    combined = pd.concat(to_concat, ignore_index=True)
     combined = combined.sort_values("datetime").reset_index(drop=True)
 
     # If there's still a gap (gap_fill didn't fully cover), interpolate it
