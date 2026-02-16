@@ -125,15 +125,18 @@ def combine_hourly_temps(
     if forecast.empty:
         return historical.copy()
 
+    def normalize_datetime_col(dt_series: pd.Series) -> pd.Series:
+        """Ensure datetime series is timezone-naive datetime64[ns]."""
+        dt = pd.to_datetime(dt_series)
+        if dt.dt.tz is not None:
+            dt = dt.dt.tz_convert("UTC").dt.tz_localize(None)
+        return dt
+
     # Normalize column names and ensure timezone-naive datetimes
     hist = historical[["datetime", "air_temp"]].copy()
     fore = forecast[["datetime", "air_temp"]].copy()
-
-    # Normalize timezones to naive (different sources may have different tz info)
-    if hist["datetime"].dt.tz is not None:
-        hist["datetime"] = hist["datetime"].dt.tz_localize(None)
-    if fore["datetime"].dt.tz is not None:
-        fore["datetime"] = fore["datetime"].dt.tz_localize(None)
+    hist["datetime"] = normalize_datetime_col(hist["datetime"])
+    fore["datetime"] = normalize_datetime_col(fore["datetime"])
 
     # Find where historical ends and forecast begins
     hist_end = hist["datetime"].max()
@@ -146,9 +149,7 @@ def combine_hourly_temps(
     gap_data = None
     if gap_fill is not None and not gap_fill.empty:
         gap = gap_fill[["datetime", "air_temp"]].copy()
-        # Normalize timezone
-        if gap["datetime"].dt.tz is not None:
-            gap["datetime"] = gap["datetime"].dt.tz_localize(None)
+        gap["datetime"] = normalize_datetime_col(gap["datetime"])
         # Only use gap data that's after historical and before forecast
         filtered = gap[(gap["datetime"] > hist_end) & (gap["datetime"] < fore_start)]
         if not filtered.empty:
