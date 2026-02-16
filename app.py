@@ -126,11 +126,11 @@ def combine_hourly_temps(
         return historical.copy()
 
     def normalize_datetime_col(dt_series: pd.Series) -> pd.Series:
-        """Ensure datetime series is timezone-naive datetime64[ns]."""
+        """Ensure datetime series is timezone-naive datetime64[s]."""
         dt = pd.to_datetime(dt_series)
         if dt.dt.tz is not None:
             dt = dt.dt.tz_convert("UTC").dt.tz_localize(None)
-        return dt
+        return dt.astype("datetime64[s]")
 
     # Normalize column names and ensure timezone-naive datetimes
     hist = historical[["datetime", "air_temp"]].copy()
@@ -159,12 +159,6 @@ def combine_hourly_temps(
     to_concat = [hist, fore_future]
     if gap_data is not None:
         to_concat.insert(1, gap_data)  # Insert between hist and fore
-
-    # Debug: log shapes and dtypes before concat
-    import streamlit as st
-    for i, df in enumerate(to_concat):
-        st.write(f"DEBUG to_concat[{i}]: shape={df.shape}, columns={list(df.columns)}, dtypes={df.dtypes.to_dict()}")
-
     combined = pd.concat(to_concat, ignore_index=True)
     combined = combined.sort_values("datetime").reset_index(drop=True)
 

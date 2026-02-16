@@ -139,5 +139,40 @@ class TestCombineHourlyTemps:
         assert len(result) == 48
 
 
+    def test_different_datetime_resolutions(self):
+        """Different datetime resolutions (ns vs us) - potential prod issue."""
+        # datetime64[ns]
+        hist = pd.DataFrame({
+            "datetime": pd.date_range("2024-01-01 00:00", periods=12, freq="h"),
+            "air_temp": [10.0] * 12
+        })
+        # Force to datetime64[us]
+        fore = pd.DataFrame({
+            "datetime": pd.date_range("2024-01-01 18:00", periods=12, freq="h").astype("datetime64[us]"),
+            "air_temp": [12.0] * 12
+        })
+
+        result = combine_hourly_temps(hist, fore)
+
+        assert not result.empty
+        assert result["datetime"].dtype == "datetime64[s]"
+
+    def test_object_dtype_datetime(self):
+        """Datetime stored as object dtype - edge case."""
+        hist = pd.DataFrame({
+            "datetime": pd.date_range("2024-01-01 00:00", periods=12, freq="h"),
+            "air_temp": [10.0] * 12
+        })
+        # Force to object dtype
+        fore = pd.DataFrame({
+            "datetime": pd.date_range("2024-01-01 18:00", periods=12, freq="h").astype(object),
+            "air_temp": [12.0] * 12
+        })
+
+        result = combine_hourly_temps(hist, fore)
+
+        assert not result.empty
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
