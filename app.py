@@ -185,6 +185,7 @@ def display_debug_panel(
     forecaster: WaterTempForecaster,
     hourly_air_temps: pd.DataFrame,
     forecast_3hourly: pd.DataFrame = None,
+    gap_fill_hourly: pd.DataFrame = None,
 ):
     """Display comprehensive debug information."""
     with st.expander("Details for nerds", expanded=False):
@@ -297,6 +298,23 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                     line=dict(color="red", width=1),
                 )
             )
+
+            # Gap fill from MotherDuck stored forecasts
+            if gap_fill_hourly is not None and not gap_fill_hourly.empty:
+                gap_window = gap_fill_hourly[
+                    (gap_fill_hourly["datetime"] >= cutoff_past) &
+                    (gap_fill_hourly["datetime"] <= cutoff_future)
+                ]
+                if not gap_window.empty:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=gap_window["datetime"],
+                            y=gap_window["air_temp"],
+                            mode="lines",
+                            name="Gap fill (stored forecast)",
+                            line=dict(color="blue", width=1, dash="dot"),
+                        )
+                    )
 
             # OWM 3-hourly raw points + interpolated line
             if forecast_3hourly is not None and not forecast_3hourly.empty:
@@ -742,6 +760,12 @@ def main():
             temperatures = pd.concat([temperatures, forecast], ignore_index=True)
             temperatures = temperatures.sort_values("date").reset_index(drop=True)
 
+            # Drop AIR_ONLY rows for dates that already have a MEASURED reading
+            measured_dates = set(temperatures.loc[temperatures["source"] == "MEASURED", "date"].dt.date)
+            temperatures = temperatures[
+                ~((temperatures["source"] == "AIR_ONLY") & (temperatures["date"].dt.date.isin(measured_dates)))
+            ].reset_index(drop=True)
+
         except DataLoadError as e:
             st.warning(f"Weather forecast unavailable: {e}")
             st.info("Showing historical data only")
@@ -823,6 +847,10 @@ def main():
                 yesterday_dt = pd.Timestamp(yesterday).replace(hour=forecaster.MEASUREMENT_HOUR)
                 today_dt = pd.Timestamp(today).replace(hour=forecaster.MEASUREMENT_HOUR)
                 hourly_temps = forecaster._get_hourly_temps_for_period(yesterday_dt, today_dt)
+                # DEBUG
+                st.write(f"DEBUG: yesterday_dt={yesterday_dt}, today_dt={today_dt}, hourly_temps count={len(hourly_temps)}")
+                if forecaster.hourly_air_temps is not None:
+                    st.write(f"DEBUG: hourly index range: {forecaster.hourly_air_temps.index.min()} to {forecaster.hourly_air_temps.index.max()}")
                 if hourly_temps:
                     today_forecast_temp = forecaster._simulate_24h(
                         yesterday_temp, hourly_temps
@@ -830,6 +858,9 @@ def main():
 
             # Get tomorrow's forecast from the predictions DataFrame
             tomorrow_data = temperatures[temperatures["date"].dt.date == tomorrow]
+            today_data_debug = temperatures[temperatures["date"].dt.date == today]
+            st.write(f"DEBUG today: rows={len(today_data_debug)}, sources={today_data_debug['source'].tolist()}, water_temps={today_data_debug['water_temp'].tolist()}")
+            st.write(f"DEBUG tomorrow: rows={len(tomorrow_data)}, sources={tomorrow_data['source'].tolist() if not tomorrow_data.empty else []}, water_temps={tomorrow_data['water_temp'].tolist() if not tomorrow_data.empty else []}")
             if not tomorrow_data.empty and tomorrow_data.iloc[0]["source"] == "PREDICTED":
                 tomorrow_forecast_temp = tomorrow_data.iloc[0]["water_temp"]
 
@@ -891,7 +922,7 @@ def main():
             st.metric("Total Readings Taken", len(measured))
 
         # Display: Debug panel (always visible)
-        display_debug_panel(temperatures, forecaster, hourly_air_temps, forecast_3hourly)
+        display_debug_panel(temperatures, forecaster, hourly_air_temps, forecast_3hourly, gap_fill_hourly)
 
         # About section
         st.divider()
