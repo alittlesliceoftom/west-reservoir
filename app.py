@@ -633,18 +633,24 @@ def main():
                 forecast = cached_load_forecast_air_temps(days=5)
                 forecast["source"] = "AIR_ONLY"
                 temperatures = pd.concat([temperatures, forecast], ignore_index=True)
-                temperatures = temperatures.sort_values("date").reset_index(drop=True)
+                # Create deduplicated version for prediction chain
+                temperatures["_sort_priority"] = temperatures["source"].map(
+                    {"MEASURED": 0, "AIR_ONLY": 1, "PREDICTED": 2}
+                )
+                temperatures = temperatures.sort_values(["date", "_sort_priority"]).reset_index(drop=True)
+                temperatures = temperatures.drop(columns=["_sort_priority"])
+                temperatures_deduped = temperatures.drop_duplicates(subset=["date"], keep="first").reset_index(drop=True)
             except DataLoadError:
-                pass  # Continue with historical data only
+                temperatures_deduped = temperatures.copy()
 
             # Train and predict
             forecaster = WaterTempForecaster()
             forecaster.set_hourly_air_temps(combined_hourly)
-            forecaster.fit(temperatures[temperatures["source"] == "MEASURED"])
-            temperatures = forecaster.predict(temperatures)
+            forecaster.fit(temperatures_deduped[temperatures_deduped["source"] == "MEASURED"])
+            temperatures_deduped = forecaster.predict(temperatures_deduped)
 
             # Show only the chart
-            chart = create_temperature_chart(temperatures)
+            chart = create_temperature_chart(temperatures_deduped)
             st.plotly_chart(chart, width='stretch')
             st.stop()
 
@@ -761,24 +767,29 @@ def main():
             temperatures = pd.concat([temperatures, forecast], ignore_index=True)
             temperatures = temperatures.sort_values("date").reset_index(drop=True)
 
-            # Drop AIR_ONLY rows for dates that already have a MEASURED reading
-            measured_dates = set(temperatures.loc[temperatures["source"] == "MEASURED", "date"].dt.date)
-            temperatures = temperatures[
-                ~((temperatures["source"] == "AIR_ONLY") & (temperatures["date"].dt.date.isin(measured_dates)))
-            ].reset_index(drop=True)
+            # Keep full temperatures for forecast accuracy analysis
+            # Create deduplicated version for prediction chain (MEASURED > AIR_ONLY)
+            temperatures["_sort_priority"] = temperatures["source"].map(
+                {"MEASURED": 0, "AIR_ONLY": 1, "PREDICTED": 2}
+            )
+            temperatures = temperatures.sort_values(["date", "_sort_priority"]).reset_index(drop=True)
+            temperatures = temperatures.drop(columns=["_sort_priority"])
+
+            temperatures_deduped = temperatures.drop_duplicates(subset=["date"], keep="first").reset_index(drop=True)
 
         except DataLoadError as e:
             st.warning(f"Weather forecast unavailable: {e}")
             st.info("Showing historical data only")
             combined_hourly = hourly_air_temps
+            temperatures_deduped = temperatures.copy()  # No duplicates without forecast
 
         # Step 7: Train forecaster with combined hourly data
         forecaster = WaterTempForecaster()
         forecaster.set_hourly_air_temps(combined_hourly)
-        forecaster.fit(temperatures[temperatures["source"] == "MEASURED"])
+        forecaster.fit(temperatures_deduped[temperatures_deduped["source"] == "MEASURED"])
 
-        # Step 8: Generate predictions
-        temperatures = forecaster.predict(temperatures)
+        # Step 8: Generate predictions (use deduped for proper chaining)
+        temperatures_deduped = forecaster.predict(temperatures_deduped)
 
         # Store water predictions in MotherDuck (only once per day)
         if ENABLE_MOTHERDUCK:
@@ -786,10 +797,10 @@ def main():
                st.session_state['last_prediction_store_date'] != datetime.now().date():
                 try:
                     storage = ForecastStorage()
-                    predictions_df = temperatures[temperatures["source"] == "PREDICTED"].copy()
+                    predictions_df = temperatures_deduped[temperatures_deduped["source"] == "PREDICTED"].copy()
                     # Filter out any rows with NULL water_temp (shouldn't happen but safety check)
                     predictions_df = predictions_df.dropna(subset=["water_temp"])
-                    measured_temps = temperatures[temperatures["source"] == "MEASURED"]
+                    measured_temps = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
 
                     if not predictions_df.empty and not measured_temps.empty:
                         forecast_timestamp = st.session_state.get(
@@ -816,9 +827,9 @@ def main():
 
             st.header("Current Temperature")
 
-            # Get measured data
-            measured_data = temperatures[temperatures["source"] == "MEASURED"]
-            today_data = temperatures[temperatures["date"].dt.date == today]
+            # Get measured data (use deduped for display)
+            measured_data = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
+            today_data = temperatures_deduped[temperatures_deduped["date"].dt.date == today]
             has_today_measurement = any(today_data["source"] == "MEASURED")
 
             # Show measured temperature status
@@ -854,7 +865,7 @@ def main():
                     )
 
             # Get tomorrow's forecast from the predictions DataFrame
-            tomorrow_data = temperatures[temperatures["date"].dt.date == tomorrow]
+            tomorrow_data = temperatures_deduped[temperatures_deduped["date"].dt.date == tomorrow]
             if not tomorrow_data.empty and tomorrow_data.iloc[0]["source"] == "PREDICTED":
                 tomorrow_forecast_temp = tomorrow_data.iloc[0]["water_temp"]
 
@@ -872,10 +883,10 @@ def main():
                     st.metric("Tomorrow's Forecast", "N/A")
             with col_hottest:
                 week_ahead = today + timedelta(days=7)
-                upcoming = temperatures[
-                    (temperatures["date"].dt.date >= today) &
-                    (temperatures["date"].dt.date <= week_ahead) &
-                    (temperatures["source"].isin(["PREDICTED", "MEASURED"]))
+                upcoming = temperatures_deduped[
+                    (temperatures_deduped["date"].dt.date >= today) &
+                    (temperatures_deduped["date"].dt.date <= week_ahead) &
+                    (temperatures_deduped["source"].isin(["PREDICTED", "MEASURED"]))
                 ]
                 if not upcoming.empty:
                     hottest_temp = upcoming["water_temp"].max()
@@ -901,12 +912,12 @@ def main():
         st.text("""The chart shows the temperature history and forecast for the last 5 days, and next 5 days.
         Red bar shows the air temp range each day, with the black line being the average. The blue line is the water tempterature. It is dotted for forecast days.""")
 
-        chart = create_temperature_chart(temperatures)
+        chart = create_temperature_chart(temperatures_deduped)
         st.plotly_chart(chart, width='stretch')
 
         # Display: Summary statistics
         st.header("Summary Statistics")
-        measured = temperatures[temperatures["source"] == "MEASURED"]
+        measured = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Lowest Recorded at West Reservoir! ❄️", f"{measured['water_temp'].min():.1f}C")
@@ -916,7 +927,7 @@ def main():
             st.metric("Total Readings Taken", len(measured))
 
         # Display: Debug panel (always visible)
-        display_debug_panel(temperatures, forecaster, hourly_air_temps, forecast_3hourly, gap_fill_hourly)
+        display_debug_panel(temperatures_deduped, forecaster, hourly_air_temps, forecast_3hourly, gap_fill_hourly)
 
         # About section
         st.divider()
