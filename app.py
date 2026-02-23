@@ -581,7 +581,7 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
             )
 
     fig.update_layout(
-        title="Water Temperature (Last 10 Days + Forecast)",
+        title="Water Temperature (Last 5 Days + Forecast)",
         xaxis_title="Date",
         yaxis_title="Temperature (C)",
         hovermode="closest",

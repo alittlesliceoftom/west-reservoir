@@ -188,6 +188,12 @@ if data.empty:
 
 - **Example:** Instead of running multiple grep/read commands directly, spawn an Explore subagent to investigate the codebase and return findings.
 
+### Pull Request Format
+
+- **No test plans.** Do not include a "Test plan" checklist section in PR bodies — it will be deleted.
+- If testing was actually performed, briefly state what was tested (e.g. "Tested locally: hovered over chart data points and confirmed tooltip format").
+- Keep PR bodies concise: a short summary of what changed and why.
+
 ### UI/UX Guidelines
 
 - **No Emojis**: Keep interface professional and clean
