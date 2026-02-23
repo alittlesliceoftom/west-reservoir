@@ -409,6 +409,19 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
             st.info("MotherDuck storage is currently disabled. Set ENABLE_MOTHERDUCK = True in config.py to enable.")
 
 
+def _ordinal(day: int) -> str:
+    if 11 <= day <= 13:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+
+
+def _fmt_hover_dates(dates) -> list:
+    result = []
+    for d in pd.to_datetime(dates):
+        result.append(d.strftime(f"%a {d.day}{_ordinal(d.day)} %b"))
+    return result
+
+
 def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
     """Create temperature chart with last 5 days + forecast."""
     fig = go.Figure()
@@ -494,8 +507,8 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
                     marker=dict(color="black", size=6, symbol="line-ew", line=dict(width=2)),
                     legendgroup="air",
                     showlegend=False,
-                    customdata=list(zip(all_with_air["air_temp_min"], all_with_air["air_temp_max"])),
-                    hovertemplate="Air: %{y:.1f}C (Low: %{customdata[0]:.1f}, High: %{customdata[1]:.1f})<extra></extra>",
+                    customdata=list(zip(all_with_air["air_temp_min"], all_with_air["air_temp_max"], _fmt_hover_dates(all_with_air["date"]))),
+                    hovertemplate="Air: %{y:.1f}C (Low: %{customdata[0]:.1f}, High: %{customdata[1]:.1f})<br>%{customdata[2]}<extra></extra>",
                 )
             )
 
@@ -512,8 +525,9 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
                 text=[f"{v:.1f}" for v in measured["water_temp"]],
                 textposition="bottom center",
                 textfont=dict(size=14, color="#095988"),
+                customdata=_fmt_hover_dates(measured["date"]),
                 legendgroup="water",
-                hovertemplate="Water: %{y:.1f}C<extra></extra>",
+                hovertemplate="Water: %{y:.1f}C<br>%{customdata}<extra></extra>",
             )
         )
 
@@ -536,9 +550,10 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
                     text=[f"{v:.1f}" for v in past_gaps["water_temp"]],
                     textposition="bottom center",
                     textfont=dict(size=14, color="#095988"),
+                    customdata=_fmt_hover_dates(past_gaps["date"]),
                     legendgroup="water",
                     showlegend=False,
-                    hovertemplate="Water (gap-fill): %{y:.1f}C<extra></extra>",
+                    hovertemplate="Water (gap-fill): %{y:.1f}C<br>%{customdata}<extra></extra>",
                 )
             )
 
@@ -558,9 +573,10 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
                     text=[f"{v:.1f}" for v in predicted_with_connection["water_temp"]],
                     textposition="bottom center",
                     textfont=dict(size=14, color="#095988"),
+                    customdata=_fmt_hover_dates(predicted_with_connection["date"]),
                     legendgroup="water",
                     showlegend=False,
-                    hovertemplate="Water (forecast): %{y:.1f}C<extra></extra>",
+                    hovertemplate="Water (forecast): %{y:.1f}C<br>%{customdata}<extra></extra>",
                 )
             )
 
