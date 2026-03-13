@@ -111,10 +111,11 @@ class ForecastStorage:
         """
         conn = self._get_connection()
 
-        # Add timestamp columns
+        # Truncate to hour so the PK naturally deduplicates within each hour
+        forecast_created_hour = forecast_created_timestamp.replace(minute=0, second=0, microsecond=0)
         forecast_to_store = forecast_df.copy()
-        forecast_to_store['forecast_created_date'] = forecast_created_timestamp.date()
-        forecast_to_store['forecast_created_timestamp'] = forecast_created_timestamp
+        forecast_to_store['forecast_created_date'] = forecast_created_hour.date()
+        forecast_to_store['forecast_created_timestamp'] = forecast_created_hour
         forecast_to_store['target_date'] = forecast_to_store['date'].dt.date
         forecast_to_store['source'] = 'OpenWeatherMap'
 
@@ -160,15 +161,16 @@ class ForecastStorage:
         """
         conn = self._get_connection()
 
-        # Add metadata columns
+        # Truncate to hour so the PK naturally deduplicates within each hour
+        forecast_created_hour = forecast_created_timestamp.replace(minute=0, second=0, microsecond=0)
         predictions_to_store = predictions_df.copy()
-        predictions_to_store['forecast_created_date'] = forecast_created_timestamp.date()
-        predictions_to_store['forecast_created_timestamp'] = forecast_created_timestamp
+        predictions_to_store['forecast_created_date'] = forecast_created_hour.date()
+        predictions_to_store['forecast_created_timestamp'] = forecast_created_hour
         predictions_to_store['target_date'] = predictions_to_store['date'].dt.date
         predictions_to_store['heat_transfer_coeff'] = heat_transfer_coeff
         predictions_to_store['start_water_temp'] = start_water_temp
         predictions_to_store['simulation_hours'] = 24
-        predictions_to_store['source_air_forecast_timestamp'] = forecast_created_timestamp
+        predictions_to_store['source_air_forecast_timestamp'] = forecast_created_hour
 
         # Select columns in correct order
         predictions_to_store = predictions_to_store[[
