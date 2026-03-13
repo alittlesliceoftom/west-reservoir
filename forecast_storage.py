@@ -136,7 +136,8 @@ class ForecastStorage:
             """)
         except Exception as e:
             # Likely duplicate key - not a critical error
-            if "PRIMARY KEY" in str(e) or "UNIQUE" in str(e):
+            err_msg = str(e).lower()
+            if "primary key" in err_msg or "unique" in err_msg or "duplicate" in err_msg:
                 pass  # Silently ignore duplicates
             else:
                 raise ForecastStorageError(f"Failed to store air forecast: {e}")
@@ -187,7 +188,8 @@ class ForecastStorage:
                 SELECT * FROM predictions_to_store
             """)
         except Exception as e:
-            if "PRIMARY KEY" in str(e) or "UNIQUE" in str(e):
+            err_msg = str(e).lower()
+            if "primary key" in err_msg or "unique" in err_msg or "duplicate" in err_msg:
                 pass  # Silently ignore duplicates
             else:
                 raise ForecastStorageError(f"Failed to store water predictions: {e}")
@@ -226,7 +228,8 @@ class ForecastStorage:
                 SELECT * FROM forecast_to_store
             """)
         except Exception as e:
-            if "PRIMARY KEY" in str(e) or "UNIQUE" in str(e):
+            err_msg = str(e).lower()
+            if "primary key" in err_msg or "unique" in err_msg or "duplicate" in err_msg:
                 pass  # Silently ignore duplicates
             else:
                 raise ForecastStorageError(f"Failed to store 3-hourly air forecast: {e}")
