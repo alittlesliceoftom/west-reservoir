@@ -207,7 +207,9 @@ class ForecastStorage:
         conn = self._get_connection()
 
         forecast_to_store = forecast_df.copy()
-        forecast_to_store['forecast_created_timestamp'] = forecast_created_timestamp
+        # Truncate to hour so the PK naturally deduplicates within each hour
+        forecast_created_hour = forecast_created_timestamp.replace(minute=0, second=0, microsecond=0)
+        forecast_to_store['forecast_created_timestamp'] = forecast_created_hour
         forecast_to_store['target_datetime'] = forecast_to_store['datetime']
         forecast_to_store['source'] = 'OpenWeatherMap'
 

@@ -167,11 +167,11 @@ def combine_hourly_temps(
     combined = pd.concat(to_concat, ignore_index=True)
     combined = combined.sort_values("datetime").reset_index(drop=True)
 
-    # If there's still a gap (gap_fill didn't fully cover), interpolate it
+    # Resample to consistent hourly frequency for the forecaster.
+    # Gap fill and forecast data may be 3-hourly; the chart shows raw points
+    # but the forecaster needs true hourly data for correct heat transfer steps.
     if not combined.empty:
-        # Set index for resampling
         combined = combined.set_index("datetime").sort_index()
-        # Resample to hourly and interpolate any remaining gaps
         combined = combined.resample("h").interpolate(method="linear")
         combined = combined.reset_index()
 
@@ -368,6 +368,7 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                 margin=dict(l=0, r=0, t=20, b=0),
             )
             st.plotly_chart(fig, width='stretch')
+            st.caption("Chart shows raw data points. Non-hourly data (e.g. 3-hourly forecasts) is resampled to hourly before feeding into the prediction model.")
 
         # Section 5: Raw DataFrame
         st.subheader("Raw Data (Last 10 Rows)")
@@ -388,7 +389,7 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                 result = conn.execute("""
                     SELECT
                         MAX(forecast_created_timestamp) as last_stored,
-                        COUNT(DISTINCT DATE(forecast_created_timestamp)) as forecast_runs,
+                        COUNT(DISTINCT DATE_TRUNC('hour', forecast_created_timestamp)) as forecast_runs,
                         COUNT(*) as total_forecasts
                     FROM air_temp_forecasts_3hourly
                 """).fetchone()
