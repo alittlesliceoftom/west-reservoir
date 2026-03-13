@@ -1,9 +1,13 @@
 """West Reservoir Temperature Tracker - Streamlit App"""
 
+import warnings
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+
+# Suppress known pandas/plotly compatibility warning (harmless)
+warnings.filterwarnings("ignore", message=".*DatetimeProperties.to_pydatetime.*")
 
 from data import (
     load_water_temps,
