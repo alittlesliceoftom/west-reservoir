@@ -188,6 +188,14 @@ if data.empty:
 
 - **Example:** Instead of running multiple grep/read commands directly, spawn an Explore subagent to investigate the codebase and return findings.
 
+### Git Workflow
+
+- **Merge PRs with rebase** (`gh pr merge --rebase`) for clean linear history.
+- **After every PR merge**, fetch and rebase develop onto main so the next PR only shows new commits:
+  ```bash
+  git fetch --all && git rebase origin/main
+  ```
+
 ### Pull Request Format
 
 - **No test plans.** Do not include a "Test plan" checklist section in PR bodies — it will be deleted.
