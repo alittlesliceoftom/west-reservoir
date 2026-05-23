@@ -9,6 +9,10 @@ from meteostat import Point, Daily, Hourly
 from config import GOOGLE_SHEETS_URL, RESERVOIR_LAT, RESERVOIR_LON, REQUEST_TIMEOUT, get_openweather_api_key
 
 
+OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+
+
 class DataLoadError(Exception):
     """Raised when data cannot be loaded"""
     pass
@@ -334,6 +338,125 @@ def load_forecast_air_temps_3hourly(days: int = 5) -> pd.DataFrame:
         raise DataLoadError(f"Failed to fetch 3-hourly forecast from OpenWeatherMap: {e}")
     except Exception as e:
         raise DataLoadError(f"Error processing 3-hourly OpenWeatherMap forecast: {e}")
+
+
+def _parse_open_meteo_hourly(payload: dict) -> pd.DataFrame:
+    """
+    Parse an Open-Meteo hourly response into a DataFrame.
+
+    Args:
+        payload: JSON response with 'hourly' dict containing 'time',
+                 'shortwave_radiation', 'cloud_cover'
+
+    Returns:
+        DataFrame with columns: datetime, shortwave_radiation, cloud_cover
+
+    Raises:
+        DataLoadError: If payload is missing required fields or empty
+    """
+    hourly = payload.get("hourly")
+    if not hourly:
+        raise DataLoadError(
+            f"Open-Meteo response missing 'hourly' block: {payload.get('reason', payload)}"
+        )
+
+    required = ("time", "shortwave_radiation", "cloud_cover")
+    for key in required:
+        if key not in hourly:
+            raise DataLoadError(
+                f"Open-Meteo response missing required field '{key}'"
+            )
+
+    df = pd.DataFrame({
+        "datetime": pd.to_datetime(hourly["time"]),
+        "shortwave_radiation": pd.to_numeric(hourly["shortwave_radiation"], errors="coerce"),
+        "cloud_cover": pd.to_numeric(hourly["cloud_cover"], errors="coerce"),
+    })
+
+    df = df.dropna(subset=["shortwave_radiation", "cloud_cover"])
+
+    if df.empty:
+        raise DataLoadError("Open-Meteo response contained no valid hourly rows")
+
+    return df.sort_values("datetime").reset_index(drop=True)
+
+
+def load_historical_solar_cloud(start_date: datetime, end_date: datetime) -> pd.DataFrame:
+    """
+    Load historical hourly shortwave radiation and cloud cover from Open-Meteo.
+
+    Args:
+        start_date: Start datetime for historical data (inclusive)
+        end_date: End datetime for historical data (inclusive)
+
+    Returns:
+        pd.DataFrame: columns 'datetime', 'shortwave_radiation' (W/m^2), 'cloud_cover' (%)
+
+    Raises:
+        DataLoadError: If data cannot be loaded
+    """
+    params = {
+        "latitude": RESERVOIR_LAT,
+        "longitude": RESERVOIR_LON,
+        "start_date": pd.Timestamp(start_date).date().isoformat(),
+        "end_date": pd.Timestamp(end_date).date().isoformat(),
+        "hourly": "shortwave_radiation,cloud_cover",
+        "timezone": "UTC",
+    }
+
+    try:
+        response = requests.get(OPEN_METEO_ARCHIVE_URL, params=params, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        return _parse_open_meteo_hourly(response.json())
+
+    except DataLoadError:
+        raise
+    except requests.exceptions.Timeout:
+        raise DataLoadError(
+            f"Request to Open-Meteo archive timed out after {REQUEST_TIMEOUT} seconds"
+        )
+    except requests.exceptions.RequestException as e:
+        raise DataLoadError(f"Failed to fetch historical solar/cloud from Open-Meteo: {e}")
+    except Exception as e:
+        raise DataLoadError(f"Error processing Open-Meteo archive response: {e}")
+
+
+def load_forecast_solar_cloud(days: int = 5) -> pd.DataFrame:
+    """
+    Load forecast hourly shortwave radiation and cloud cover from Open-Meteo.
+
+    Args:
+        days: Number of forecast days (Open-Meteo supports up to 16 on free tier)
+
+    Returns:
+        pd.DataFrame: columns 'datetime', 'shortwave_radiation' (W/m^2), 'cloud_cover' (%)
+
+    Raises:
+        DataLoadError: If data cannot be loaded
+    """
+    params = {
+        "latitude": RESERVOIR_LAT,
+        "longitude": RESERVOIR_LON,
+        "hourly": "shortwave_radiation,cloud_cover",
+        "forecast_days": days,
+        "timezone": "UTC",
+    }
+
+    try:
+        response = requests.get(OPEN_METEO_FORECAST_URL, params=params, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        return _parse_open_meteo_hourly(response.json())
+
+    except DataLoadError:
+        raise
+    except requests.exceptions.Timeout:
+        raise DataLoadError(
+            f"Request to Open-Meteo forecast timed out after {REQUEST_TIMEOUT} seconds"
+        )
+    except requests.exceptions.RequestException as e:
+        raise DataLoadError(f"Failed to fetch forecast solar/cloud from Open-Meteo: {e}")
+    except Exception as e:
+        raise DataLoadError(f"Error processing Open-Meteo forecast response: {e}")
 
 
 def interpolate_to_hourly(df: pd.DataFrame) -> pd.DataFrame:
