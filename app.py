@@ -5,6 +5,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+from typing import Optional
 
 # Suppress known pandas/plotly compatibility warning (harmless)
 warnings.filterwarnings("ignore", message=".*DatetimeProperties.to_pydatetime.*")
@@ -15,6 +16,8 @@ from data import (
     load_hourly_air_temps,
     load_forecast_air_temps,
     load_forecast_air_temps_3hourly,
+    load_historical_solar_cloud,
+    load_forecast_solar_cloud,
     interpolate_to_hourly,
     DataLoadError,
 )
@@ -58,6 +61,58 @@ def cached_load_forecast_air_temps(days):
 def cached_load_forecast_air_temps_3hourly(days):
     """Load 3-hourly forecast air temps with 6-hour cache."""
     return load_forecast_air_temps_3hourly(days=days)
+
+
+@st.cache_data(ttl=CACHE_TTL)
+def cached_load_historical_solar_cloud(start_date, end_date):
+    """Load historical solar/cloud from Open-Meteo with 6-hour cache."""
+    return load_historical_solar_cloud(start_date, end_date)
+
+
+@st.cache_data(ttl=CACHE_TTL)
+def cached_load_forecast_solar_cloud(days):
+    """Load forecast solar/cloud from Open-Meteo with 6-hour cache."""
+    return load_forecast_solar_cloud(days=days)
+
+
+def build_hourly_weather(
+    combined_hourly: pd.DataFrame,
+    solar_cloud_hist: Optional[pd.DataFrame],
+    solar_cloud_fore: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    """
+    Merge air-temp hourly data with solar/cloud hourly data on datetime.
+
+    Concatenates historical and forecast solar/cloud (forecast wins for any
+    overlap), then inner-joins on the combined air-temp datetimes. Falls back
+    to zero solar / 100% cloud for any hour where solar/cloud is missing, so
+    the model degrades gracefully to single-term physics rather than erroring.
+    """
+    base = combined_hourly[["datetime", "air_temp"]].copy()
+    base["datetime"] = pd.to_datetime(base["datetime"])
+
+    solar_frames = []
+    if solar_cloud_hist is not None and not solar_cloud_hist.empty:
+        solar_frames.append(solar_cloud_hist)
+    if solar_cloud_fore is not None and not solar_cloud_fore.empty:
+        solar_frames.append(solar_cloud_fore)
+
+    if not solar_frames:
+        base["shortwave_radiation"] = 0.0
+        base["cloud_cover"] = 100.0
+        return base
+
+    solar = pd.concat(solar_frames, ignore_index=True)
+    solar["datetime"] = pd.to_datetime(solar["datetime"])
+    # Forecast takes precedence on overlap (keep last in concat order)
+    solar = solar.drop_duplicates(subset=["datetime"], keep="last")
+    solar = solar.sort_values("datetime").reset_index(drop=True)
+
+    merged = pd.merge(base, solar, on="datetime", how="left")
+    # Fill gaps with neutral defaults (no solar, full cloud → no cool term)
+    merged["shortwave_radiation"] = merged["shortwave_radiation"].fillna(0.0)
+    merged["cloud_cover"] = merged["cloud_cover"].fillna(100.0)
+    return merged
 
 
 def retrieve_gap_fill_forecasts(
@@ -208,10 +263,14 @@ def display_debug_panel(
 
         # Section 2: Model Parameters
         st.subheader("Model Parameters")
-        st.write(f"**Heat transfer coefficient (k)**: {forecaster.k:.4f} per hour")
-        daily_response = 1 - (1 - forecaster.k) ** 24
-        st.write(f"**Daily response**: {daily_response:.1%} of temperature difference")
-        st.write("**Physics**: T_water(t+1h) = T_water(t) + k * (T_air(t) - T_water(t))")
+        st.write(f"**k_air (conduction)**: {forecaster.k_air:.4f} per hour")
+        st.write(f"**k_solar (shortwave heating)**: {forecaster.k_solar:.6f} °C per (W/m²) per hour")
+        st.write(f"**k_cool (clear-sky cooling)**: {forecaster.k_cool:.4f} °C per hour at fully clear sky")
+        daily_response = 1 - (1 - forecaster.k_air) ** 24
+        st.write(f"**Daily air response**: {daily_response:.1%} of air/water temperature difference")
+        st.write(
+            "**Physics**: ΔT = k_air·(T_air − T_water) + k_solar·I − k_cool·(1 − cloud/100)"
+        )
 
         # Section 3: Tomorrow's Calculation (if available)
         has_predictions = any(temperatures["source"] == "PREDICTED")
@@ -229,12 +288,12 @@ def display_debug_panel(
                 start_dt = latest_date.replace(hour=forecaster.MEASUREMENT_HOUR)
                 end_dt = start_dt + timedelta(hours=24)
 
-                hourly_temps = forecaster._get_hourly_temps_for_period(start_dt, end_dt)
+                weather_slice = forecaster._get_weather_for_period(start_dt, end_dt)
 
-                if hourly_temps:
+                if not weather_slice.empty:
                     explanation = forecaster.explain_prediction(
                         current_water_temp=latest["water_temp"],
-                        hourly_air_temps=hourly_temps,
+                        weather_slice=weather_slice,
                     )
 
                     st.code(
@@ -243,7 +302,11 @@ Current water temp (7am):  {explanation['current_water_temp']:.2f} C
 Hours simulated:           {explanation['hours_simulated']}
 Air temp range:            {explanation['air_temp_min']:.1f} C to {explanation['air_temp_max']:.1f} C
 Air temp average:          {explanation['air_temp_avg']:.1f} C
-Heat transfer rate (k):    {explanation['heat_transfer_coefficient']:.4f} per hour
+Solar avg / peak:          {explanation['solar_avg']:.0f} / {explanation['solar_max']:.0f} W/m²
+Cloud cover average:       {explanation['cloud_avg']:.0f}%
+k_air:                     {explanation['k_air']:.4f} per hour
+k_solar:                   {explanation['k_solar']:.6f} °C per W/m² per hour
+k_cool:                    {explanation['k_cool']:.4f} °C per hour
 Total temp change:         {explanation['total_temp_change']:.2f} C
 --------------------------------------------
 Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
@@ -260,7 +323,12 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                             columns={
                                 "hour": "Time",
                                 "air_temp": "Air (C)",
+                                "shortwave_radiation": "Solar (W/m²)",
+                                "cloud_cover": "Cloud (%)",
                                 "water_temp_before": "Water Before (C)",
+                                "dT_air": "ΔT Air",
+                                "dT_solar": "ΔT Solar",
+                                "dT_cool": "ΔT Cool",
                                 "temp_change": "Change (C)",
                                 "water_temp_after": "Water After (C)",
                             }
@@ -269,7 +337,12 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                             breakdown_df.style.format(
                                 {
                                     "Air (C)": "{:.1f}",
+                                    "Solar (W/m²)": "{:.0f}",
+                                    "Cloud (%)": "{:.0f}",
                                     "Water Before (C)": "{:.2f}",
+                                    "ΔT Air": "{:.3f}",
+                                    "ΔT Solar": "{:.3f}",
+                                    "ΔT Cool": "{:.3f}",
                                     "Change (C)": "{:.3f}",
                                     "Water After (C)": "{:.2f}",
                                 }
@@ -665,9 +738,23 @@ def main():
             except DataLoadError:
                 temperatures_deduped = temperatures.copy()
 
+            # Load solar/cloud (Open-Meteo) and merge into hourly weather
+            solar_hist = None
+            solar_fore = None
+            try:
+                solar_hist = cached_load_historical_solar_cloud(start_date, end_date)
+            except DataLoadError:
+                pass
+            try:
+                solar_fore = cached_load_forecast_solar_cloud(days=5)
+            except DataLoadError:
+                pass
+
+            hourly_weather = build_hourly_weather(combined_hourly, solar_hist, solar_fore)
+
             # Train and predict
             forecaster = WaterTempForecaster()
-            forecaster.set_hourly_air_temps(combined_hourly)
+            forecaster.set_hourly_weather(hourly_weather)
             forecaster.fit(temperatures_deduped[temperatures_deduped["source"] == "MEASURED"])
             temperatures_deduped = forecaster.predict(temperatures_deduped)
 
@@ -709,9 +796,9 @@ def main():
             st.info(
                 "Water temperatures are taken each morning around 7am. "
                 "The water will often be warmer by the time you get in!\n\n "
-                "The forecast is based on the weather forecast and the water temperature history. "
-                "Currently the forecast is only based on temperature exchange between air and water. "
-                "It does not take into account other factors such as wind, cloud cover, or solar radiation.\n\n"
+                "The forecast simulates hourly heat transfer using air temperature, "
+                "shortwave solar radiation, and cloud cover (clear-sky overnight "
+                "cooling). It does not yet account for wind or evaporation.\n\n"
                 "Additionally, temperature varies throughout the reservoir "
                 "by both position and depth - this is just a snapshot of conditions."
             )
@@ -824,9 +911,23 @@ def main():
                 combined_hourly = hourly_air_temps
                 temperatures_deduped = temperatures.copy()  # No duplicates without forecast
 
-            # Step 7: Train forecaster with combined hourly data
+            # Step 6c: Load solar/cloud from Open-Meteo and merge into hourly weather
+            solar_hist = None
+            solar_fore = None
+            try:
+                solar_hist = cached_load_historical_solar_cloud(start_date, end_date)
+            except DataLoadError as e:
+                st.warning(f"Open-Meteo historical solar/cloud unavailable: {e}")
+            try:
+                solar_fore = cached_load_forecast_solar_cloud(days=5)
+            except DataLoadError as e:
+                st.warning(f"Open-Meteo forecast solar/cloud unavailable: {e}")
+
+            hourly_weather = build_hourly_weather(combined_hourly, solar_hist, solar_fore)
+
+            # Step 7: Train forecaster with combined hourly weather data
             forecaster = WaterTempForecaster()
-            forecaster.set_hourly_air_temps(combined_hourly)
+            forecaster.set_hourly_weather(hourly_weather)
             forecaster.fit(temperatures_deduped[temperatures_deduped["source"] == "MEASURED"])
 
             # Step 8: Generate predictions (use deduped for proper chaining)
@@ -851,7 +952,7 @@ def main():
                             storage.store_water_predictions(
                                 predictions_df=predictions_df,
                                 forecast_created_timestamp=forecast_timestamp,
-                                heat_transfer_coeff=forecaster.k,
+                                heat_transfer_coeff=forecaster.k_air,
                                 start_water_temp=measured_temps.iloc[-1]["water_temp"]
                             )
                             st.session_state['last_prediction_store_date'] = datetime.now().date()
@@ -899,10 +1000,10 @@ def main():
                     yesterday_temp = yesterday_data.iloc[-1]["water_temp"]
                     yesterday_dt = pd.Timestamp(yesterday).replace(hour=forecaster.MEASUREMENT_HOUR)
                     today_dt = pd.Timestamp(today).replace(hour=forecaster.MEASUREMENT_HOUR)
-                    hourly_temps = forecaster._get_hourly_temps_for_period(yesterday_dt, today_dt)
-                    if hourly_temps:
-                        today_forecast_temp = forecaster._simulate_24h(
-                            yesterday_temp, hourly_temps
+                    weather_slice = forecaster._get_weather_for_period(yesterday_dt, today_dt)
+                    if not weather_slice.empty:
+                        today_forecast_temp = forecaster._simulate_period(
+                            yesterday_temp, weather_slice
                         )
 
                 # Get tomorrow's forecast from the predictions DataFrame
