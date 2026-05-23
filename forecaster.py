@@ -3,193 +3,282 @@
 import pandas as pd
 import numpy as np
 from scipy.optimize import minimize
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 from datetime import datetime, timedelta
+
+
+WEATHER_COLUMNS = ("air_temp", "shortwave_radiation", "cloud_cover")
 
 
 class WaterTempForecaster:
     """
     Physics-based water temperature forecaster using hourly simulation.
 
-    Uses heat transfer equation applied hour-by-hour:
-        T_water(t+1h) = T_water(t) + k * (T_air(t) - T_water(t))
+    Per hour, water temperature is updated by three additive terms:
 
-    Water temperature measurements are at 7am, so the model simulates
-    the 24 hours from 7am to 7am to predict the next day's reading.
+        clearness(t) = 1 - cloud_cover(t) / 100
+        T_water(t+1h) = T_water(t)
+                      + k_air   * (T_air(t)   - T_water(t))   # conduction/convection
+                      + k_solar *  I(t)                        # shortwave heating
+                      - k_cool  *  clearness(t)                # longwave cooling to clear sky
+
+    Water temperature measurements are at 7am, so each training/prediction
+    period spans 7am-to-7am (24 hours).
+
+    When solar/cloud data is unavailable (e.g. via the legacy
+    `set_hourly_air_temps` path), shortwave_radiation defaults to 0 and
+    cloud_cover defaults to 100% (fully overcast → no radiative cooling).
+    In that case the model collapses to the original single-term physics.
     """
 
     MEASUREMENT_HOUR = 7  # Water temp is measured at 7am
 
-    def __init__(self, heat_transfer_coeff: float = 0.02):
+    def __init__(
+        self,
+        k_air: float = 0.02,
+        k_solar: float = 5e-4,
+        k_cool: float = 0.01,
+        heat_transfer_coeff: Optional[float] = None,
+    ):
         """
-        Initialize forecaster with hourly heat transfer coefficient.
+        Args:
+            k_air: Air/water heat-transfer coefficient per hour
+            k_solar: Solar heating coefficient (°C per W/m² per hour)
+            k_cool: Clear-sky radiative cooling rate (°C per hour at 100% clearness)
+            heat_transfer_coeff: Back-compat alias for k_air (legacy single-term init)
+        """
+        if heat_transfer_coeff is not None:
+            k_air = heat_transfer_coeff
+        self.k_air = k_air
+        self.k_solar = k_solar
+        self.k_cool = k_cool
+        self.hourly_weather: Optional[pd.DataFrame] = None
+
+    @property
+    def k(self) -> float:
+        """Back-compat alias for k_air."""
+        return self.k_air
+
+    def set_hourly_weather(self, hourly_weather: pd.DataFrame) -> None:
+        """
+        Set the hourly weather data for simulation.
 
         Args:
-            heat_transfer_coeff: Heat transfer coefficient k per hour
-                                 (default: 0.02, meaning ~40% daily response)
+            hourly_weather: DataFrame with 'datetime' and the columns:
+                            air_temp, shortwave_radiation, cloud_cover
         """
-        self.k = heat_transfer_coeff
-        self.hourly_air_temps: Optional[pd.DataFrame] = None
+        df = hourly_weather.copy()
+        for col in WEATHER_COLUMNS:
+            if col not in df.columns:
+                raise ValueError(f"hourly_weather missing required column '{col}'")
+        df = df[["datetime"] + list(WEATHER_COLUMNS)].copy()
+        df = df.set_index("datetime").sort_index()
+        # Forward-fill short gaps so an isolated missing hour doesn't kill a period
+        df = df.ffill(limit=3)
+        self.hourly_weather = df
 
     def set_hourly_air_temps(self, hourly_air_temps: pd.DataFrame) -> None:
         """
-        Set the hourly air temperature data for simulation.
+        Legacy entry point: accept air temps only and assume zero solar / full cloud.
 
         Args:
             hourly_air_temps: DataFrame with 'datetime' and 'air_temp' columns
         """
-        self.hourly_air_temps = hourly_air_temps.copy()
-        self.hourly_air_temps = self.hourly_air_temps.set_index("datetime").sort_index()
+        df = hourly_air_temps[["datetime", "air_temp"]].copy()
+        df["shortwave_radiation"] = 0.0
+        df["cloud_cover"] = 100.0  # fully overcast → no radiative cooling term
+        self.set_hourly_weather(df)
+
+    def _get_weather_for_period(
+        self, start_dt: datetime, end_dt: datetime
+    ) -> pd.DataFrame:
+        """Return weather rows in [start_dt, end_dt). Empty DataFrame if none."""
+        if self.hourly_weather is None:
+            return pd.DataFrame(columns=list(WEATHER_COLUMNS))
+
+        mask = (self.hourly_weather.index >= start_dt) & (
+            self.hourly_weather.index < end_dt
+        )
+        return self.hourly_weather.loc[mask].copy()
 
     def _get_hourly_temps_for_period(
         self, start_dt: datetime, end_dt: datetime
     ) -> List[float]:
-        """
-        Get hourly air temperatures for a time period.
+        """Back-compat helper: return just hourly air temps for a period."""
+        return self._get_weather_for_period(start_dt, end_dt)["air_temp"].tolist()
 
-        Args:
-            start_dt: Start datetime (inclusive)
-            end_dt: End datetime (exclusive)
-
-        Returns:
-            List of hourly air temperatures
-        """
-        if self.hourly_air_temps is None:
-            return []
-
-        # Get hourly temps between start and end
-        mask = (self.hourly_air_temps.index >= start_dt) & (
-            self.hourly_air_temps.index < end_dt
+    @staticmethod
+    def _step(
+        water: float,
+        air_temp: float,
+        irradiance: float,
+        cloud_cover: float,
+        k_air: float,
+        k_solar: float,
+        k_cool: float,
+    ) -> float:
+        """Single hour update."""
+        clearness = 1.0 - cloud_cover / 100.0
+        return (
+            water
+            + k_air * (air_temp - water)
+            + k_solar * irradiance
+            - k_cool * clearness
         )
-        temps = self.hourly_air_temps.loc[mask, "air_temp"].tolist()
-        return temps
 
-    def _simulate_24h(
-        self, start_water_temp: float, hourly_air_temps: List[float]
+    def _simulate_period(
+        self,
+        start_water_temp: float,
+        weather_slice: pd.DataFrame,
     ) -> float:
         """
-        Simulate water temperature change over a period using hourly air temps.
-
-        Args:
-            start_water_temp: Starting water temperature
-            hourly_air_temps: List of hourly air temperatures
-
-        Returns:
-            Final water temperature after simulation
+        Run the 3-term hourly simulation across the supplied weather rows.
         """
-        water_temp = start_water_temp
+        water = start_water_temp
+        if weather_slice.empty:
+            return water
 
+        airs = weather_slice["air_temp"].to_numpy()
+        sols = weather_slice["shortwave_radiation"].to_numpy()
+        clouds = weather_slice["cloud_cover"].to_numpy()
+        for i in range(len(airs)):
+            water = self._step(
+                water, airs[i], sols[i], clouds[i],
+                self.k_air, self.k_solar, self.k_cool,
+            )
+        return water
+
+    def _simulate_24h(
+        self, start_water_temp: float, hourly_air_temps: Sequence[float]
+    ) -> float:
+        """
+        Back-compat: simulate using only an air-temp list (zero solar, full cloud).
+        """
+        water = start_water_temp
         for air_temp in hourly_air_temps:
-            temp_diff = air_temp - water_temp
-            water_temp += self.k * temp_diff
-
-        return water_temp
+            water = self._step(
+                water, air_temp, 0.0, 100.0,
+                self.k_air, self.k_solar, self.k_cool,
+            )
+        return water
 
     def fit(self, temperatures: pd.DataFrame) -> None:
         """
-        Train the model on measured water temperatures using hourly simulation.
-
-        Optimizes the heat transfer coefficient k to minimize prediction error.
+        Fit k_air, k_solar, k_cool against measured water temperatures.
 
         Args:
             temperatures: DataFrame with columns: date, water_temp, source
-                         Only rows with source == 'MEASURED' will be used.
         """
-        if self.hourly_air_temps is None:
+        if self.hourly_weather is None:
             return
 
-        # Filter to measured data only
         training_data = temperatures[temperatures["source"] == "MEASURED"].copy()
-
         if len(training_data) < 10:
             return
 
-        # Sort by date
         training_data = training_data.sort_values("date").reset_index(drop=True)
 
-        # Build training pairs: (start_water_temp, hourly_airs, actual_end_temp)
+        # Build training pairs as plain NumPy arrays for fast inner loop
         training_pairs = []
-
         for i in range(1, len(training_data)):
             prev_row = training_data.iloc[i - 1]
             curr_row = training_data.iloc[i]
 
-            prev_date = prev_row["date"]
-            curr_date = curr_row["date"]
+            start_dt = pd.Timestamp(prev_row["date"]).replace(hour=self.MEASUREMENT_HOUR)
+            end_dt = pd.Timestamp(curr_row["date"]).replace(hour=self.MEASUREMENT_HOUR)
 
-            # Get 7am datetime for each measurement
-            start_dt = pd.Timestamp(prev_date).replace(hour=self.MEASUREMENT_HOUR)
-            end_dt = pd.Timestamp(curr_date).replace(hour=self.MEASUREMENT_HOUR)
-
-            # Get hourly temps for this period
-            hourly_temps = self._get_hourly_temps_for_period(start_dt, end_dt)
-
-            if len(hourly_temps) >= 20:  # Need at least ~20 hours of data
-                training_pairs.append(
-                    {
-                        "start_water": prev_row["water_temp"],
-                        "hourly_airs": hourly_temps,
-                        "actual_end": curr_row["water_temp"],
-                    }
-                )
+            slice_df = self._get_weather_for_period(start_dt, end_dt)
+            if len(slice_df) >= 20:
+                training_pairs.append({
+                    "start_water": float(prev_row["water_temp"]),
+                    "airs": slice_df["air_temp"].to_numpy(),
+                    "sols": slice_df["shortwave_radiation"].to_numpy(),
+                    "clouds": slice_df["cloud_cover"].to_numpy(),
+                    "actual_end": float(curr_row["water_temp"]),
+                })
 
         if len(training_pairs) < 5:
             return
 
         def objective(params):
-            """Objective function: minimize sum of squared errors"""
-            k = params[0]
-            total_error = 0
-
+            k_air, k_solar, k_cool = params
+            total_error = 0.0
             for pair in training_pairs:
-                # Simulate with this k value
-                water_temp = pair["start_water"]
-                for air_temp in pair["hourly_airs"]:
-                    water_temp += k * (air_temp - water_temp)
-
-                # Add squared error
-                total_error += (water_temp - pair["actual_end"]) ** 2
-
+                water = pair["start_water"]
+                airs = pair["airs"]
+                sols = pair["sols"]
+                clouds = pair["clouds"]
+                for i in range(len(airs)):
+                    clearness = 1.0 - clouds[i] / 100.0
+                    water += (
+                        k_air * (airs[i] - water)
+                        + k_solar * sols[i]
+                        - k_cool * clearness
+                    )
+                total_error += (water - pair["actual_end"]) ** 2
             return total_error
 
-        # Optimize k (bounds: 0.001 to 0.1 per hour)
-        bounds = [(0.001, 0.1)]
-        initial_guess = [self.k]
-
+        bounds = [
+            (0.001, 0.1),       # k_air per hour
+            (1e-5, 1e-3),       # k_solar °C per W/m² per hour
+            (0.0, 0.1),         # k_cool °C per hour (≥ 0 cooling only)
+        ]
+        initial_guess = [self.k_air, self.k_solar, self.k_cool]
         result = minimize(objective, initial_guess, bounds=bounds, method="L-BFGS-B")
 
         if result.success:
-            self.k = result.x[0]
+            self.k_air, self.k_solar, self.k_cool = (float(x) for x in result.x)
 
     def predict_next_day(
-        self, current_water_temp: float, hourly_air_temps: List[float]
+        self,
+        current_water_temp: float,
+        hourly_air_temps_or_weather,
     ) -> float:
         """
-        Predict tomorrow's water temperature using hourly simulation.
+        Predict tomorrow's water temperature (7am to 7am).
 
         Args:
             current_water_temp: Today's water temperature at 7am
-            hourly_air_temps: List of hourly air temps from 7am to 7am (24 values)
+            hourly_air_temps_or_weather: Either a list of 24 hourly air temps
+                (legacy path, assumes zero solar / full cloud) or a DataFrame
+                with columns air_temp, shortwave_radiation, cloud_cover.
 
         Returns:
-            Predicted water temperature for tomorrow at 7am
+            Predicted water temperature 24h later.
         """
-        return self._simulate_24h(current_water_temp, hourly_air_temps)
+        if isinstance(hourly_air_temps_or_weather, pd.DataFrame):
+            return self._simulate_period(current_water_temp, hourly_air_temps_or_weather)
+        return self._simulate_24h(current_water_temp, hourly_air_temps_or_weather)
 
     def explain_prediction(
-        self, current_water_temp: float, hourly_air_temps: List[float]
+        self,
+        current_water_temp: float,
+        weather_slice=None,
+        hourly_air_temps: Optional[Sequence[float]] = None,
     ) -> Dict:
         """
-        Returns a detailed breakdown of the 24-hour simulation.
+        Returns a per-hour breakdown of the simulation including the
+        contribution of each physics term.
 
-        Args:
-            current_water_temp: Today's water temperature at 7am
-            hourly_air_temps: List of hourly air temps from 7am to 7am
-
-        Returns:
-            dict: Dictionary containing simulation details
+        Pass either `weather_slice` (preferred, full 3-term model) or
+        `hourly_air_temps` (legacy, assumes zero solar / full cloud).
+        For back-compat, a list passed positionally as `weather_slice`
+        is treated as `hourly_air_temps`.
         """
-        if not hourly_air_temps:
+        # Back-compat: positional list goes to legacy path
+        if weather_slice is not None and not isinstance(weather_slice, pd.DataFrame):
+            hourly_air_temps = weather_slice
+            weather_slice = None
+
+        if weather_slice is None and hourly_air_temps is not None:
+            n = len(hourly_air_temps)
+            weather_slice = pd.DataFrame({
+                "air_temp": list(hourly_air_temps),
+                "shortwave_radiation": [0.0] * n,
+                "cloud_cover": [100.0] * n,
+            })
+
+        if weather_slice is None or weather_slice.empty:
             return {
                 "current_water_temp": current_water_temp,
                 "hours_simulated": 0,
@@ -197,79 +286,76 @@ class WaterTempForecaster:
                 "hourly_breakdown": [],
             }
 
-        # Simulate and track each hour
-        water_temp = current_water_temp
-        hourly_breakdown = []
+        airs = weather_slice["air_temp"].to_numpy()
+        sols = weather_slice["shortwave_radiation"].to_numpy()
+        clouds = weather_slice["cloud_cover"].to_numpy()
 
-        for i, air_temp in enumerate(hourly_air_temps):
+        water = current_water_temp
+        breakdown = []
+        for i in range(len(airs)):
             hour = (self.MEASUREMENT_HOUR + i) % 24
-            temp_diff = air_temp - water_temp
-            temp_change = self.k * temp_diff
-            new_water_temp = water_temp + temp_change
-
-            hourly_breakdown.append(
-                {
-                    "hour": hour,
-                    "air_temp": air_temp,
-                    "water_temp_before": water_temp,
-                    "temp_change": temp_change,
-                    "water_temp_after": new_water_temp,
-                }
-            )
-
-            water_temp = new_water_temp
+            clearness = 1.0 - clouds[i] / 100.0
+            dT_air = self.k_air * (airs[i] - water)
+            dT_solar = self.k_solar * sols[i]
+            dT_cool = -self.k_cool * clearness
+            total_change = dT_air + dT_solar + dT_cool
+            new_water = water + total_change
+            breakdown.append({
+                "hour": hour,
+                "air_temp": float(airs[i]),
+                "shortwave_radiation": float(sols[i]),
+                "cloud_cover": float(clouds[i]),
+                "water_temp_before": float(water),
+                "dT_air": float(dT_air),
+                "dT_solar": float(dT_solar),
+                "dT_cool": float(dT_cool),
+                "temp_change": float(total_change),
+                "water_temp_after": float(new_water),
+            })
+            water = new_water
 
         return {
             "current_water_temp": current_water_temp,
-            "hours_simulated": len(hourly_air_temps),
-            "air_temp_avg": sum(hourly_air_temps) / len(hourly_air_temps),
-            "air_temp_min": min(hourly_air_temps),
-            "air_temp_max": max(hourly_air_temps),
-            "heat_transfer_coefficient": self.k,
-            "total_temp_change": water_temp - current_water_temp,
-            "predicted_water_temp": water_temp,
-            "hourly_breakdown": hourly_breakdown,
+            "hours_simulated": len(airs),
+            "air_temp_avg": float(airs.mean()),
+            "air_temp_min": float(airs.min()),
+            "air_temp_max": float(airs.max()),
+            "solar_avg": float(sols.mean()),
+            "solar_max": float(sols.max()),
+            "cloud_avg": float(clouds.mean()),
+            "k_air": self.k_air,
+            "k_solar": self.k_solar,
+            "k_cool": self.k_cool,
+            "heat_transfer_coefficient": self.k_air,  # back-compat alias
+            "total_temp_change": float(water - current_water_temp),
+            "predicted_water_temp": float(water),
+            "hourly_breakdown": breakdown,
         }
 
     def predict(self, temperatures: pd.DataFrame) -> pd.DataFrame:
         """
-        Predict water temps for all rows where source == 'AIR_ONLY'.
-
-        Uses hourly simulation for each day.
-
-        Args:
-            temperatures: DataFrame with columns: date, water_temp, air_temp, source
-
-        Returns:
-            pd.DataFrame: Updated DataFrame with predictions filled in
+        Fill in predicted water temps for rows where source == 'AIR_ONLY'.
         """
         result = temperatures.copy()
         result = result.sort_values("date").reset_index(drop=True)
 
         for i in range(len(result)):
-            if result.loc[i, "source"] == "AIR_ONLY":
-                if i == 0:
-                    continue
+            if result.loc[i, "source"] != "AIR_ONLY":
+                continue
+            if i == 0:
+                continue
 
-                prev_row = result.iloc[i - 1]
-                curr_date = result.loc[i, "date"]
+            prev_row = result.iloc[i - 1]
+            curr_date = result.loc[i, "date"]
+            current_water_temp = prev_row["water_temp"]
 
-                # Get start water temp from previous day
-                current_water_temp = prev_row["water_temp"]
+            start_dt = pd.Timestamp(prev_row["date"]).replace(hour=self.MEASUREMENT_HOUR)
+            end_dt = pd.Timestamp(curr_date).replace(hour=self.MEASUREMENT_HOUR)
 
-                # Get 7am to 7am period
-                start_dt = pd.Timestamp(prev_row["date"]).replace(
-                    hour=self.MEASUREMENT_HOUR
-                )
-                end_dt = pd.Timestamp(curr_date).replace(hour=self.MEASUREMENT_HOUR)
-
-                # Get hourly temps for this period
-                hourly_temps = self._get_hourly_temps_for_period(start_dt, end_dt)
-
-                if hourly_temps:
-                    predicted = self._simulate_24h(current_water_temp, hourly_temps)
-                    result.loc[i, "water_temp"] = predicted
-                    result.loc[i, "source"] = "PREDICTED"
-                # If no hourly data, leave source as AIR_ONLY (not predicted)
+            slice_df = self._get_weather_for_period(start_dt, end_dt)
+            if not slice_df.empty:
+                predicted = self._simulate_period(current_water_temp, slice_df)
+                result.loc[i, "water_temp"] = predicted
+                result.loc[i, "source"] = "PREDICTED"
 
         return result
