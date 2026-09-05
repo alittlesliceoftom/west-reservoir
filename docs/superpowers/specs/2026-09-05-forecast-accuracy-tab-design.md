@@ -239,10 +239,19 @@ For each measured date `d` in range:
 1. Start from the measured water temp at `d` 07:00.
 2. Build the hourly weather frame from `d` 07:00 forward 5 days:
    - Air temp: the **last stored 3-hourly run created on `d`**, interpolated
-     to hourly via the existing `interpolate_to_hourly`. If absent
-     (pre-Feb-2026), fall back to Meteostat hourly actuals and mark
-     `air_source='ACTUAL'`.
+     to hourly, **spliced onto measured air for the elapsed part of the day**.
+     A run created around 21:00 only covers that day's remainder — horizon 0
+     holds 16,014 rows against ~30,400 at horizons 1–4 — so feeding it raw
+     would simulate roughly 10 hours of a 24-hour period and produce a number
+     the model never computes. What the live run actually had was measured air
+     up to its creation time and forecast air after; the splice reconstructs
+     that. Where no stored run exists for `d`, use Meteostat hourly actuals
+     for the whole window and mark `air_source='ACTUAL'`.
    - Solar/cloud: historical actuals, via the existing `build_hourly_weather`.
+
+   Note the splice cannot reuse `combine_hourly_temps`: that function gives
+   historical precedence on overlap, so for a past anchor it would override
+   the entire stored forecast and make the replay 100% actuals.
 3. Call `forecaster.predict(d_7am, measured_temp, targets=5)` — the PR 1 API.
    One simulation, checkpointed at each 07:00 boundary → up to 5 rows
    (horizons 1–5). No private methods, no per-date loop.
