@@ -219,3 +219,123 @@ class TestFit:
         f.set_hourly_weather(_make_hourly_weather(datetime(2026, 1, 1), n_hours=24))
         f.fit(empty)
         assert f.k_cool >= 0
+
+
+class TestPredictForward:
+    """Forward simulation API: one pass, checkpointed at each target."""
+
+    def _fitted(self, n_hours=200, air_temp=15.0):
+        f = WaterTempForecaster(k_air=0.02, k_solar=0.0, k_cool=0.0)
+        f.set_hourly_weather(
+            _make_hourly_weather(datetime(2026, 3, 1, 0), n_hours, air_temp=air_temp)
+        )
+        return f
+
+    def test_single_target_matches_manual_simulation(self):
+        f = self._fitted()
+        start = datetime(2026, 3, 1, 7)
+        result = f.predict_forward(start, 10.0, targets=1)
+
+        assert list(result.columns) == [
+            "target_datetime", "horizon_days", "water_temp", "has_weather"
+        ]
+        assert len(result) == 1
+        assert result.loc[0, "horizon_days"] == 1
+        assert result.loc[0, "target_datetime"] == pd.Timestamp(2026, 3, 2, 7)
+        assert bool(result.loc[0, "has_weather"]) is True
+
+        expected = f._simulate_period(
+            10.0, f._get_weather_for_period(start, datetime(2026, 3, 2, 7))
+        )
+        assert result.loc[0, "water_temp"] == pytest.approx(expected)
+
+    def test_multi_target_equals_chained_single_days(self):
+        """A 3-day forecast is one continuous run, equal to 3 chained 1-day runs."""
+        f = self._fitted()
+        start = datetime(2026, 3, 1, 7)
+        result = f.predict_forward(start, 10.0, targets=3)
+
+        assert list(result["horizon_days"]) == [1, 2, 3]
+
+        water = 10.0
+        for day in range(3):
+            leg_start = datetime(2026, 3, 1 + day, 7)
+            leg_end = datetime(2026, 3, 2 + day, 7)
+            water = f._simulate_period(water, f._get_weather_for_period(leg_start, leg_end))
+            assert result.loc[day, "water_temp"] == pytest.approx(water)
+
+    def test_start_datetime_normalised_to_measurement_hour(self):
+        """A midnight or mid-afternoon anchor is snapped to 7am."""
+        f = self._fitted()
+        at_seven = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, targets=2)
+        at_midnight = f.predict_forward(datetime(2026, 3, 1, 0), 10.0, targets=2)
+        pd.testing.assert_frame_equal(at_seven, at_midnight)
+
+    def test_explicit_irregular_dates(self):
+        """Targets may be an irregular sequence of dates, not just 1..n."""
+        f = self._fitted()
+        start = datetime(2026, 3, 1, 7)
+        result = f.predict_forward(
+            start, 10.0, targets=[datetime(2026, 3, 2), datetime(2026, 3, 5)]
+        )
+        assert list(result["horizon_days"]) == [1, 4]
+
+        water = 10.0
+        water = f._simulate_period(
+            water, f._get_weather_for_period(datetime(2026, 3, 1, 7), datetime(2026, 3, 2, 7))
+        )
+        assert result.loc[0, "water_temp"] == pytest.approx(water)
+        water = f._simulate_period(
+            water, f._get_weather_for_period(datetime(2026, 3, 2, 7), datetime(2026, 3, 5, 7))
+        )
+        assert result.loc[1, "water_temp"] == pytest.approx(water)
+
+    def test_targets_sorted_ascending(self):
+        f = self._fitted()
+        result = f.predict_forward(
+            datetime(2026, 3, 1, 7), 10.0,
+            targets=[datetime(2026, 3, 4), datetime(2026, 3, 2)],
+        )
+        assert list(result["horizon_days"]) == [1, 3]
+
+    def test_duplicate_targets_are_kept_as_zero_length_legs(self):
+        """One row per target, duplicates included. Preserves legacy filler behaviour."""
+        f = self._fitted()
+        result = f.predict_forward(
+            datetime(2026, 3, 1, 7), 10.0,
+            targets=[datetime(2026, 3, 2), datetime(2026, 3, 2)],
+        )
+        assert len(result) == 2
+        assert bool(result.loc[0, "has_weather"]) is True
+        assert bool(result.loc[1, "has_weather"]) is False
+
+    def test_nan_when_weather_runs_out(self):
+        """No fabrication: legs beyond weather coverage are NaN with has_weather False."""
+        f = self._fitted(n_hours=30)  # covers ~1 day past the 7am anchor
+        result = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, targets=3)
+
+        assert len(result) == 3
+        assert not np.isnan(result.loc[0, "water_temp"])
+        assert bool(result.loc[0, "has_weather"]) is True
+        assert np.isnan(result.loc[2, "water_temp"])
+        assert bool(result.loc[2, "has_weather"]) is False
+
+    def test_nan_propagates_once_coverage_lost(self):
+        f = self._fitted(n_hours=30)
+        result = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, targets=4)
+        tail = result[result["horizon_days"] >= 3]["water_temp"]
+        assert tail.isna().all()
+
+    def test_no_weather_set_returns_all_nan(self):
+        f = WaterTempForecaster()
+        result = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, targets=2)
+        assert result["water_temp"].isna().all()
+        assert not result["has_weather"].any()
+
+    def test_zero_targets_returns_empty_frame(self):
+        f = self._fitted()
+        result = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, targets=0)
+        assert result.empty
+        assert list(result.columns) == [
+            "target_datetime", "horizon_days", "water_temp", "has_weather"
+        ]

@@ -250,6 +250,81 @@ class WaterTempForecaster:
             return self._simulate_period(current_water_temp, hourly_air_temps_or_weather)
         return self._simulate_24h(current_water_temp, hourly_air_temps_or_weather)
 
+    def predict_forward(
+        self,
+        start_datetime,
+        start_water_temp: float,
+        targets=1,
+    ) -> pd.DataFrame:
+        """
+        Forecast water temperature forward from a known starting point.
+
+        Runs ONE continuous simulation, checkpointed at each target, rather
+        than re-simulating per target.
+
+        Args:
+            start_datetime: Anchor time. Normalised to MEASUREMENT_HOUR (7am),
+                            since water temps are measured at 7am.
+            start_water_temp: Known water temperature at the anchor.
+            targets: Either an int n (forecast 1..n days ahead), or a sequence
+                     of dates/datetimes. Duplicates are kept as zero-length
+                     legs rather than de-duplicated, so callers get exactly one
+                     row per target they asked for.
+
+        Returns:
+            DataFrame with columns:
+                target_datetime (Timestamp, at 7am)
+                horizon_days    (int, days from the anchor)
+                water_temp      (float, NaN where weather coverage is missing)
+                has_weather     (bool, whether that leg had any weather data)
+        """
+        columns = ["target_datetime", "horizon_days", "water_temp", "has_weather"]
+
+        start_dt = pd.Timestamp(start_datetime).normalize() + pd.Timedelta(
+            hours=self.MEASUREMENT_HOUR
+        )
+
+        if isinstance(targets, (int, np.integer)):
+            target_dts = [
+                start_dt + pd.Timedelta(days=i) for i in range(1, int(targets) + 1)
+            ]
+        else:
+            target_dts = sorted(
+                pd.Timestamp(t).normalize() + pd.Timedelta(hours=self.MEASUREMENT_HOUR)
+                for t in targets
+            )
+
+        target_dts = [t for t in target_dts if t >= start_dt]
+
+        if not target_dts:
+            return pd.DataFrame({c: [] for c in columns}).astype(
+                {"horizon_days": "int64", "water_temp": "float64", "has_weather": "bool"}
+            )
+
+        rows = []
+        water = float(start_water_temp)
+        cursor = start_dt
+
+        for target_dt in target_dts:
+            weather_slice = self._get_weather_for_period(cursor, target_dt)
+            has_weather = not weather_slice.empty
+
+            if has_weather:
+                water = self._simulate_period(water, weather_slice)
+            else:
+                # No data for this leg: refuse to fabricate, and stay NaN onward.
+                water = float("nan")
+
+            rows.append({
+                "target_datetime": target_dt,
+                "horizon_days": int((target_dt - start_dt) / pd.Timedelta(days=1)),
+                "water_temp": water,
+                "has_weather": has_weather,
+            })
+            cursor = target_dt
+
+        return pd.DataFrame(rows, columns=columns)
+
     def explain_prediction(
         self,
         current_water_temp: float,
