@@ -63,7 +63,94 @@ The replay is only as honest as the inputs available at the time.
 
 The stored-forecast comparison has **no leakage** — it is a pure record.
 
-## Architecture
+## Delivery Order
+
+**PR 1 — `WaterTempForecaster.predict()` refactor.** A prerequisite. The
+accuracy work must not be built on the current API (see below). Ships with
+tests pinning it behaviour-identical to today's output.
+
+**PR 2 — the accuracy tab.** Everything from "New module `accuracy.py`"
+onward, built on the PR 1 API.
+
+## PR 1: Forecaster predict() Refactor
+
+### Why this comes first
+
+The current `predict()` is not a forecasting API:
+
+```python
+def predict(self, temperatures: pd.DataFrame) -> pd.DataFrame:
+    """Fill in predicted water temps for rows where source == 'AIR_ONLY'."""
+```
+
+It is a DataFrame gap-filler coupled to the single-`temperatures`-DataFrame
+convention and the `source` string vocabulary. To forecast anything, a caller
+must first construct a frame with `AIR_ONLY` rows in the correct order. The
+backtest would have to either fabricate such a frame per anchor date (~200
+times) or reach past it into the private `_simulate_period`. Both are wrong;
+the second is what the first draft of this spec did.
+
+This is also the origin of the negative-horizon backfill: `predict()` fills
+*every* `AIR_ONLY` row including historical gaps, and `app.py:942` stores
+every `PREDICTED` row it finds.
+
+### Loops: which are inherent
+
+1. **Hour-by-hour physics** — genuinely sequential. Stays in `_simulate_period`.
+2. **Target dates from one anchor** — *unnecessary*. An n-day forecast is one
+   continuous simulation sampled at each 7am boundary, not n simulations.
+   The current per-row re-entry is both slower and where the chaining
+   behaviour got buried.
+3. **Anchors in a backtest** — inherent (independent trajectories), but should
+   be a `map` over anchors, not bespoke logic at the call site.
+
+### New API
+
+```python
+def predict(self, start_datetime, start_water_temp, targets) -> pd.DataFrame:
+    """
+    Forecast water temperature forward from a known starting point.
+
+    Args:
+        start_datetime:   anchor time (normalised to MEASUREMENT_HOUR, 7am)
+        start_water_temp: measured/known water temp at the anchor
+        targets:          int n -> forecast 1..n days ahead
+                          or a sequence of dates (supports irregular gaps)
+
+    Returns:
+        DataFrame: target_datetime, horizon_days, water_temp
+        water_temp is NaN where hourly weather coverage runs out.
+    """
+```
+
+One simulation pass, checkpointed at each target, targets sorted ascending.
+Serves all three consumers: live forecast (`targets=5`), backtest replay
+(`targets=5` per anchor), and gap-fill (explicit irregular dates — required,
+since the existing filler handles non-consecutive dates).
+
+### Migration
+
+- Existing DataFrame method renamed `fill_predictions(temperatures)` and
+  reimplemented as a thin wrapper: for each run of consecutive `AIR_ONLY`
+  rows, anchor on the preceding row and predict that run's dates. The
+  existing code chains from `prev_row` whether it is `MEASURED` or
+  `PREDICTED`, which is exactly equivalent to one continuous simulation from
+  the last known anchor — so this is behaviour-preserving.
+- `predict_next_day` becomes a one-line alias for `predict(..., targets=1)`.
+- Call sites: `app.py:759`, `app.py:934`. Tests in `test_forecaster.py`.
+
+### PR 1 tests
+
+- `predict` with `targets=1` matches `predict_next_day` exactly.
+- `predict` with `targets=5` sampled at boundaries equals five chained
+  single-day simulations (the continuous-run equivalence).
+- `predict` with irregular explicit dates handles gaps correctly.
+- NaN — not a fabricated value — where weather coverage runs out.
+- **Golden test**: `fill_predictions` output is identical to the pre-refactor
+  `predict(temperatures)` on a fixed synthetic frame. This is the guard that
+  makes the rename safe.
+
+## PR 2 Architecture
 
 ### New module: `accuracy.py`
 
@@ -140,10 +227,15 @@ For each measured date `d` in range:
      (pre-Feb-2026), fall back to Meteostat hourly actuals and mark
      `air_source='ACTUAL'`.
    - Solar/cloud: historical actuals, via the existing `build_hourly_weather`.
-3. Call `forecaster._simulate_period` once across the span, sampling water
-   temperature at each 07:00 boundary → up to 5 rows (horizons 1–5).
+3. Call `forecaster.predict(d_7am, measured_temp, targets=5)` — the PR 1 API.
+   One simulation, checkpointed at each 07:00 boundary → up to 5 rows
+   (horizons 1–5). No private methods, no per-date loop.
 4. Where weather coverage is missing (horizon-5 stored runs are truncated —
-   14.5k rows vs ~30k at other horizons), emit **NaN**. Never fabricate.
+   14.5k rows vs ~30k at other horizons), `predict` returns **NaN**. Never
+   fabricate.
+
+The replay is therefore a `map` of one `predict` call over measured anchors,
+concatenated — the whole point of doing PR 1 first.
 
 The current fitted `k_air / k_solar / k_cool` are used throughout, per the
 decision above.
@@ -187,7 +279,22 @@ model coefficients so a refit invalidates it.
 - Bias sign: an all-too-warm frame yields positive bias.
 - Missing weather coverage yields NaN, not a fabricated number.
 
-## Documented Limitation
+## Documented Limitations
+
+### Model version is not recoverable
+
+`water_temp_predictions` stores `heat_transfer_coeff` only. It predates the
+three-term model (9a1ee41), so `k_solar` and `k_cool` were never persisted —
+verified against the live schema on 2026-09-05. Stored predictions cannot be
+attributed to a specific model version.
+
+This does not affect scoring stored forecasts (the forecast value is what it
+is), but historical accuracy **cannot be segmented by model version**, and a
+step change in the by-horizon chart around the 9a1ee41 deploy should be read
+as a model change rather than weather. Persisting the two missing
+coefficients is a candidate addition to the storage follow-up (issue #29).
+
+### Effective horizon
 
 "1-day horizon" means one day from `forecast_created_date`, not one day from
 the last measurement. If date `d` was not measured, a stored "1-day" forecast
