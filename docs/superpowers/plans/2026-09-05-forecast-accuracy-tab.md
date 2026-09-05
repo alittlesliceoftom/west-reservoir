@@ -533,7 +533,7 @@ PRBODY
 
 # PR 2 — Accuracy Backend
 
-Tasks 3–7. All backend, fully unit-tested, **zero `app.py` changes**. Reviews and ships independently of any UI.
+Tasks 3–8. All backend, fully unit-tested, **zero `app.py` changes**. Reviews and ships independently of any UI.
 
 Begin after PR 1 is merged.
 
@@ -549,6 +549,14 @@ Begin after PR 1 is merged.
 - Produces: `LAST_WATER_RUN_PER_DAY_SQL` (module constant) and `ForecastStorage.get_water_predictions_last_run_per_day(max_horizon: int = 5) -> pd.DataFrame` with columns `forecast_created_date`, `forecast_created_timestamp`, `target_date`, `forecast_temp`, `horizon_days`.
 
 The SQL is what's under test. Run it against a local in-memory DuckDB with the same schema — no network, identical SQL.
+
+- [ ] **Step 0: Rebase onto merged PR 1**
+
+All three PRs share one branch, so without this PR 2 would show PR 1's commits again. Per CLAUDE.md, after every merge:
+
+```bash
+git fetch --all && git rebase origin/main
+```
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1318,7 +1326,210 @@ broken prediction chains in this codebase before."
 
 ---
 
-### Task 7: Backtest replay of the current model
+### Task 7: Splice actual air history onto a stored forecast run
+
+**Files:**
+- Modify: `accuracy.py`
+- Test: `test_accuracy.py`
+
+**Interfaces:**
+- Produces: `def splice_air_history(actual_hourly, stored_run_hourly, anchor_datetime) -> pd.DataFrame` returning `datetime`, `air_temp`.
+
+**Why this exists — this is the difference between a meaningful replay and a meaningless one.**
+
+The last run of day `d` is created around 21:00–23:00, and an OpenWeatherMap fetch only covers slots *after* the fetch time. The stored data confirms it: horizon 0 has **16,014 rows against ~30,400** at horizons 1–4 — a run covers only the remainder of its creation day, and a late run covers almost none of it.
+
+So for anchor `d`, feeding the raw stored run to the forecaster gives hourly air starting ~21:00. `_get_weather_for_period(d 07:00, d+1 07:00)` then returns ~10 rows, `has_weather` is `True`, and `_simulate_period` takes 10 steps instead of 24. The horizon-1 replay would not be "optimistic" — it would be a **different computation from anything the model ever runs**, and its MAE would be meaningless.
+
+What the live forecast actually had at 21:00 on `d` was: measured air for 07:00→21:00 (already elapsed) spliced with the OWM forecast after. This function reconstructs that.
+
+> **Not reusable:** `combine_hourly_temps` (`app.py:154`) gives *historical precedence on overlap*. For a past anchor, Meteostat actuals cover the whole window, so it would override the entire stored forecast and the replay would silently become 100% actuals. This needs its own function.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `test_accuracy.py`:
+
+```python
+from accuracy import splice_air_history
+
+
+def _air_frame(start, n_hours, air_temp, step_hours=1):
+    return pd.DataFrame({
+        "datetime": [
+            pd.Timestamp(start) + pd.Timedelta(hours=i * step_hours)
+            for i in range(n_hours)
+        ],
+        "air_temp": [air_temp] * n_hours,
+    })
+
+
+class TestSpliceAirHistory:
+
+    def test_actuals_fill_the_head_before_the_run_starts(self):
+        """The live forecast had measured air for the elapsed part of the day."""
+        anchor = pd.Timestamp(2026, 5, 1, 7)
+        actuals = _air_frame(pd.Timestamp(2026, 5, 1, 0), 48, air_temp=10.0)
+        stored = _air_frame(pd.Timestamp(2026, 5, 1, 21), 24, air_temp=20.0)
+
+        result = splice_air_history(actuals, stored, anchor)
+
+        assert result["datetime"].min() == anchor
+        before = result[result["datetime"] < pd.Timestamp(2026, 5, 1, 21)]
+        after = result[result["datetime"] >= pd.Timestamp(2026, 5, 1, 21)]
+        assert set(before["air_temp"]) == {10.0}
+        assert set(after["air_temp"]) == {20.0}
+
+    def test_no_hours_are_missing_across_the_join(self):
+        anchor = pd.Timestamp(2026, 5, 1, 7)
+        actuals = _air_frame(pd.Timestamp(2026, 5, 1, 0), 48, air_temp=10.0)
+        stored = _air_frame(pd.Timestamp(2026, 5, 1, 21), 24, air_temp=20.0)
+
+        result = splice_air_history(actuals, stored, anchor)
+        gaps = result["datetime"].diff().dropna().unique()
+
+        assert list(gaps) == [pd.Timedelta(hours=1)]
+
+    def test_no_duplicate_datetimes(self):
+        anchor = pd.Timestamp(2026, 5, 1, 7)
+        actuals = _air_frame(pd.Timestamp(2026, 5, 1, 0), 48, air_temp=10.0)
+        stored = _air_frame(pd.Timestamp(2026, 5, 1, 21), 24, air_temp=20.0)
+
+        result = splice_air_history(actuals, stored, anchor)
+        assert not result["datetime"].duplicated().any()
+
+    def test_stored_wins_where_both_have_the_same_hour(self):
+        """Past the forecast's creation time, the forecast is what was used."""
+        anchor = pd.Timestamp(2026, 5, 1, 7)
+        actuals = _air_frame(pd.Timestamp(2026, 5, 1, 0), 48, air_temp=10.0)
+        stored = _air_frame(pd.Timestamp(2026, 5, 1, 21), 24, air_temp=20.0)
+
+        result = splice_air_history(actuals, stored, anchor)
+        at_23 = result[result["datetime"] == pd.Timestamp(2026, 5, 1, 23)]
+
+        assert at_23["air_temp"].iloc[0] == pytest.approx(20.0)
+
+    def test_rows_before_the_anchor_are_dropped(self):
+        anchor = pd.Timestamp(2026, 5, 1, 7)
+        actuals = _air_frame(pd.Timestamp(2026, 4, 30, 0), 72, air_temp=10.0)
+        stored = _air_frame(pd.Timestamp(2026, 5, 1, 21), 24, air_temp=20.0)
+
+        result = splice_air_history(actuals, stored, anchor)
+        assert result["datetime"].min() == anchor
+
+    def test_empty_stored_run_returns_actuals_from_anchor(self):
+        anchor = pd.Timestamp(2026, 5, 1, 7)
+        actuals = _air_frame(pd.Timestamp(2026, 5, 1, 0), 48, air_temp=10.0)
+
+        result = splice_air_history(
+            actuals, pd.DataFrame(columns=["datetime", "air_temp"]), anchor
+        )
+
+        assert result["datetime"].min() == anchor
+        assert set(result["air_temp"]) == {10.0}
+
+    def test_empty_actuals_returns_stored_run_from_anchor(self):
+        anchor = pd.Timestamp(2026, 5, 1, 7)
+        stored = _air_frame(pd.Timestamp(2026, 5, 1, 21), 24, air_temp=20.0)
+
+        result = splice_air_history(
+            pd.DataFrame(columns=["datetime", "air_temp"]), stored, anchor
+        )
+
+        assert set(result["air_temp"]) == {20.0}
+        assert len(result) == 24
+
+    def test_both_empty_returns_empty_with_schema(self):
+        anchor = pd.Timestamp(2026, 5, 1, 7)
+        empty = pd.DataFrame(columns=["datetime", "air_temp"])
+
+        result = splice_air_history(empty, empty, anchor)
+
+        assert result.empty
+        assert list(result.columns) == ["datetime", "air_temp"]
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `env/bin/python -m pytest test_accuracy.py::TestSpliceAirHistory -v`
+Expected: FAIL — `ImportError: cannot import name 'splice_air_history' from 'accuracy'`
+
+- [ ] **Step 3: Implement `splice_air_history`**
+
+Add to `accuracy.py`:
+
+```python
+AIR_COLUMNS = ["datetime", "air_temp"]
+
+
+def splice_air_history(
+    actual_hourly: pd.DataFrame,
+    stored_run_hourly: pd.DataFrame,
+    anchor_datetime,
+) -> pd.DataFrame:
+    """
+    Reconstruct the air-temperature series the live forecast actually had.
+
+    A stored forecast run created late on day d only covers the remainder of
+    that day - roughly 16k rows at horizon 0 against 30k at horizon 1. Feeding
+    the raw run to the forecaster would simulate ~10 hours of a 24-hour period
+    and produce a number the model never computes.
+
+    What the live run had was measured air for the elapsed part of the day,
+    then forecast air from its creation time onward. This splices that.
+
+    Args:
+        actual_hourly: Measured hourly air temps (datetime, air_temp).
+        stored_run_hourly: The stored forecast run, interpolated to hourly.
+        anchor_datetime: Start of the window (the 7am measurement time).
+
+    Returns:
+        DataFrame (datetime, air_temp) from anchor_datetime onward, with the
+        stored run taking precedence wherever it has data.
+    """
+    anchor = pd.Timestamp(anchor_datetime)
+
+    def _prepared(df):
+        if df is None or df.empty:
+            return pd.DataFrame(columns=AIR_COLUMNS)
+        out = df[AIR_COLUMNS].copy()
+        out["datetime"] = pd.to_datetime(out["datetime"])
+        return out[out["datetime"] >= anchor]
+
+    actuals = _prepared(actual_hourly)
+    stored = _prepared(stored_run_hourly)
+
+    if stored.empty:
+        return actuals.sort_values("datetime").reset_index(drop=True)
+
+    # Actuals only cover the head, up to where the forecast run begins.
+    head = actuals[actuals["datetime"] < stored["datetime"].min()]
+
+    combined = pd.concat([head, stored], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["datetime"], keep="last")
+
+    return combined.sort_values("datetime").reset_index(drop=True)
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `env/bin/python -m pytest test_accuracy.py::TestSpliceAirHistory -v`
+Expected: PASS (8 tests)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add accuracy.py test_accuracy.py
+git commit -m "Splice measured air history onto stored forecast runs
+
+A run created late in the day only covers that day's remainder, so
+simulating from it alone would cover ~10 hours of a 24-hour period. The
+live forecast had measured air for the elapsed part and forecast air
+after; this reconstructs that."
+```
+
+---
+
+### Task 8: Backtest replay of the current model
 
 **Files:**
 - Modify: `accuracy.py`
@@ -1626,19 +1837,25 @@ PRBODY
 
 # PR 3 — Forecast Accuracy Tab
 
-Tasks 8–10. UI only, on top of the PR 2 backend. Verified by running the app; the logic underneath is already unit-tested.
+Tasks 9–11. UI only, on top of the PR 2 backend. Verified by running the app; the logic underneath is already unit-tested.
 
 Begin after PR 2 is merged.
 
 ---
 
-### Task 8: Chart builders
+### Task 9: Chart builders
 
 **Files:**
 - Modify: `app.py` (add three functions near `create_temperature_chart`)
 
 **Interfaces:**
 - Produces: `create_horizon_accuracy_chart(horizon_metrics, selected_horizon) -> go.Figure`, `create_forecast_vs_actual_chart(scored, horizon) -> go.Figure`, `create_error_over_time_chart(scored) -> go.Figure`. All pure — frames in, figures out.
+
+- [ ] **Step 0: Rebase onto merged PR 2**
+
+```bash
+git fetch --all && git rebase origin/main
+```
 
 - [ ] **Step 1: Add the three chart builders**
 
@@ -1658,7 +1875,10 @@ def create_horizon_accuracy_chart(
         x=horizon_metrics["horizon_days"],
         y=horizon_metrics["mae"],
         marker_color=colors,
-        text=[f"{v:.2f}" for v in horizon_metrics["mae"]],
+        # A horizon with n == 0 has NaN MAE; label it blank, not "nan".
+        text=[
+            "" if pd.isna(v) else f"{v:.2f}" for v in horizon_metrics["mae"]
+        ],
         textposition="outside",
         customdata=horizon_metrics["n"],
         hovertemplate="MAE %{y:.2f} C<br>%{customdata} forecasts scored<extra></extra>",
@@ -1732,16 +1952,19 @@ git commit -m "Add chart builders for forecast accuracy tab"
 
 ---
 
-### Task 9: Cached loaders and the bulk weather provider
+### Task 10: Cached loaders, fitted model, and the bulk weather provider
 
 **Files:**
 - Modify: `app.py` (imports, plus loaders after the existing `cached_load_*` block near line 77)
 
 **Interfaces:**
-- Consumes: `accuracy.replay_current_model`, `ForecastStorage.get_water_predictions_last_run_per_day`, `ForecastStorage.get_air_forecasts_3hourly_last_run_per_day`, and existing `interpolate_to_hourly` / `build_hourly_weather` / `cached_load_hourly_air_temps` / `cached_load_historical_solar_cloud`.
-- Produces: `cached_load_stored_forecasts(max_horizon)` and `cached_replay(_forecaster, water_temps, coefficients, max_horizon)`.
+- Consumes: `accuracy.replay_current_model`, `accuracy.splice_air_history`, both new `ForecastStorage` queries, and existing `interpolate_to_hourly` / `build_hourly_weather` / `cached_load_hourly_air_temps` / `cached_load_historical_solar_cloud`.
+- Produces: `cached_load_stored_forecasts(max_horizon)`, `cached_fitted_model_coefficients(water_temps, start_date, end_date)`, `cached_replay(water_temps, coefficients, max_horizon)`.
 
-**Bulk-fetch discipline:** the replay covers ~385 anchors. Everything it needs is fetched **once** — one MotherDuck query for stored air runs, one Meteostat call, one Open-Meteo call — then sliced per anchor in memory. Never one call per anchor.
+**Two design points:**
+
+1. **The accuracy tab fits its own model.** It must not borrow the `forecaster` local from the Temperature tab: that block ends in `st.stop()` on a data error (`app.py:1099`), which halts the whole script. Fitting needs only *historical* weather plus measured temps — no forecast data — so the helper is small. It returns the three coefficients as a **tuple**, which is hashable, so `st.cache_data` works without underscore-prefix hacks.
+2. **Bulk-fetch discipline.** The replay covers ~385 anchors. Everything is fetched **once** — one MotherDuck query, one Meteostat call, one Open-Meteo call — then sliced per anchor in memory. Never one call per anchor.
 
 - [ ] **Step 1: Add the accuracy imports**
 
@@ -1754,6 +1977,7 @@ from accuracy import (
     join_actuals,
     metrics_by_horizon,
     replay_current_model,
+    splice_air_history,
 )
 ```
 
@@ -1770,28 +1994,59 @@ def cached_load_stored_forecasts(max_horizon: int = 5):
 
 
 @st.cache_data(ttl=3600)
-def cached_replay(_forecaster, water_temps, coefficients, max_horizon: int = 5):
+def cached_fitted_model_coefficients(water_temps, start_date, end_date):
     """
-    Backtest replay over history.
+    Fit the model on historical weather and return its coefficients.
 
-    Cached on `coefficients` so refitting the model invalidates the result;
-    the argument is otherwise unused. `_forecaster` is underscore-prefixed so
-    Streamlit does not try to hash it.
+    The accuracy tab fits its own model rather than reusing the Temperature
+    tab's: that block calls st.stop() on a data error, which halts the script.
+    Fitting needs only historical weather, so this is cheap and self-contained.
 
-    All weather is fetched in bulk and sliced per anchor. The replay covers
+    Returns:
+        (k_air, k_solar, k_cool) - a tuple, so it is hashable as a cache key.
+    """
+    hourly_air = cached_load_hourly_air_temps(start_date, end_date)
+
+    try:
+        solar_hist = cached_load_historical_solar_cloud(start_date, end_date)
+    except DataLoadError:
+        solar_hist = None
+
+    weather = build_hourly_weather(hourly_air, solar_hist, None)
+
+    forecaster = WaterTempForecaster()
+    forecaster.set_hourly_weather(weather)
+    forecaster.fit(water_temps.assign(source="MEASURED"))
+
+    return (forecaster.k_air, forecaster.k_solar, forecaster.k_cool)
+
+
+@st.cache_data(ttl=3600)
+def cached_replay(water_temps, coefficients, max_horizon: int = 5):
+    """
+    Backtest replay over history, using the given model coefficients.
+
+    Keyed on `coefficients`, so refitting invalidates the cached result.
+
+    All weather is fetched in bulk and sliced per anchor - the replay covers
     hundreds of anchors, so per-anchor fetching is not an option.
     """
-    storage = ForecastStorage()
+    k_air, k_solar, k_cool = coefficients
+    forecaster = WaterTempForecaster(k_air=k_air, k_solar=k_solar, k_cool=k_cool)
 
+    storage = ForecastStorage()
     stored_air = storage.get_air_forecasts_3hourly_last_run_per_day()
-    runs_by_date = {
-        date: group for date, group in stored_air.groupby("forecast_created_date")
-    } if not stored_air.empty else {}
+    runs_by_date = (
+        {date: group for date, group in stored_air.groupby("forecast_created_date")}
+        if not stored_air.empty
+        else {}
+    )
 
     start_date = pd.Timestamp(water_temps["date"].min()).normalize()
-    end_date = pd.Timestamp.now().normalize() + pd.Timedelta(days=max_horizon)
+    end_date = pd.Timestamp.now().normalize()
 
-    # Fallback air temps for anchors with no stored forecast (pre-Feb-2026).
+    # Measured air: the head of each window before its forecast was made, and
+    # the whole window for anchors with no stored forecast at all.
     try:
         actual_hourly = cached_load_hourly_air_temps(start_date, end_date)
     except DataLoadError:
@@ -1804,21 +2059,27 @@ def cached_replay(_forecaster, water_temps, coefficients, max_horizon: int = 5):
         solar_hist = None
 
     def weather_provider(anchor_date):
-        window_end = anchor_date + pd.Timedelta(days=max_horizon + 1)
+        anchor_dt = anchor_date + pd.Timedelta(hours=WaterTempForecaster.MEASUREMENT_HOUR)
+        window_end = anchor_dt + pd.Timedelta(days=max_horizon)
+
+        window_actuals = actual_hourly[
+            (actual_hourly["datetime"] >= anchor_dt)
+            & (actual_hourly["datetime"] < window_end)
+        ]
 
         run = runs_by_date.get(anchor_date)
         if run is not None and not run.empty:
-            hourly_air = interpolate_to_hourly(
+            stored_hourly = interpolate_to_hourly(
                 run[["target_datetime", "air_temp"]].rename(
                     columns={"target_datetime": "datetime"}
                 )
             )
+            # A run made at ~21:00 covers only the day's remainder; splice the
+            # measured air the live forecast already had for the elapsed hours.
+            hourly_air = splice_air_history(window_actuals, stored_hourly, anchor_dt)
             air_source = "FORECAST"
         else:
-            hourly_air = actual_hourly[
-                (actual_hourly["datetime"] >= anchor_date)
-                & (actual_hourly["datetime"] < window_end)
-            ]
+            hourly_air = window_actuals
             air_source = "ACTUAL"
 
         if hourly_air.empty:
@@ -1827,7 +2088,7 @@ def cached_replay(_forecaster, water_temps, coefficients, max_horizon: int = 5):
         return build_hourly_weather(hourly_air, solar_hist, None), air_source
 
     return replay_current_model(
-        _forecaster, water_temps, weather_provider, max_horizon=max_horizon
+        forecaster, water_temps, weather_provider, max_horizon=max_horizon
     )
 ```
 
@@ -1842,22 +2103,23 @@ Expected: `app imports OK`
 git add app.py
 git commit -m "Add cached loaders for stored forecasts and backtest replay
 
-All replay weather is fetched in bulk and sliced per anchor - the replay
-covers hundreds of anchors. Anchors with no stored air forecast fall back
-to Meteostat actuals, flagged ACTUAL."
+The accuracy tab fits its own model rather than reusing the Temperature
+tab's, which calls st.stop() on a data error. All replay weather is
+fetched in bulk and sliced per anchor, with measured air spliced onto the
+head of each stored run."
 ```
 
 ---
 
-### Task 10: The tab body
+### Task 11: The tab body
 
 **Files:**
-- Modify: `app.py:774` (tab list), and add the tab body after the `with tab_temp:` block
+- Modify: `app.py:774` (tab list), and add the tab body between the `with tab_quotes:` and `with tab_temp:` blocks
 - Test: manual, via `streamlit run app.py`
 
-**Scope note — `forecaster` is defined inside `with tab_temp:` (line 929).** Python scoping makes it visible afterwards, but only if that block ran far enough. So: initialise `forecaster = None` before `st.tabs(...)`, place the accuracy tab **after** `with tab_temp:`, and gate only the replay branch on it. Stored-forecasts mode needs no model at all.
+**Placement is load-bearing.** `app.py:1099` calls `st.stop()` inside an `except DataLoadError` within `with tab_temp:`. Streamlit executes tab bodies in *code* order, so anything written after that block never runs when the Temperature tab hits a data error. The accuracy tab therefore goes **before** `with tab_temp:`, and depends on no variable defined inside it.
 
-- [ ] **Step 1: Initialise `forecaster` and add the tab**
+- [ ] **Step 1: Add the tab to the tab list**
 
 In `app.py`, change line 774 from:
 
@@ -1868,10 +2130,6 @@ In `app.py`, change line 774 from:
 to:
 
 ```python
-    # Defined inside the Temperature tab; the accuracy tab checks for it before
-    # using it, so a failure there cannot NameError here.
-    forecaster = None
-
     tab_temp, tab_accuracy, tab_quotes = st.tabs(
         ["Temperature", "Forecast Accuracy", "Heard at the Res"]
     )
@@ -1879,7 +2137,7 @@ to:
 
 - [ ] **Step 2: Add the tab body**
 
-Add immediately **after** the entire `with tab_temp:` block ends (find the end of that block; it is the last top-level statement inside `main()` before the trailing helper calls):
+Insert immediately **after** the `with tab_quotes:` block ends and **before** `with tab_temp:` (currently line 791):
 
 ```python
     with tab_accuracy:
@@ -1905,9 +2163,13 @@ Add immediately **after** the entire `with tab_temp:` block ends (find the end o
 
             if is_replay:
                 st.caption(
-                    "Optimistic. Solar and cloud forecasts were never stored, so "
-                    "actual solar and cloud are used for every date. Points marked "
-                    "with a cross also used actual air temperature."
+                    "Today's model re-run over history, using the air temperature "
+                    "each forecast actually had available: measured up to the time "
+                    "the forecast was made, forecast after. Optimistic, because "
+                    "solar and cloud forecasts were never stored, so actual solar "
+                    "and cloud are used throughout. Points marked with a cross had "
+                    "no stored air forecast either and used measured air for the "
+                    "whole window."
                 )
                 horizon_options = [1, 2, 3, 4, 5]
             else:
@@ -1924,95 +2186,89 @@ Add immediately **after** the entire `with tab_temp:` block ends (find the end o
                 help="0 is a same-day nowcast, available for stored forecasts only.",
             )
 
-            if is_replay and forecaster is None:
-                st.warning(
-                    "The model is not available because the Temperature tab could "
-                    "not load its data. Stored forecasts still work."
-                )
-            else:
-                try:
-                    water_temps = cached_load_water_temps()
+            try:
+                water_temps = cached_load_water_temps()
 
-                    if is_replay:
-                        raw = cached_replay(
-                            forecaster,
-                            water_temps,
-                            (forecaster.k_air, forecaster.k_solar, forecaster.k_cool),
-                            5,
-                        )
-                    else:
-                        raw = cached_load_stored_forecasts(max_horizon=5)
+                if is_replay:
+                    coefficients = cached_fitted_model_coefficients(
+                        water_temps,
+                        pd.Timestamp(water_temps["date"].min()).normalize(),
+                        pd.Timestamp.now().normalize(),
+                    )
+                    raw = cached_replay(water_temps, coefficients, 5)
+                else:
+                    raw = cached_load_stored_forecasts(max_horizon=5)
 
-                    scored = join_actuals(raw, water_temps)
+                scored = join_actuals(raw, water_temps)
 
-                    if scored.empty:
+                if scored.empty:
+                    st.warning(
+                        "No forecasts could be matched to measurements yet. "
+                        "Accuracy needs stored forecasts whose target dates have "
+                        "since been measured."
+                    )
+                else:
+                    at_horizon = scored[
+                        scored["horizon_days"] == selected_horizon
+                    ].sort_values("target_date")
+                    metrics = compute_metrics(at_horizon)
+
+                    st.subheader(f"{selected_horizon}-day-ahead accuracy")
+                    if metrics["n"] == 0:
                         st.warning(
-                            "No forecasts could be matched to measurements yet. "
-                            "Accuracy needs stored forecasts whose target dates "
-                            "have since been measured."
+                            f"No scored forecasts at {selected_horizon} days ahead."
                         )
                     else:
-                        at_horizon = scored[
-                            scored["horizon_days"] == selected_horizon
-                        ].sort_values("target_date")
-                        metrics = compute_metrics(at_horizon)
-
-                        st.subheader(f"{selected_horizon}-day-ahead accuracy")
-                        if metrics["n"] == 0:
-                            st.warning(
-                                f"No scored forecasts at {selected_horizon} days ahead."
-                            )
-                        else:
-                            c1, c2, c3, c4, c5 = st.columns(5)
-                            c1.metric("Mean absolute error", f"{metrics['mae']:.2f} C")
-                            c2.metric("Bias", f"{metrics['bias']:+.2f} C")
-                            c3.metric("RMSE", f"{metrics['rmse']:.2f} C")
-                            c4.metric("Within 0.5 C", f"{metrics['hit_rate_0_5']:.0f}%")
-                            c5.metric("Forecasts scored", f"{metrics['n']}")
-                            st.caption(BIAS_NOTE)
-                            st.caption(
-                                f"Covering {at_horizon['target_date'].min().date()} "
-                                f"to {at_horizon['target_date'].max().date()}"
-                            )
-
-                        st.subheader("Accuracy by forecast horizon")
+                        c1, c2, c3, c4, c5 = st.columns(5)
+                        c1.metric("Mean absolute error", f"{metrics['mae']:.2f} C")
+                        c2.metric("Bias", f"{metrics['bias']:+.2f} C")
+                        c3.metric("RMSE", f"{metrics['rmse']:.2f} C")
+                        c4.metric("Within 0.5 C", f"{metrics['hit_rate_0_5']:.0f}%")
+                        c5.metric("Forecasts scored", f"{metrics['n']}")
+                        st.caption(BIAS_NOTE)
                         st.caption(
-                            "All horizons, unfiltered. Shows how forecasts degrade "
-                            "further ahead."
+                            f"Covering {at_horizon['target_date'].min().date()} "
+                            f"to {at_horizon['target_date'].max().date()}"
+                        )
+
+                    st.subheader("Accuracy by forecast horizon")
+                    st.caption(
+                        "All horizons, unfiltered. Shows how forecasts degrade "
+                        "further ahead."
+                    )
+                    st.plotly_chart(
+                        create_horizon_accuracy_chart(
+                            metrics_by_horizon(scored), selected_horizon
+                        ),
+                        width='stretch',
+                    )
+
+                    if not at_horizon.empty:
+                        st.subheader(
+                            f"Forecast vs measured ({selected_horizon} days ahead)"
                         )
                         st.plotly_chart(
-                            create_horizon_accuracy_chart(
-                                metrics_by_horizon(scored), selected_horizon
+                            create_forecast_vs_actual_chart(
+                                at_horizon, selected_horizon
                             ),
                             width='stretch',
                         )
 
-                        if not at_horizon.empty:
-                            st.subheader(
-                                f"Forecast vs measured ({selected_horizon} days ahead)"
-                            )
-                            st.plotly_chart(
-                                create_forecast_vs_actual_chart(
-                                    at_horizon, selected_horizon
-                                ),
-                                width='stretch',
-                            )
+                        st.subheader(
+                            f"Error over time ({selected_horizon} days ahead)"
+                        )
+                        st.plotly_chart(
+                            create_error_over_time_chart(at_horizon),
+                            width='stretch',
+                        )
 
-                            st.subheader(
-                                f"Error over time ({selected_horizon} days ahead)"
-                            )
-                            st.plotly_chart(
-                                create_error_over_time_chart(at_horizon),
-                                width='stretch',
-                            )
+                        with st.expander("Scored forecasts"):
+                            st.dataframe(at_horizon, width='stretch')
 
-                            with st.expander("Scored forecasts"):
-                                st.dataframe(at_horizon, width='stretch')
-
-                except ForecastStorageError as e:
-                    st.error(f"Could not load stored forecasts: {e}")
-                except DataLoadError as e:
-                    st.error(f"Could not load measurements: {e}")
+            except ForecastStorageError as e:
+                st.error(f"Could not load stored forecasts: {e}")
+            except DataLoadError as e:
+                st.error(f"Could not load measurements: {e}")
 ```
 
 - [ ] **Step 3: Verify imports and the test suite**
@@ -2034,10 +2290,11 @@ Check each:
 4. Changing horizon updates tiles, both time-series charts, and the highlight.
 5. "Model replay" removes horizon 0 and shows the leakage caption.
 6. The replay completes in reasonable time — if it hangs, per-anchor fetching has crept back in.
-7. Replay points before Feb 2026 are marked with a red cross (ACTUAL air temp).
-8. No emojis anywhere in the tab.
-9. No Streamlit deprecation warnings in the console.
-10. The Temperature tab still renders correctly.
+7. Replay points before Feb 2026 are marked with a red cross (no stored air forecast).
+8. **Sanity-check the splice:** replay horizon-1 MAE should be broadly comparable to stored-forecast horizon-1 MAE. If the replay is dramatically better, the splice is likely not applying and the simulation is running on partial days.
+9. No emojis anywhere in the tab.
+10. No Streamlit deprecation warnings in the console.
+11. The Temperature tab still renders correctly.
 
 - [ ] **Step 5: Commit and open PR 3**
 
@@ -2063,14 +2320,21 @@ Two comparisons, switchable:
   measurements. No leakage.
 - **Model replay** - today's model re-run over history, for comparing model
   versions. Labelled optimistic in the UI: solar/cloud forecasts were never
-  stored (see #29), so actual solar/cloud is used throughout, and anchors
-  before Feb 2026 fall back to actual air temperature, marked with a cross.
+  stored (see #29), so actual solar/cloud is used throughout, and anchors with
+  no stored air forecast fall back to measured air, marked with a cross.
 
-All replay weather is fetched in bulk and sliced per anchor - the replay covers
-hundreds of anchors.
+Two placement details worth knowing:
 
-Tested: checked in the browser across both comparisons and every horizon, and
-confirmed the Temperature tab is unaffected.
+- The tab sits before the Temperature tab in code order and fits its own model,
+  because the Temperature tab calls `st.stop()` on a data error, which would
+  otherwise stop the accuracy tab rendering at all.
+- Replay weather is fetched in bulk and sliced per anchor; the replay covers
+  hundreds of anchors.
+
+Tested: checked in the browser across both comparisons and every horizon,
+confirmed replay and stored horizon-1 MAE are comparable (a large gap would
+indicate the air-history splice is not applying), and confirmed the Temperature
+tab is unaffected.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
@@ -2083,32 +2347,72 @@ PRBODY
 
 ## Self-Review
 
-**Spec coverage, checked honestly against each spec section:**
+**Spec coverage, checked against each spec section:**
 
 | Spec requirement | Task |
 |---|---|
 | PR 1 `predict()` refactor, migration, PR 1 tests | 1, 2 |
 | Last-run-per-day selection, backfill exclusion | 3 |
-| Stored air forecasts for replay input | 4 |
+| Stored air forecasts as replay input | 4 |
 | MAE / bias / RMSE / hit rate / N | 5 |
 | Join to actuals, measurement dedup | 6 |
-| Replay, `air_source` flagging, NaN on missing coverage | 7 |
-| **ACTUAL fallback to Meteostat pre-Feb-2026** | **9** (provider) + 7 (labelling) |
-| Tab, horizon selector default 1, source toggle, leakage caption | 10 |
-| By-horizon chart, forecast-vs-actual, error-over-time | 8, 10 |
-| Caching keyed on coefficients | 9 |
+| Faithful air input for each anchor | 7 |
+| Replay, `air_source` flagging, NaN on missing coverage | 8 |
+| ACTUAL fallback where no stored run exists | 8 (labelling) + 10 (provider) |
+| By-horizon chart, forecast-vs-actual, error-over-time | 9, 11 |
+| Caching keyed on coefficients | 10 |
+| Tab, horizon selector default 1, source toggle, leakage caption | 11 |
 | Documented limitations | spec only, no task |
 
-**Corrections made after the first draft:**
+**Corrections made across three drafts.** Recording these because several were
+caught only by re-reading the code rather than the spec:
 
-1. **The ACTUAL fallback was missing.** The first draft's provider returned `None` for anchors without a stored run, which `replay_current_model` turns into all-NaN — so the replay would have silently covered only Feb–Sep 2026, and the "less accurate where we're using actuals" case the user asked for would never occur. Now implemented in Task 9 via bulk Meteostat, with Task 7 covering per-anchor labelling. The first self-review wrongly marked this covered.
-2. **`row_number()` → `rank()`.** A run is many rows sharing one timestamp; `row_number()` keeps one and drops the rest of the horizons. The spec's SQL sketch has the same bug and Task 3's own test would have caught it.
-3. **N+1 fetching.** Draft called `get_forecast_for_date` and `cached_load_historical_solar_cloud` per anchor — ~385 MotherDuck round trips plus ~385 Open-Meteo calls. Replaced with bulk fetch (Task 4 query, Task 9 provider).
-4. **`get_forecast_for_date` leakage.** It returns the most recent forecast *covering* a date, which for a past anchor may be a later run. Draft shipped this as a documented caveat; it is now fixed properly by Task 4 instead.
-5. **`forecaster` scope.** Draft placed the tab before `with tab_temp:`, where `forecaster` does not yet exist — a guaranteed `NameError`. The line-756 definition is inside an embed branch ending in `st.stop()` and never runs in the full view. Fixed by initialising to `None`, placing the tab after `tab_temp`, and gating only the replay branch.
-6. **`set()` on targets** broke legacy equivalence for duplicate dates and would have raised `IndexError` in `fill_predictions`. Removed; a golden test now covers duplicates.
-7. **`use_container_width=True` → `width='stretch'`**, matching the 5 existing uses.
-8. **Deprecated `predict` alias deleted** — it had zero callers after Task 2.
-9. **Two PRs → three**, splitting backend from UI.
+1. **Stored runs do not cover their own creation day** (draft 3). A run created
+   ~21:00 covers only the day's remainder — horizon 0 holds 16,014 rows against
+   ~30,400 at horizons 1–4. Feeding it raw to the forecaster would simulate ~10
+   hours of a 24-hour period: not "optimistic", simply a different computation
+   from anything the model runs, with a meaningless MAE. Task 7 splices the
+   measured air the live forecast already had. `combine_hourly_temps` cannot be
+   reused — it gives historical precedence on overlap, which for a past anchor
+   would override the whole forecast and make the replay 100% actuals.
+2. **`st.stop()` at `app.py:1099`** sits inside `except DataLoadError` within
+   `with tab_temp:`. Streamlit runs tab bodies in code order, so a tab placed
+   after it never renders on a Temperature-tab data failure. The accuracy tab
+   now sits *before* `tab_temp` and fits its own model (Task 10), depending on
+   no variable from that block. The earlier `forecaster = None` guard would not
+   have helped.
+3. **The ACTUAL fallback was missing** (draft 2). The provider returned `None`
+   for anchors without a stored run, which becomes all-NaN — so the replay would
+   have silently covered only Feb–Sep 2026, and the "less accurate where we're
+   using actuals" case would never have occurred. The first self-review wrongly
+   marked this covered.
+4. **`row_number()` → `rank()`.** A run is many rows sharing one timestamp;
+   `row_number()` keeps one and drops the remaining horizons. The spec's SQL
+   sketch had the same bug; both are now fixed.
+5. **N+1 fetching.** Draft called `get_forecast_for_date` and the solar loader
+   per anchor — ~385 MotherDuck round trips plus ~385 Open-Meteo calls.
+   Replaced with bulk fetch (Task 4 query, Task 10 provider).
+6. **`get_forecast_for_date` leakage.** It returns the most recent forecast
+   *covering* a date, which for a past anchor may be a later run. Draft shipped
+   this as a documented caveat; Task 4 fixes it properly instead.
+7. **`set()` on targets** broke legacy equivalence for duplicate dates and would
+   have raised `IndexError` in `fill_predictions`. Removed; a golden test covers
+   duplicates.
+8. **`use_container_width=True` → `width='stretch'`**, matching the 5 existing
+   uses. **Deprecated `predict` alias deleted** — zero callers after Task 2.
+   **NaN bar labels** guarded so an empty horizon renders blank, not "nan".
+9. **Two PRs → three**, splitting backend from UI, with a rebase step between.
 
-**Known behaviour, not a defect:** `has_weather` is boolean, so a leg with partial coverage (say 6 of 24 hours) still simulates and reports `True`. Stored forecasts behaved the same way, so the replay is faithful — but it explains any oddity in the horizon-5 bar, where stored runs are truncated.
+**Minor, known, not defects:**
+
+- `has_weather` is boolean, so a leg with partial coverage still simulates and
+  reports `True`. Stored forecasts behaved the same way, so the replay is
+  faithful — but it explains any oddity in the horizon-5 bar, where stored runs
+  are truncated.
+- `_legacy_fill` uses `.replace(hour=7)`, which preserves any minutes on the
+  input date; `predict_forward` uses `.normalize() + 7h`, which zeroes them.
+  These agree for midnight-normalised dates, which is what production carries.
+  The golden tests use midnight dates accordingly.
+- Task 11 step 4 check 8 is the practical guard on the splice: if replay
+  horizon-1 MAE comes out dramatically better than stored horizon-1 MAE, the
+  splice is probably not applying.
