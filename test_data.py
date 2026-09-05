@@ -4,8 +4,7 @@ import pytest
 import pandas as pd
 from datetime import datetime, timedelta
 
-from data import interpolate_to_hourly, DataLoadError
-from app import combine_hourly_temps
+from data import interpolate_to_hourly, combine_hourly_temps, DataLoadError
 
 
 class TestInterpolateToHourly:
