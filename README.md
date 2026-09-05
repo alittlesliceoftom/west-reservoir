@@ -50,26 +50,43 @@ Get a free API key at: https://openweathermap.org/api
 
 ## How It Works
 
-### Simple Physics Model
+### Physics Model
 
-The prediction system uses a straightforward heat transfer equation:
+The prediction system simulates the reservoir hour by hour, using three
+additive heat terms:
 
 ```
-dT/dt = k × (T_air_yesterday - T_water)
+clearness(t) = 1 - cloud_cover(t) / 100
+
+T_water(t+1h) = T_water(t)
+              + k_air   * (T_air(t) - T_water(t))   # conduction/convection
+              + k_solar * I(t)                       # shortwave solar heating
+              - k_cool  * clearness(t)               # clear-sky radiative cooling
 ```
 
 Where:
-- `k` = heat transfer coefficient (optimized during training)
-- `T_air_yesterday` = Previous day's air temperature
-- `T_water` = Current water temperature
+- `k_air` = air/water heat transfer coefficient per hour
+- `k_solar` = solar heating coefficient (°C per W/m² per hour)
+- `k_cool` = clear-sky cooling rate (°C per hour at 100% clearness)
+- `I(t)` = shortwave radiation at hour `t`
+
+All three coefficients are optimised together during training. Water
+temperature is measured at 7am, so every simulation period runs 7am to 7am.
+
+When solar and cloud data are unavailable the model degrades gracefully to the
+original single-term physics (zero solar, fully overcast).
 
 ### Prediction Process
 
-1. **Load Data**: Water temps from Google Sheets, air temps from Meteostat
-2. **Merge**: Combine into single `temperatures` DataFrame
-3. **Train**: Optimize heat transfer coefficient `k` on measured data
-4. **Predict**: Apply physics equation iteratively for future days
-5. **Display**: Show measured (blue) and predicted (orange) temperatures
+1. **Load Data**: Water temps from Google Sheets, air temps from Meteostat,
+   solar radiation and cloud cover from Open-Meteo, forecasts from OpenWeatherMap
+2. **Merge**: Combine into single `temperatures` DataFrame, plus an hourly
+   weather frame for the model
+3. **Train**: Optimise `k_air`, `k_solar` and `k_cool` on measured data
+4. **Predict**: Simulate hour by hour, 7am to 7am, for future days
+5. **Store**: Save the forecast to MotherDuck so it can later be scored
+   against what was actually measured
+6. **Display**: Show measured (blue) and predicted (orange) temperatures
 
 ### Data Sources
 
@@ -94,12 +111,14 @@ This makes the prediction process completely transparent and reproducible.
 
 ## Architecture
 
-The app consists of 4 simple modules (649 lines total):
+The app is a small set of focused modules:
 
-- `config.py` (50 lines): Configuration and API keys
-- `data.py` (212 lines): Data loading with explicit error handling
-- `forecaster.py` (177 lines): Physics-based prediction model
-- `app.py` (210 lines): Streamlit UI with debug panel
+- `config.py`: Configuration, API keys, feature flags
+- `data.py`: Data loading and frame assembly, with explicit error handling
+- `forecaster.py`: Physics-based prediction model
+- `forecast_storage.py`: Stores and retrieves forecasts in MotherDuck
+- `quotes.py`: Static quotes for the "Heard at the Res" tab
+- `app.py`: Streamlit UI with debug panel
 
 **Key principle**: Single DataFrame throughout (`temperatures` with columns: date, water_temp, air_temp, source)
 
