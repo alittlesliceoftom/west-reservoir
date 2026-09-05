@@ -8,16 +8,22 @@ This is a simple, transparent water temperature tracking and prediction system f
 
 **Key principle**: Single DataFrame architecture with explicit error handling.
 
-### File Structure (649 lines total)
+### File Structure
 
 ```
-├── app.py            (210 lines) - Streamlit web dashboard
-├── config.py         (50 lines)  - Configuration and API keys
-├── data.py           (212 lines) - Data loading functions
-├── forecaster.py     (177 lines) - Physics-based prediction model
-├── requirements.txt              - Python dependencies
-└── REBUILD_PLAN.md               - Full design documentation
+├── app.py              - Streamlit web dashboard and tabs
+├── config.py           - Configuration, API keys, feature flags
+├── data.py             - Data loading and frame assembly
+├── forecaster.py       - Physics-based prediction model
+├── forecast_storage.py - MotherDuck forecast storage and retrieval
+├── quotes.py           - Static quotes for the "Heard at the Res" tab
+├── requirements.txt    - Python dependencies
+├── docs/superpowers/   - Design specs and implementation plans
+└── REBUILD_PLAN.md     - Original rebuild design documentation
 ```
+
+Line counts are deliberately not recorded here: they go stale on every commit
+and tell you nothing you cannot get from `wc -l`.
 
 ## Common Development Commands
 
@@ -113,12 +119,31 @@ temperatures = pd.DataFrame({
 - All functions raise explicit errors with helpful messages
 
 #### `forecaster.py`
-- `WaterTempForecaster` class with simple physics model
-- Physics equation: `dT/dt = k × (T_air_yesterday - T_water)`
-- `fit()` - Train on measured data, optimize heat transfer coefficient `k`
+- `WaterTempForecaster` class with a three-term hourly physics model
+- Per hour:
+  ```
+  clearness(t) = 1 - cloud_cover(t) / 100
+  T_water(t+1h) = T_water(t)
+                + k_air   * (T_air(t) - T_water(t))   # conduction/convection
+                + k_solar * I(t)                       # shortwave heating
+                - k_cool  * clearness(t)               # clear-sky radiative cooling
+  ```
+- Measurements are taken at 7am, so every training and prediction period runs
+  7am to 7am (24 hours)
+- `fit()` - Optimise `k_air`, `k_solar` and `k_cool` together against measured data
 - `predict()` - Generate predictions iteratively
 - `explain_prediction()` - Return calculation breakdown for transparency
+- When solar/cloud data is unavailable the model degrades gracefully to the
+  original single-term physics (zero solar, fully overcast)
 - **No temperature constraints** - predicts physical values without artificial floors/ceilings
+
+#### `forecast_storage.py`
+- `ForecastStorage` class wrapping MotherDuck (DuckDB in the cloud)
+- Stores air-temp forecasts (daily and 3-hourly) and water-temp predictions,
+  so today's forecasts can be scored against tomorrow's measurements
+- Retrieves stored forecasts to fill the gap between Meteostat historical data
+  and the live OpenWeatherMap forecast
+- Gated by `ENABLE_MOTHERDUCK` in `config.py`; the app works without it
 
 #### `app.py`
 - Streamlit web interface
@@ -242,7 +267,7 @@ Check internet connection and verify Google Sheets URL is accessible.
 
 ## Design Rationale
 
-This is a complete rebuild of the original 3,576-line system. See `REBUILD_PLAN.md` for:
+This is a complete rebuild of the original system. See `REBUILD_PLAN.md` for:
 - Detailed design decisions
 - Bug fixes (yesterday/today confusion, temperature floor artifact)
 - Architecture comparison (old vs new)
@@ -252,7 +277,6 @@ This is a complete rebuild of the original 3,576-line system. See `REBUILD_PLAN.
 
 | Aspect | Old | New |
 |--------|-----|-----|
-| Lines of code | 3,576 | 649 (82% reduction) |
 | DataFrames | 10+ intermediate | 1 main |
 | Forecasting systems | 2 competing | 1 simple |
 | Synthetic data | Throughout | None |
