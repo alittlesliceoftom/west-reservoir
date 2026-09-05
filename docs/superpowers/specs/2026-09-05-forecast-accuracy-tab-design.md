@@ -69,8 +69,10 @@ The stored-forecast comparison has **no leakage** — it is a pure record.
 accuracy work must not be built on the current API (see below). Ships with
 tests pinning it behaviour-identical to today's output.
 
-**PR 2 — the accuracy tab.** Everything from "New module `accuracy.py`"
-onward, built on the PR 1 API.
+**PR 2 — accuracy backend.** `accuracy.py` plus the storage queries. Fully
+unit-tested, touches no UI, reviews and ships on its own.
+
+**PR 3 — the tab.** Streamlit UI on top of the PR 2 backend.
 
 ## PR 1: Forecaster predict() Refactor
 
@@ -194,20 +196,34 @@ One SQL query:
 ```sql
 WITH ranked AS (
   SELECT *,
-    row_number() OVER (PARTITION BY forecast_created_date
-                       ORDER BY forecast_created_timestamp DESC) AS rn
+    rank() OVER (PARTITION BY forecast_created_date
+                 ORDER BY forecast_created_timestamp DESC) AS run_rank
   FROM water_temp_predictions
   WHERE date_diff('day', forecast_created_date, target_date) BETWEEN 0 AND ?
 )
 SELECT forecast_created_date, forecast_created_timestamp, target_date,
        water_temp AS forecast_temp,
        date_diff('day', forecast_created_date, target_date) AS horizon_days
-FROM ranked WHERE rn = 1
+FROM ranked WHERE run_rank = 1
 ORDER BY target_date, horizon_days
 ```
 
+**`rank()`, not `row_number()`.** One run is many rows sharing a single
+`forecast_created_timestamp` — one per target date. `row_number()` would
+number them 1, 2, 3… and `WHERE rn = 1` would keep just one, silently
+discarding every other horizon of the winning run. `rank()` ties them all
+at 1.
+
 The `BETWEEN 0 AND 5` filter is load-bearing: it drops the negative-horizon
 backfill. Timestamp columns get the existing `tz_localize(None)` treatment.
+
+A second query, `get_air_forecasts_3hourly_last_run_per_day()`, applies the
+same pattern to `air_temp_forecasts_3hourly` (partitioning on
+`CAST(forecast_created_timestamp AS DATE)`, as that table has no date column)
+to supply the replay's air input in one fetch. It replaces
+`get_forecast_for_date` for backtesting: that method returns the most recent
+forecast *covering* a date, which for a past anchor may be a later,
+better-informed run — future leakage — and costs one round trip per anchor.
 
 ### Joining to actuals
 
