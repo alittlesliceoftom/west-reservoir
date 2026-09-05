@@ -19,6 +19,7 @@ from data import (
     load_historical_solar_cloud,
     load_forecast_solar_cloud,
     interpolate_to_hourly,
+    select_storable_predictions,
     DataLoadError,
 )
 from forecaster import WaterTempForecaster
@@ -939,9 +940,12 @@ def main():
                    st.session_state['last_prediction_store_date'] != datetime.now().date():
                     try:
                         storage = ForecastStorage()
-                        predictions_df = temperatures_deduped[temperatures_deduped["source"] == "PREDICTED"].copy()
-                        # Filter out any rows with NULL water_temp (shouldn't happen but safety check)
-                        predictions_df = predictions_df.dropna(subset=["water_temp"])
+                        # Only forward-looking rows are forecasts. Backfilled
+                        # gap-fills target dates before the run and would land
+                        # in storage at negative horizons.
+                        predictions_df = select_storable_predictions(
+                            temperatures_deduped, pd.Timestamp.now()
+                        )
                         measured_temps = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
 
                         if not predictions_df.empty and not measured_temps.empty:
