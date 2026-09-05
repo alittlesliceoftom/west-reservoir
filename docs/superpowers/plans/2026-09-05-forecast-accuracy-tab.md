@@ -4,7 +4,7 @@
 
 **Goal:** Add a Forecast Accuracy tab reporting how well our water-temperature forecasts have performed, broken down by how many days ahead they were made — built on a forecaster API that can actually forecast.
 
-**Architecture:** Three PRs. PR 1 replaces `WaterTempForecaster.predict()` — today a DataFrame gap-filler — with `predict_forward`, one simulation checkpointed at each target. PR 2 adds the whole backend (`accuracy.py` plus two MotherDuck queries), unit-tested, touching no UI. PR 3 adds the Streamlit tab. Two independent comparisons share one output schema so the same charts render both: **stored forecasts** (the honest record) and **model replay** (current model re-run over history).
+**Architecture:** Four PRs. PR 0 is housekeeping: correct the docs, clean dependencies, stop storing backfilled predictions as forecasts, and lift the duplicated data pipeline into `data.py`. PR 1 replaces `WaterTempForecaster.predict()` — today a DataFrame gap-filler — with `predict_forward`, one simulation checkpointed at each target. PR 2 adds the whole backend (`accuracy.py` plus two MotherDuck queries), unit-tested, touching no UI. PR 3 adds the Streamlit tab. Two independent comparisons share one output schema so the same charts render both: **stored forecasts** (the honest record) and **model replay** (current model re-run over history).
 
 **Tech Stack:** Python 3, pandas, numpy, scipy, duckdb/MotherDuck, Streamlit 1.53.0, Plotly 5.17.0, pytest.
 
@@ -24,6 +24,661 @@
 - **Date arguments are `pd.Timestamp`, normalised** — matching `app.py:681` / `app.py:814`. Never pass `.date()`.
 - **Bulk-fetch, never per-anchor.** The replay runs over ~385 anchors; one query/API call per anchor is not acceptable.
 - Run tests with: `env/bin/python -m pytest <file> -v` from the repo root.
+
+---
+
+# PR 0 — Housekeeping Refactor
+
+Tasks 0.1–0.5. Clears the ground before the accuracy work. No behaviour change; the pure data-assembly logic moves to `data.py`, where it is testable without mocking Streamlit.
+
+**Why first:** the data pipeline currently exists twice (`app.py:676-770` and `app.py:809-935`), identical in logic and differing only in side effects (MotherDuck writes, `st.warning` calls). That duplication is why PR 1 has to change `forecaster.predict` in two places, and why PR 3 would otherwise add a third partial copy.
+
+---
+
+### Task 0.1: Correct the documentation
+
+**Files:**
+- Modify: `CLAUDE.md`, `README.md`
+
+CLAUDE.md claims "649 lines total" and "app.py (210 lines)". Actual: 3,186 and 1,103. It also omits `forecast_storage.py`, MotherDuck, the solar/cloud model, and the quotes tab. Every agent that reads it starts with a false map.
+
+- [ ] **Step 1: Replace the File Structure section in CLAUDE.md**
+
+Remove all line counts — they rot on every commit and add nothing. Replace the structure block with:
+
+```
+├── app.py              - Streamlit web dashboard and tabs
+├── config.py           - Configuration, API keys, feature flags
+├── data.py             - Data loading and frame assembly
+├── forecaster.py       - Physics-based prediction model
+├── forecast_storage.py - MotherDuck forecast storage and retrieval
+├── quotes.py           - Static quotes for the "Heard at the Res" tab
+├── requirements.txt    - Python dependencies
+└── docs/superpowers/   - Design specs and implementation plans
+```
+
+- [ ] **Step 2: Correct the model description in CLAUDE.md**
+
+The "Module Responsibilities" section describes a single-term model:
+
+> Physics equation: `dT/dt = k × (T_air_yesterday - T_water)`
+
+Replace with the actual three-term hourly model (see `forecaster.py`):
+
+```
+Per hour:
+  clearness(t) = 1 - cloud_cover(t) / 100
+  T_water(t+1h) = T_water(t)
+                + k_air   * (T_air(t) - T_water(t))   # conduction/convection
+                + k_solar * I(t)                       # shortwave heating
+                - k_cool  * clearness(t)               # clear-sky radiative cooling
+
+Measurements are at 7am, so every training and prediction period runs 7am to 7am.
+`fit()` optimises k_air, k_solar and k_cool together against measured data.
+```
+
+Add `forecast_storage.py` to Module Responsibilities: stores and retrieves air-temp forecasts and water-temp predictions in MotherDuck; gated by `ENABLE_MOTHERDUCK` in `config.py`.
+
+- [ ] **Step 3: Remove the line-count comparison table**
+
+Delete the "Key Improvements" table rows citing line counts (3,576 → 649) and the "Lines of code" row. Keep the qualitative rows.
+
+- [ ] **Step 4: Update README.md the same way**
+
+Remove any line counts; make sure the described structure and data sources match reality (MotherDuck, Open-Meteo solar/cloud).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add CLAUDE.md README.md
+git commit -m "Correct project docs; drop line counts
+
+Documented structure was substantially out of date: no forecast_storage,
+no MotherDuck, and a single-term model description for what is now a
+three-term hourly model. Line counts removed - they rot on every commit."
+```
+
+---
+
+### Task 0.2: Clean up dependencies
+
+**Files:**
+- Modify: `requirements.txt`
+
+`scikit-learn`, `seaborn` and `matplotlib` have **zero imports** anywhere in the codebase. `pytest` is missing despite five test files.
+
+- [ ] **Step 1: Verify the three are genuinely unused**
+
+Run: `grep -rn "sklearn\|seaborn\|matplotlib" *.py`
+Expected: no output.
+
+- [ ] **Step 2: Edit `requirements.txt`**
+
+Remove `scikit-learn==1.3.2`, `seaborn==0.12.2`, `matplotlib==3.7.4`. Add `pytest==7.4.4`.
+
+- [ ] **Step 3: Verify the app and tests still work**
+
+Run: `env/bin/python -c "import app; print('app imports OK')"`
+Run: `env/bin/python -m pytest test_forecaster.py test_data.py test_combine_hourly.py -v`
+Expected: PASS
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add requirements.txt
+git commit -m "Drop unused deps, add pytest
+
+scikit-learn, seaborn and matplotlib have no imports anywhere. pytest was
+missing despite five test files, so a fresh clone could not run them."
+```
+
+---
+
+### Task 0.3: Stop storing backfilled predictions
+
+**Files:**
+- Modify: `app.py` (the prediction-storage block, around line 942)
+- Test: `test_accuracy.py` is not created until PR 2, so add this test to `test_data.py`
+
+`app.py:942` stores every row with `source == "PREDICTED"`, with no date filter. That includes historical gap-fills, which is why `water_temp_predictions` holds rows at horizons down to −665. Those are not forecasts and pollute any accuracy analysis.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `test_data.py`:
+
+```python
+from data import select_storable_predictions
+
+
+class TestSelectStorablePredictions:
+    """Only genuine forward-looking forecasts should be stored."""
+
+    def _frame(self, rows):
+        """rows: list of (date, water_temp, source)."""
+        return pd.DataFrame({
+            "date": [pd.Timestamp(r[0]) for r in rows],
+            "water_temp": [r[1] for r in rows],
+            "source": [r[2] for r in rows],
+        })
+
+    def test_keeps_predictions_from_today_onward(self):
+        today = pd.Timestamp(2026, 5, 10)
+        df = self._frame([
+            (datetime(2026, 5, 10), 12.0, "PREDICTED"),
+            (datetime(2026, 5, 11), 12.5, "PREDICTED"),
+        ])
+        result = select_storable_predictions(df, today)
+        assert len(result) == 2
+
+    def test_drops_predictions_for_past_dates(self):
+        """Backfilled gap-fills target dates before the run - not forecasts."""
+        today = pd.Timestamp(2026, 5, 10)
+        df = self._frame([
+            (datetime(2024, 12, 1), 5.0, "PREDICTED"),
+            (datetime(2026, 5, 9), 11.0, "PREDICTED"),
+            (datetime(2026, 5, 11), 12.5, "PREDICTED"),
+        ])
+        result = select_storable_predictions(df, today)
+        assert list(result["date"]) == [pd.Timestamp(2026, 5, 11)]
+
+    def test_drops_non_predicted_rows(self):
+        today = pd.Timestamp(2026, 5, 10)
+        df = self._frame([
+            (datetime(2026, 5, 11), 12.5, "PREDICTED"),
+            (datetime(2026, 5, 11), 12.5, "MEASURED"),
+            (datetime(2026, 5, 12), 13.0, "AIR_ONLY"),
+        ])
+        result = select_storable_predictions(df, today)
+        assert list(result["source"]) == ["PREDICTED"]
+
+    def test_drops_rows_with_missing_water_temp(self):
+        today = pd.Timestamp(2026, 5, 10)
+        df = self._frame([
+            (datetime(2026, 5, 11), float("nan"), "PREDICTED"),
+            (datetime(2026, 5, 12), 13.0, "PREDICTED"),
+        ])
+        result = select_storable_predictions(df, today)
+        assert len(result) == 1
+
+    def test_empty_frame_returns_empty(self):
+        result = select_storable_predictions(self._frame([]), pd.Timestamp(2026, 5, 10))
+        assert result.empty
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `env/bin/python -m pytest test_data.py::TestSelectStorablePredictions -v`
+Expected: FAIL — `ImportError: cannot import name 'select_storable_predictions' from 'data'`
+
+- [ ] **Step 3: Implement it in `data.py`**
+
+```python
+def select_storable_predictions(
+    temperatures: pd.DataFrame, run_date: pd.Timestamp
+) -> pd.DataFrame:
+    """
+    Select the predictions worth storing as forecasts.
+
+    predict()/fill_predictions() fills every AIR_ONLY row, including historical
+    gaps. Those backfilled rows target dates BEFORE the run and are not
+    forecasts - storing them pollutes accuracy analysis with rows at negative
+    horizons.
+
+    Args:
+        temperatures: Frame with date, water_temp, source.
+        run_date: The date this forecast run is being made.
+
+    Returns:
+        Rows where source == 'PREDICTED', water_temp is present, and the
+        target date is not in the past.
+    """
+    if temperatures.empty:
+        return temperatures
+
+    predictions = temperatures[temperatures["source"] == "PREDICTED"].copy()
+    predictions = predictions.dropna(subset=["water_temp"])
+    return predictions[
+        pd.to_datetime(predictions["date"]).dt.normalize()
+        >= pd.Timestamp(run_date).normalize()
+    ]
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `env/bin/python -m pytest test_data.py::TestSelectStorablePredictions -v`
+Expected: PASS (5 tests)
+
+- [ ] **Step 5: Use it at the storage call site**
+
+In `app.py`, add `select_storable_predictions` to the `from data import (...)` block. Then replace these two lines around line 942:
+
+```python
+                        predictions_df = temperatures_deduped[temperatures_deduped["source"] == "PREDICTED"].copy()
+                        # Filter out any rows with NULL water_temp (shouldn't happen but safety check)
+                        predictions_df = predictions_df.dropna(subset=["water_temp"])
+```
+
+with:
+
+```python
+                        predictions_df = select_storable_predictions(
+                            temperatures_deduped, pd.Timestamp.now()
+                        )
+```
+
+- [ ] **Step 6: Verify**
+
+Run: `env/bin/python -c "import app; print('app imports OK')"`
+Run: `env/bin/python -m pytest test_data.py -v`
+Expected: PASS
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add data.py app.py test_data.py
+git commit -m "Stop storing backfilled predictions as forecasts
+
+fill_predictions fills every AIR_ONLY row including historical gaps, and
+all of them were being stored - which is why water_temp_predictions holds
+rows at horizons down to -665. Only forward-looking rows are forecasts."
+```
+
+---
+
+### Task 0.4: Move the pure hourly-weather helpers to `data.py`
+
+**Files:**
+- Modify: `data.py` (receive `combine_hourly_temps`, `build_hourly_weather`)
+- Modify: `app.py` (remove them, import instead)
+- Modify: `test_combine_hourly.py`, `test_data.py` (import from `data`)
+
+Both functions are pure frame-in/frame-out with no Streamlit dependency. The tests already import them from `app` and have to **mock out `sys.modules['streamlit']`** to do it — the placement is the problem, and moving them removes the mock.
+
+- [ ] **Step 1: Move both functions verbatim**
+
+Cut `combine_hourly_temps` (`app.py:154`, including its nested `normalize_datetime_col` helper) and `build_hourly_weather` (`app.py:78`) from `app.py` and paste into `data.py`. Change nothing inside them.
+
+`build_hourly_weather` uses `Optional` — confirm `data.py` imports it from `typing`, adding it if not.
+
+- [ ] **Step 2: Import them in `app.py`**
+
+Add `build_hourly_weather` and `combine_hourly_temps` to the existing `from data import (...)` block.
+
+- [ ] **Step 3: Update the tests to import from `data`**
+
+In `test_combine_hourly.py`, delete the streamlit-mocking block:
+
+```python
+# We need to mock streamlit before importing app
+from unittest.mock import MagicMock
+sys.modules['streamlit'] = MagicMock()
+
+from app import combine_hourly_temps
+```
+
+and replace with:
+
+```python
+from data import combine_hourly_temps
+```
+
+The `sys.path.insert(0, '.')` lines can go too.
+
+In `test_data.py`, change `from app import combine_hourly_temps` to import it from `data` alongside the existing imports.
+
+- [ ] **Step 4: Verify**
+
+Run: `env/bin/python -m pytest test_combine_hourly.py test_data.py -v`
+Expected: PASS, with no streamlit mocking
+
+Run: `env/bin/python -c "import app; print('app imports OK')"`
+Expected: `app imports OK`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add app.py data.py test_combine_hourly.py test_data.py
+git commit -m "Move pure hourly-weather helpers to data.py
+
+combine_hourly_temps and build_hourly_weather are frame-in/frame-out with
+no Streamlit dependency. Their tests had to mock sys.modules['streamlit']
+to import them from app - that mock is now gone."
+```
+
+---
+
+### Task 0.5: Extract the duplicated pipeline into `data.py`
+
+**Files:**
+- Modify: `data.py` (three new functions)
+- Modify: `app.py` (both pipeline copies call them)
+- Test: `test_data.py`
+
+The two pipelines are identical in data logic. Extract the three shared blocks so both call sites shrink to orchestration plus their own side effects.
+
+**Interfaces:**
+```python
+def fill_daily_from_hourly(air_temps_daily, hourly_air_temps) -> pd.DataFrame
+def build_temperatures_frame(water_temps, air_temps_hist) -> pd.DataFrame
+def deduplicate_temperatures(temperatures) -> pd.DataFrame
+```
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `test_data.py`:
+
+```python
+from data import (
+    build_temperatures_frame,
+    deduplicate_temperatures,
+    fill_daily_from_hourly,
+)
+
+
+class TestFillDailyFromHourly:
+
+    def test_fills_missing_daily_values_from_hourly(self):
+        """The daily API lags ~2 days; hourly is more current."""
+        daily = pd.DataFrame({
+            "date": [pd.Timestamp(2026, 5, 1)],
+            "air_temp": [10.0], "air_temp_min": [8.0], "air_temp_max": [12.0],
+        })
+        hourly = pd.DataFrame({
+            "datetime": [
+                pd.Timestamp(2026, 5, 2) + pd.Timedelta(hours=h) for h in range(24)
+            ],
+            "air_temp": [float(h) for h in range(24)],
+        })
+
+        result = fill_daily_from_hourly(daily, hourly).set_index("date")
+
+        assert pd.Timestamp(2026, 5, 2) in result.index
+        assert result.loc[pd.Timestamp(2026, 5, 2), "air_temp"] == pytest.approx(11.5)
+        assert result.loc[pd.Timestamp(2026, 5, 2), "air_temp_min"] == pytest.approx(0.0)
+        assert result.loc[pd.Timestamp(2026, 5, 2), "air_temp_max"] == pytest.approx(23.0)
+
+    def test_existing_daily_values_take_precedence(self):
+        daily = pd.DataFrame({
+            "date": [pd.Timestamp(2026, 5, 1)],
+            "air_temp": [10.0], "air_temp_min": [8.0], "air_temp_max": [12.0],
+        })
+        hourly = pd.DataFrame({
+            "datetime": [
+                pd.Timestamp(2026, 5, 1) + pd.Timedelta(hours=h) for h in range(24)
+            ],
+            "air_temp": [99.0] * 24,
+        })
+
+        result = fill_daily_from_hourly(daily, hourly).set_index("date")
+        assert result.loc[pd.Timestamp(2026, 5, 1), "air_temp"] == pytest.approx(10.0)
+
+    def test_rows_without_air_temp_are_dropped(self):
+        daily = pd.DataFrame({
+            "date": [pd.Timestamp(2026, 5, 1)],
+            "air_temp": [float("nan")],
+            "air_temp_min": [float("nan")], "air_temp_max": [float("nan")],
+        })
+        hourly = pd.DataFrame(columns=["datetime", "air_temp"])
+
+        result = fill_daily_from_hourly(daily, hourly)
+        assert result.empty
+
+    def test_returns_expected_columns(self):
+        daily = pd.DataFrame({
+            "date": [pd.Timestamp(2026, 5, 1)],
+            "air_temp": [10.0], "air_temp_min": [8.0], "air_temp_max": [12.0],
+        })
+        hourly = pd.DataFrame(columns=["datetime", "air_temp"])
+
+        result = fill_daily_from_hourly(daily, hourly)
+        assert list(result.columns) == ["date", "air_temp", "air_temp_min", "air_temp_max"]
+
+
+class TestBuildTemperaturesFrame:
+
+    def test_measured_where_water_temp_present(self):
+        water = pd.DataFrame({
+            "date": [pd.Timestamp(2026, 5, 1)], "water_temp": [10.0]
+        })
+        air = pd.DataFrame({
+            "date": [pd.Timestamp(2026, 5, 1)],
+            "air_temp": [15.0], "air_temp_min": [12.0], "air_temp_max": [18.0],
+        })
+
+        result = build_temperatures_frame(water, air)
+        assert list(result["source"]) == ["MEASURED"]
+
+    def test_air_only_where_water_temp_absent(self):
+        water = pd.DataFrame({
+            "date": [pd.Timestamp(2026, 5, 1)], "water_temp": [10.0]
+        })
+        air = pd.DataFrame({
+            "date": [pd.Timestamp(2026, 5, 1), pd.Timestamp(2026, 5, 2)],
+            "air_temp": [15.0, 16.0],
+            "air_temp_min": [12.0, 13.0], "air_temp_max": [18.0, 19.0],
+        })
+
+        result = build_temperatures_frame(water, air).set_index("date")
+        assert result.loc[pd.Timestamp(2026, 5, 2), "source"] == "AIR_ONLY"
+
+    def test_sorted_by_date(self):
+        water = pd.DataFrame({
+            "date": [pd.Timestamp(2026, 5, 3), pd.Timestamp(2026, 5, 1)],
+            "water_temp": [11.0, 10.0],
+        })
+        air = pd.DataFrame({
+            "date": [pd.Timestamp(2026, 5, 1)],
+            "air_temp": [15.0], "air_temp_min": [12.0], "air_temp_max": [18.0],
+        })
+
+        result = build_temperatures_frame(water, air)
+        assert result["date"].is_monotonic_increasing
+
+
+class TestDeduplicateTemperatures:
+
+    def _frame(self, rows):
+        return pd.DataFrame({
+            "date": [pd.Timestamp(r[0]) for r in rows],
+            "water_temp": [r[1] for r in rows],
+            "source": [r[2] for r in rows],
+        })
+
+    def test_measured_beats_air_only_on_the_same_date(self):
+        df = self._frame([
+            (datetime(2026, 5, 1), float("nan"), "AIR_ONLY"),
+            (datetime(2026, 5, 1), 10.0, "MEASURED"),
+        ])
+        result = deduplicate_temperatures(df)
+
+        assert len(result) == 1
+        assert result.loc[0, "source"] == "MEASURED"
+
+    def test_air_only_beats_predicted_on_the_same_date(self):
+        df = self._frame([
+            (datetime(2026, 5, 1), 9.0, "PREDICTED"),
+            (datetime(2026, 5, 1), float("nan"), "AIR_ONLY"),
+        ])
+        result = deduplicate_temperatures(df)
+
+        assert len(result) == 1
+        assert result.loc[0, "source"] == "AIR_ONLY"
+
+    def test_one_row_per_date(self):
+        df = self._frame([
+            (datetime(2026, 5, 1), 10.0, "MEASURED"),
+            (datetime(2026, 5, 1), float("nan"), "AIR_ONLY"),
+            (datetime(2026, 5, 2), 11.0, "MEASURED"),
+        ])
+        result = deduplicate_temperatures(df)
+
+        assert len(result) == 2
+        assert not result["date"].duplicated().any()
+
+    def test_helper_column_is_not_left_behind(self):
+        df = self._frame([(datetime(2026, 5, 1), 10.0, "MEASURED")])
+        result = deduplicate_temperatures(df)
+
+        assert "_sort_priority" not in result.columns
+
+    def test_result_is_sorted_and_reindexed(self):
+        df = self._frame([
+            (datetime(2026, 5, 2), 11.0, "MEASURED"),
+            (datetime(2026, 5, 1), 10.0, "MEASURED"),
+        ])
+        result = deduplicate_temperatures(df)
+
+        assert result["date"].is_monotonic_increasing
+        assert list(result.index) == [0, 1]
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `env/bin/python -m pytest test_data.py -v`
+Expected: FAIL — `ImportError: cannot import name 'fill_daily_from_hourly' from 'data'`
+
+- [ ] **Step 3: Implement the three functions in `data.py`**
+
+Lift the logic verbatim from `app.py:809-900`; only the wrapping changes.
+
+```python
+SOURCE_PRIORITY = {"MEASURED": 0, "AIR_ONLY": 1, "PREDICTED": 2}
+
+
+def fill_daily_from_hourly(
+    air_temps_daily: pd.DataFrame, hourly_air_temps: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Fill gaps in daily air temps using hourly data.
+
+    The daily Meteostat feed lags roughly two days; the hourly feed is more
+    current. Daily values win wherever they exist.
+
+    Returns:
+        DataFrame: date, air_temp, air_temp_min, air_temp_max
+    """
+    columns = ["date", "air_temp", "air_temp_min", "air_temp_max"]
+
+    if hourly_air_temps is None or hourly_air_temps.empty:
+        return air_temps_daily[columns].dropna(subset=["air_temp"])
+
+    hourly_daily_stats = (
+        hourly_air_temps.assign(date=hourly_air_temps["datetime"].dt.normalize())
+        .groupby("date")["air_temp"]
+        .agg(["mean", "min", "max"])
+        .reset_index()
+    )
+    hourly_daily_stats.columns = ["date", "air_temp_h", "air_temp_min_h", "air_temp_max_h"]
+    hourly_daily_stats["date"] = pd.to_datetime(hourly_daily_stats["date"])
+
+    merged = pd.merge(air_temps_daily, hourly_daily_stats, on="date", how="outer")
+    merged["air_temp"] = merged["air_temp"].fillna(merged["air_temp_h"])
+    merged["air_temp_min"] = merged["air_temp_min"].fillna(merged["air_temp_min_h"])
+    merged["air_temp_max"] = merged["air_temp_max"].fillna(merged["air_temp_max_h"])
+
+    return merged[columns].dropna(subset=["air_temp"])
+
+
+def build_temperatures_frame(
+    water_temps: pd.DataFrame, air_temps_hist: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Merge water and air temperatures into the main temperatures frame.
+
+    Rows with a water measurement are MEASURED; the rest are AIR_ONLY and are
+    candidates for prediction.
+    """
+    temperatures = pd.merge(water_temps, air_temps_hist, on="date", how="outer")
+    temperatures = temperatures.sort_values("date").reset_index(drop=True)
+    temperatures["source"] = "MEASURED"
+    temperatures.loc[temperatures["water_temp"].isna(), "source"] = "AIR_ONLY"
+    return temperatures
+
+
+def deduplicate_temperatures(temperatures: pd.DataFrame) -> pd.DataFrame:
+    """
+    Keep one row per date, preferring MEASURED over AIR_ONLY over PREDICTED.
+
+    Duplicate dates break the prediction chain, which walks row to row.
+    """
+    result = temperatures.copy()
+    result["_sort_priority"] = result["source"].map(SOURCE_PRIORITY)
+    result = result.sort_values(["date", "_sort_priority"]).reset_index(drop=True)
+    result = result.drop(columns=["_sort_priority"])
+    return result.drop_duplicates(subset=["date"], keep="first").reset_index(drop=True)
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `env/bin/python -m pytest test_data.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Use them in both pipelines**
+
+Add the three names to `app.py`'s `from data import (...)` block.
+
+In **both** the embed pipeline (`app.py:676-770`) and the full pipeline (`app.py:809-935`), replace:
+
+- the `hourly_daily_stats` / merge / fillna block → `air_temps_hist = fill_daily_from_hourly(air_temps_hist, hourly_air_temps)`
+- the merge / sort / `source` marking block → `temperatures = build_temperatures_frame(water_temps, air_temps_hist)`
+- the `_sort_priority` sort / drop / `drop_duplicates` block → `temperatures_deduped = deduplicate_temperatures(temperatures)`
+
+Leave each pipeline's own side effects untouched: the embed view stays silent on `DataLoadError`, the full view keeps its `st.warning` calls and MotherDuck writes.
+
+- [ ] **Step 6: Verify nothing changed behaviourally**
+
+Run: `env/bin/python -c "import app; print('app imports OK')"`
+Run: `env/bin/python -m pytest -v`
+Expected: PASS
+
+Run: `env/bin/streamlit run app.py`
+
+Check by hand:
+1. The Temperature tab renders with the same chart as before the refactor.
+2. The forecast still extends into the future.
+3. The debug panel shows the same measured/predicted counts.
+4. No new warnings in the console.
+
+- [ ] **Step 7: Commit and open PR 0**
+
+```bash
+git add app.py data.py test_data.py
+git commit -m "Extract duplicated pipeline logic into data.py
+
+The data pipeline existed twice, identical in logic and differing only in
+side effects. The shared parts now live in data.py as tested functions."
+
+git push -u origin worktree-forecast-accuracy-tab
+gh pr create --base main --title "Housekeeping: correct docs, clean deps, de-duplicate the data pipeline" --body "$(cat <<'PRBODY'
+Groundwork before the forecast-accuracy work. No behaviour change.
+
+- **Docs corrected.** CLAUDE.md described a 649-line project with a 210-line
+  `app.py` (actually 3,186 and 1,103), omitted `forecast_storage.py`,
+  MotherDuck and the solar/cloud model, and documented a single-term model
+  that is now three-term. Line counts removed entirely - they rot on every
+  commit.
+- **Dependencies.** `scikit-learn`, `seaborn` and `matplotlib` had zero
+  imports anywhere; `pytest` was missing despite five test files.
+- **Backfilled predictions are no longer stored as forecasts.** Every
+  `PREDICTED` row was being written, including historical gap-fills - which
+  is why `water_temp_predictions` holds rows at horizons down to -665.
+- **Pure data logic moved to `data.py`.** `combine_hourly_temps` and
+  `build_hourly_weather` had no Streamlit dependency, yet their tests had to
+  mock `sys.modules['streamlit']` to import them from `app`. That mock is gone.
+- **The duplicated pipeline is gone.** `app.py:676-770` and `app.py:809-935`
+  were identical in data logic, differing only in side effects. The shared
+  parts are now three tested functions in `data.py`.
+
+Tested: new unit tests cover the extracted functions and the storage filter;
+existing tests pass without the streamlit mock; the app was run and the
+Temperature tab checked against its pre-refactor output.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+https://claude.ai/code/session_01YL9pqG8tgTqoRdbTGAM3bw
+PRBODY
+)"
+```
 
 ---
 
