@@ -5,7 +5,6 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-from typing import Optional
 
 # Suppress known pandas/plotly compatibility warning (harmless)
 warnings.filterwarnings("ignore", message=".*DatetimeProperties.to_pydatetime.*")
@@ -20,6 +19,8 @@ from data import (
     load_forecast_solar_cloud,
     interpolate_to_hourly,
     select_storable_predictions,
+    build_hourly_weather,
+    combine_hourly_temps,
     DataLoadError,
 )
 from forecaster import WaterTempForecaster
@@ -76,45 +77,6 @@ def cached_load_forecast_solar_cloud(days):
     return load_forecast_solar_cloud(days=days)
 
 
-def build_hourly_weather(
-    combined_hourly: pd.DataFrame,
-    solar_cloud_hist: Optional[pd.DataFrame],
-    solar_cloud_fore: Optional[pd.DataFrame],
-) -> pd.DataFrame:
-    """
-    Merge air-temp hourly data with solar/cloud hourly data on datetime.
-
-    Concatenates historical and forecast solar/cloud (forecast wins for any
-    overlap), then inner-joins on the combined air-temp datetimes. Falls back
-    to zero solar / 100% cloud for any hour where solar/cloud is missing, so
-    the model degrades gracefully to single-term physics rather than erroring.
-    """
-    base = combined_hourly[["datetime", "air_temp"]].copy()
-    base["datetime"] = pd.to_datetime(base["datetime"])
-
-    solar_frames = []
-    if solar_cloud_hist is not None and not solar_cloud_hist.empty:
-        solar_frames.append(solar_cloud_hist)
-    if solar_cloud_fore is not None and not solar_cloud_fore.empty:
-        solar_frames.append(solar_cloud_fore)
-
-    if not solar_frames:
-        base["shortwave_radiation"] = 0.0
-        base["cloud_cover"] = 100.0
-        return base
-
-    solar = pd.concat(solar_frames, ignore_index=True)
-    solar["datetime"] = pd.to_datetime(solar["datetime"])
-    # Forecast takes precedence on overlap (keep last in concat order)
-    solar = solar.drop_duplicates(subset=["datetime"], keep="last")
-    solar = solar.sort_values("datetime").reset_index(drop=True)
-
-    merged = pd.merge(base, solar, on="datetime", how="left")
-    # Fill gaps with neutral defaults (no solar, full cloud → no cool term)
-    merged["shortwave_radiation"] = merged["shortwave_radiation"].fillna(0.0)
-    merged["cloud_cover"] = merged["cloud_cover"].fillna(100.0)
-    return merged
-
 
 def retrieve_gap_fill_forecasts(
     hist_end: datetime,
@@ -151,87 +113,6 @@ def retrieve_gap_fill_forecasts(
     except Exception:
         return pd.DataFrame(columns=["datetime", "air_temp"])
 
-
-def combine_hourly_temps(
-    historical: pd.DataFrame,
-    forecast: pd.DataFrame,
-    gap_fill: pd.DataFrame = None
-) -> pd.DataFrame:
-    """
-    Combine historical hourly temps (Meteostat) with forecast hourly temps (OWM interpolated).
-
-    Historical data takes precedence for overlapping times.
-    Gap-fill data (from stored MotherDuck forecasts) fills the gap between historical and forecast.
-    If no gap-fill data, falls back to linear interpolation.
-
-    Priority order:
-    1. Historical (Meteostat) - trusted measured data
-    2. Gap-fill (stored forecasts from MotherDuck) - yesterday's forecast for today
-    3. Forecast (live OWM) - current forecast for future
-
-    Args:
-        historical: DataFrame with 'datetime' and 'air_temp' columns (Meteostat)
-        forecast: DataFrame with 'datetime' and 'air_temp' columns (interpolated OWM)
-        gap_fill: Optional DataFrame with 'datetime' and 'air_temp' columns (stored forecasts)
-
-    Returns:
-        Combined DataFrame with 'datetime' and 'air_temp' columns
-    """
-    if historical.empty and forecast.empty:
-        return pd.DataFrame(columns=["datetime", "air_temp"])
-
-    if historical.empty:
-        return forecast.copy()
-
-    if forecast.empty:
-        return historical.copy()
-
-    def normalize_datetime_col(dt_series: pd.Series) -> pd.Series:
-        """Ensure datetime series is timezone-naive datetime64[s]."""
-        dt = pd.to_datetime(dt_series)
-        if dt.dt.tz is not None:
-            dt = dt.dt.tz_convert("UTC").dt.tz_localize(None)
-        return dt.astype("datetime64[s]")
-
-    # Normalize column names and ensure timezone-naive datetimes
-    hist = historical[["datetime", "air_temp"]].copy()
-    fore = forecast[["datetime", "air_temp"]].copy()
-    hist["datetime"] = normalize_datetime_col(hist["datetime"])
-    fore["datetime"] = normalize_datetime_col(fore["datetime"])
-
-    # Find where historical ends and forecast begins
-    hist_end = hist["datetime"].max()
-    fore_start = fore["datetime"].min()
-
-    # Only use forecast data after historical ends
-    fore_future = fore[fore["datetime"] > hist_end].copy()
-
-    # Process gap-fill data if available
-    gap_data = None
-    if gap_fill is not None and not gap_fill.empty:
-        gap = gap_fill[["datetime", "air_temp"]].copy()
-        gap["datetime"] = normalize_datetime_col(gap["datetime"])
-        # Only use gap data that's after historical and before forecast
-        filtered = gap[(gap["datetime"] > hist_end) & (gap["datetime"] < fore_start)]
-        if not filtered.empty:
-            gap_data = filtered.copy()
-
-    # Combine all sources: historical + gap_fill + forecast (only non-empty)
-    to_concat = [hist, fore_future]
-    if gap_data is not None:
-        to_concat.insert(1, gap_data)  # Insert between hist and fore
-    combined = pd.concat(to_concat, ignore_index=True)
-    combined = combined.sort_values("datetime").reset_index(drop=True)
-
-    # Resample to consistent hourly frequency for the forecaster.
-    # Gap fill and forecast data may be 3-hourly; the chart shows raw points
-    # but the forecaster needs true hourly data for correct heat transfer steps.
-    if not combined.empty:
-        combined = combined.set_index("datetime").sort_index()
-        combined = combined.resample("h").interpolate(method="linear")
-        combined = combined.reset_index()
-
-    return combined
 
 
 st.set_page_config(

@@ -4,15 +4,7 @@ import pandas as pd
 import pytest
 from datetime import datetime, timedelta
 
-# Import the function we're testing
-import sys
-sys.path.insert(0, '.')
-
-# We need to mock streamlit before importing app
-from unittest.mock import MagicMock
-sys.modules['streamlit'] = MagicMock()
-
-from app import combine_hourly_temps
+from data import combine_hourly_temps
 
 
 class TestCombineHourlyTemps:
