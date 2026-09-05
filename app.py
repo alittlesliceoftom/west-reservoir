@@ -620,7 +620,7 @@ def main():
             forecaster = WaterTempForecaster()
             forecaster.set_hourly_weather(hourly_weather)
             forecaster.fit(temperatures_deduped[temperatures_deduped["source"] == "MEASURED"])
-            temperatures_deduped = forecaster.predict(temperatures_deduped)
+            temperatures_deduped = forecaster.fill_predictions(temperatures_deduped)
 
             # Show only the chart
             chart = create_temperature_chart(temperatures_deduped)
@@ -767,7 +767,7 @@ def main():
             forecaster.fit(temperatures_deduped[temperatures_deduped["source"] == "MEASURED"])
 
             # Step 8: Generate predictions (use deduped for proper chaining)
-            temperatures_deduped = forecaster.predict(temperatures_deduped)
+            temperatures_deduped = forecaster.fill_predictions(temperatures_deduped)
 
             # Store water predictions in MotherDuck (only once per day)
             if ENABLE_MOTHERDUCK:

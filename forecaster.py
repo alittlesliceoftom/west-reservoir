@@ -407,30 +407,42 @@ class WaterTempForecaster:
             "hourly_breakdown": breakdown,
         }
 
-    def predict(self, temperatures: pd.DataFrame) -> pd.DataFrame:
+    def fill_predictions(self, temperatures: pd.DataFrame) -> pd.DataFrame:
         """
         Fill in predicted water temps for rows where source == 'AIR_ONLY'.
+
+        Each maximal run of consecutive AIR_ONLY rows is anchored on the row
+        immediately before it and forecast in one pass via predict_forward.
+        Equivalent to chaining day by day, because each AIR_ONLY row was
+        already chained from the previous row's value.
         """
         result = temperatures.copy()
         result = result.sort_values("date").reset_index(drop=True)
 
-        for i in range(len(result)):
-            if result.loc[i, "source"] != "AIR_ONLY":
+        i = 0
+        while i < len(result):
+            if result.loc[i, "source"] != "AIR_ONLY" or i == 0:
+                i += 1
                 continue
-            if i == 0:
-                continue
 
-            prev_row = result.iloc[i - 1]
-            curr_date = result.loc[i, "date"]
-            current_water_temp = prev_row["water_temp"]
+            # Collect this maximal run of consecutive AIR_ONLY rows.
+            run_start = i
+            while i < len(result) and result.loc[i, "source"] == "AIR_ONLY":
+                i += 1
+            run_end = i  # exclusive
 
-            start_dt = pd.Timestamp(prev_row["date"]).replace(hour=self.MEASUREMENT_HOUR)
-            end_dt = pd.Timestamp(curr_date).replace(hour=self.MEASUREMENT_HOUR)
+            anchor = result.iloc[run_start - 1]
+            predictions = self.predict_forward(
+                start_datetime=anchor["date"],
+                start_water_temp=anchor["water_temp"],
+                targets=list(result.loc[run_start:run_end - 1, "date"]),
+            )
 
-            slice_df = self._get_weather_for_period(start_dt, end_dt)
-            if not slice_df.empty:
-                predicted = self._simulate_period(current_water_temp, slice_df)
-                result.loc[i, "water_temp"] = predicted
-                result.loc[i, "source"] = "PREDICTED"
+            for offset, row_idx in enumerate(range(run_start, run_end)):
+                prediction = predictions.iloc[offset]
+                # Legs without weather stay untouched, as before.
+                if prediction["has_weather"]:
+                    result.loc[row_idx, "water_temp"] = prediction["water_temp"]
+                    result.loc[row_idx, "source"] = "PREDICTED"
 
         return result
