@@ -21,6 +21,9 @@ from data import (
     select_storable_predictions,
     build_hourly_weather,
     combine_hourly_temps,
+    fill_daily_from_hourly,
+    build_temperatures_frame,
+    deduplicate_temperatures,
     DataLoadError,
 )
 from forecaster import WaterTempForecaster
@@ -566,25 +569,9 @@ def main():
             hourly_air_temps = cached_load_hourly_air_temps(start_date, end_date)
 
             # Fill missing daily temps from hourly data
-            hourly_daily_stats = (
-                hourly_air_temps.assign(date=hourly_air_temps["datetime"].dt.normalize())
-                .groupby("date")["air_temp"]
-                .agg(["mean", "min", "max"])
-                .reset_index()
-            )
-            hourly_daily_stats.columns = ["date", "air_temp_h", "air_temp_min_h", "air_temp_max_h"]
-            hourly_daily_stats["date"] = pd.to_datetime(hourly_daily_stats["date"])
+            air_temps_hist = fill_daily_from_hourly(air_temps_hist, hourly_air_temps)
 
-            air_temps_hist = pd.merge(air_temps_hist, hourly_daily_stats, on="date", how="outer")
-            air_temps_hist["air_temp"] = air_temps_hist["air_temp"].fillna(air_temps_hist["air_temp_h"])
-            air_temps_hist["air_temp_min"] = air_temps_hist["air_temp_min"].fillna(air_temps_hist["air_temp_min_h"])
-            air_temps_hist["air_temp_max"] = air_temps_hist["air_temp_max"].fillna(air_temps_hist["air_temp_max_h"])
-            air_temps_hist = air_temps_hist[["date", "air_temp", "air_temp_min", "air_temp_max"]].dropna(subset=["air_temp"])
-
-            temperatures = pd.merge(water_temps, air_temps_hist, on="date", how="outer")
-            temperatures = temperatures.sort_values("date").reset_index(drop=True)
-            temperatures["source"] = "MEASURED"
-            temperatures.loc[temperatures["water_temp"].isna(), "source"] = "AIR_ONLY"
+            temperatures = build_temperatures_frame(water_temps, air_temps_hist)
 
             # Add forecast with 3-hourly data
             combined_hourly = hourly_air_temps
@@ -611,12 +598,7 @@ def main():
                 forecast["source"] = "AIR_ONLY"
                 temperatures = pd.concat([temperatures, forecast], ignore_index=True)
                 # Create deduplicated version for prediction chain
-                temperatures["_sort_priority"] = temperatures["source"].map(
-                    {"MEASURED": 0, "AIR_ONLY": 1, "PREDICTED": 2}
-                )
-                temperatures = temperatures.sort_values(["date", "_sort_priority"]).reset_index(drop=True)
-                temperatures = temperatures.drop(columns=["_sort_priority"])
-                temperatures_deduped = temperatures.drop_duplicates(subset=["date"], keep="first").reset_index(drop=True)
+                temperatures_deduped = deduplicate_temperatures(temperatures)
             except DataLoadError:
                 temperatures_deduped = temperatures.copy()
 
@@ -702,32 +684,11 @@ def main():
 
             # Step 3b: Fill missing daily temps from hourly data
             # (Daily API has ~2 day lag, but hourly is more current)
-            hourly_daily_stats = (
-                hourly_air_temps.assign(date=hourly_air_temps["datetime"].dt.normalize())
-                .groupby("date")["air_temp"]
-                .agg(["mean", "min", "max"])
-                .reset_index()
-            )
-            hourly_daily_stats.columns = ["date", "air_temp_h", "air_temp_min_h", "air_temp_max_h"]
-            hourly_daily_stats["date"] = pd.to_datetime(hourly_daily_stats["date"])
+            air_temps_hist = fill_daily_from_hourly(air_temps_hist, hourly_air_temps)
 
-            # Merge hourly stats into daily data where missing
-            air_temps_hist = pd.merge(
-                air_temps_hist, hourly_daily_stats, on="date", how="outer"
-            )
-            # Fill gaps with hourly values
-            air_temps_hist["air_temp"] = air_temps_hist["air_temp"].fillna(air_temps_hist["air_temp_h"])
-            air_temps_hist["air_temp_min"] = air_temps_hist["air_temp_min"].fillna(air_temps_hist["air_temp_min_h"])
-            air_temps_hist["air_temp_max"] = air_temps_hist["air_temp_max"].fillna(air_temps_hist["air_temp_max_h"])
-            air_temps_hist = air_temps_hist[["date", "air_temp", "air_temp_min", "air_temp_max"]].dropna(subset=["air_temp"])
-
-            # Step 4: Merge daily data into main temperatures DataFrame
-            temperatures = pd.merge(water_temps, air_temps_hist, on="date", how="outer")
-            temperatures = temperatures.sort_values("date").reset_index(drop=True)
-
-            # Step 5: Mark sources
-            temperatures["source"] = "MEASURED"
-            temperatures.loc[temperatures["water_temp"].isna(), "source"] = "AIR_ONLY"
+            # Steps 4 and 5: Merge into the main temperatures DataFrame and
+            # mark each row MEASURED or AIR_ONLY
+            temperatures = build_temperatures_frame(water_temps, air_temps_hist)
 
             # Step 6: Load 3-hourly forecast and combine with historical hourly
             forecast_3hourly = None
@@ -777,15 +738,8 @@ def main():
                 temperatures = pd.concat([temperatures, forecast], ignore_index=True)
                 temperatures = temperatures.sort_values("date").reset_index(drop=True)
 
-                # Keep full temperatures for forecast accuracy analysis
-                # Create deduplicated version for prediction chain (MEASURED > AIR_ONLY)
-                temperatures["_sort_priority"] = temperatures["source"].map(
-                    {"MEASURED": 0, "AIR_ONLY": 1, "PREDICTED": 2}
-                )
-                temperatures = temperatures.sort_values(["date", "_sort_priority"]).reset_index(drop=True)
-                temperatures = temperatures.drop(columns=["_sort_priority"])
-
-                temperatures_deduped = temperatures.drop_duplicates(subset=["date"], keep="first").reset_index(drop=True)
+                # Deduplicated version for the prediction chain (MEASURED > AIR_ONLY)
+                temperatures_deduped = deduplicate_temperatures(temperatures)
 
             except DataLoadError as e:
                 st.warning(f"Weather forecast unavailable: {e}")
