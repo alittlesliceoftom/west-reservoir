@@ -482,3 +482,33 @@ def interpolate_to_hourly(df: pd.DataFrame) -> pd.DataFrame:
     hourly = hourly.reset_index()
 
     return hourly
+
+
+def select_storable_predictions(
+    temperatures: pd.DataFrame, run_date: pd.Timestamp
+) -> pd.DataFrame:
+    """
+    Select the predictions worth storing as forecasts.
+
+    fill_predictions() fills every AIR_ONLY row, including historical gaps.
+    Those backfilled rows target dates BEFORE the run and are not forecasts -
+    storing them pollutes accuracy analysis with rows at negative horizons.
+
+    Args:
+        temperatures: Frame with date, water_temp, source.
+        run_date: The date this forecast run is being made.
+
+    Returns:
+        Rows where source == 'PREDICTED', water_temp is present, and the
+        target date is not in the past.
+    """
+    if temperatures.empty:
+        return temperatures
+
+    predictions = temperatures[temperatures["source"] == "PREDICTED"].copy()
+    predictions = predictions.dropna(subset=["water_temp"])
+
+    return predictions[
+        pd.to_datetime(predictions["date"]).dt.normalize()
+        >= pd.Timestamp(run_date).normalize()
+    ]

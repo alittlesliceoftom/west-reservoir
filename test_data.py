@@ -221,3 +221,67 @@ class TestForecaster:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+from data import select_storable_predictions
+
+
+class TestSelectStorablePredictions:
+    """Only genuine forward-looking forecasts should be stored."""
+
+    def _frame(self, rows):
+        """rows: list of (date, water_temp, source)."""
+        return pd.DataFrame({
+            "date": [pd.Timestamp(r[0]) for r in rows],
+            "water_temp": [r[1] for r in rows],
+            "source": [r[2] for r in rows],
+        })
+
+    def test_keeps_predictions_from_today_onward(self):
+        today = pd.Timestamp(2026, 5, 10)
+        df = self._frame([
+            (datetime(2026, 5, 10), 12.0, "PREDICTED"),
+            (datetime(2026, 5, 11), 12.5, "PREDICTED"),
+        ])
+        result = select_storable_predictions(df, today)
+        assert len(result) == 2
+
+    def test_drops_predictions_for_past_dates(self):
+        """Backfilled gap-fills target dates before the run - not forecasts."""
+        today = pd.Timestamp(2026, 5, 10)
+        df = self._frame([
+            (datetime(2024, 12, 1), 5.0, "PREDICTED"),
+            (datetime(2026, 5, 9), 11.0, "PREDICTED"),
+            (datetime(2026, 5, 11), 12.5, "PREDICTED"),
+        ])
+        result = select_storable_predictions(df, today)
+        assert list(result["date"]) == [pd.Timestamp(2026, 5, 11)]
+
+    def test_drops_non_predicted_rows(self):
+        today = pd.Timestamp(2026, 5, 10)
+        df = self._frame([
+            (datetime(2026, 5, 11), 12.5, "PREDICTED"),
+            (datetime(2026, 5, 11), 12.5, "MEASURED"),
+            (datetime(2026, 5, 12), 13.0, "AIR_ONLY"),
+        ])
+        result = select_storable_predictions(df, today)
+        assert list(result["source"]) == ["PREDICTED"]
+
+    def test_drops_rows_with_missing_water_temp(self):
+        today = pd.Timestamp(2026, 5, 10)
+        df = self._frame([
+            (datetime(2026, 5, 11), float("nan"), "PREDICTED"),
+            (datetime(2026, 5, 12), 13.0, "PREDICTED"),
+        ])
+        result = select_storable_predictions(df, today)
+        assert len(result) == 1
+
+    def test_run_date_with_time_component_still_keeps_today(self):
+        """A run made at 9pm must still store today's prediction."""
+        df = self._frame([(datetime(2026, 5, 10), 12.0, "PREDICTED")])
+        result = select_storable_predictions(df, pd.Timestamp(2026, 5, 10, 21, 30))
+        assert len(result) == 1
+
+    def test_empty_frame_returns_empty(self):
+        result = select_storable_predictions(self._frame([]), pd.Timestamp(2026, 5, 10))
+        assert result.empty
