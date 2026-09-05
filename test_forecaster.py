@@ -339,3 +339,111 @@ class TestPredictForward:
         assert list(result.columns) == [
             "target_datetime", "horizon_days", "water_temp", "has_weather"
         ]
+
+
+def _legacy_fill(forecaster, temperatures):
+    """
+    Verbatim copy of the pre-refactor WaterTempForecaster.predict().
+    Reference implementation for the equivalence test. Do not "improve" it.
+    """
+    result = temperatures.copy()
+    result = result.sort_values("date").reset_index(drop=True)
+
+    for i in range(len(result)):
+        if result.loc[i, "source"] != "AIR_ONLY":
+            continue
+        if i == 0:
+            continue
+
+        prev_row = result.iloc[i - 1]
+        curr_date = result.loc[i, "date"]
+        current_water_temp = prev_row["water_temp"]
+
+        start_dt = pd.Timestamp(prev_row["date"]).replace(hour=forecaster.MEASUREMENT_HOUR)
+        end_dt = pd.Timestamp(curr_date).replace(hour=forecaster.MEASUREMENT_HOUR)
+
+        slice_df = forecaster._get_weather_for_period(start_dt, end_dt)
+        if not slice_df.empty:
+            predicted = forecaster._simulate_period(current_water_temp, slice_df)
+            result.loc[i, "water_temp"] = predicted
+            result.loc[i, "source"] = "PREDICTED"
+
+    return result
+
+
+class TestFillPredictions:
+    """fill_predictions must be behaviour-identical to the old predict()."""
+
+    def _fitted(self, n_hours=400):
+        f = WaterTempForecaster(k_air=0.02, k_solar=1e-4, k_cool=0.005)
+        f.set_hourly_weather(
+            _make_hourly_weather(
+                datetime(2026, 3, 1, 0), n_hours, air_temp=15.0, shortwave=200.0, cloud=40.0
+            )
+        )
+        return f
+
+    def _frame(self, sources, start_day=1, water_start=10.0):
+        dates = [datetime(2026, 3, start_day + i) for i in range(len(sources))]
+        temps = [water_start if s == "MEASURED" else float("nan") for s in sources]
+        return pd.DataFrame({"date": dates, "water_temp": temps, "source": sources})
+
+    def test_matches_legacy_simple_run(self):
+        f = self._fitted()
+        df = self._frame(["MEASURED", "AIR_ONLY", "AIR_ONLY", "AIR_ONLY"])
+        pd.testing.assert_frame_equal(f.fill_predictions(df), _legacy_fill(f, df))
+
+    def test_matches_legacy_with_interleaved_measurements(self):
+        """Chain must re-anchor on each MEASURED row."""
+        f = self._fitted()
+        df = self._frame(
+            ["MEASURED", "AIR_ONLY", "MEASURED", "AIR_ONLY", "AIR_ONLY", "MEASURED"]
+        )
+        pd.testing.assert_frame_equal(f.fill_predictions(df), _legacy_fill(f, df))
+
+    def test_matches_legacy_when_air_only_is_first_row(self):
+        """Row 0 has no anchor and must be left untouched."""
+        f = self._fitted()
+        df = self._frame(["AIR_ONLY", "MEASURED", "AIR_ONLY"])
+        pd.testing.assert_frame_equal(f.fill_predictions(df), _legacy_fill(f, df))
+
+    def test_matches_legacy_with_date_gaps(self):
+        """Non-consecutive dates: a leg may span several days."""
+        f = self._fitted()
+        df = pd.DataFrame({
+            "date": [
+                datetime(2026, 3, 1), datetime(2026, 3, 2),
+                datetime(2026, 3, 6), datetime(2026, 3, 7),
+            ],
+            "water_temp": [10.0, float("nan"), float("nan"), float("nan")],
+            "source": ["MEASURED", "AIR_ONLY", "AIR_ONLY", "AIR_ONLY"],
+        })
+        pd.testing.assert_frame_equal(f.fill_predictions(df), _legacy_fill(f, df))
+
+    def test_matches_legacy_with_duplicate_dates(self):
+        """Duplicate dates produce a zero-length leg; the row stays untouched."""
+        f = self._fitted()
+        df = pd.DataFrame({
+            "date": [
+                datetime(2026, 3, 1), datetime(2026, 3, 2), datetime(2026, 3, 2),
+                datetime(2026, 3, 3),
+            ],
+            "water_temp": [10.0, float("nan"), float("nan"), float("nan")],
+            "source": ["MEASURED", "AIR_ONLY", "AIR_ONLY", "AIR_ONLY"],
+        })
+        pd.testing.assert_frame_equal(f.fill_predictions(df), _legacy_fill(f, df))
+
+    def test_matches_legacy_when_weather_runs_out(self):
+        f = self._fitted(n_hours=60)
+        df = self._frame(["MEASURED", "AIR_ONLY", "AIR_ONLY", "AIR_ONLY", "AIR_ONLY"])
+        pd.testing.assert_frame_equal(f.fill_predictions(df), _legacy_fill(f, df))
+
+    def test_matches_legacy_unsorted_input(self):
+        f = self._fitted()
+        df = self._frame(["MEASURED", "AIR_ONLY", "AIR_ONLY"]).iloc[::-1].reset_index(drop=True)
+        pd.testing.assert_frame_equal(f.fill_predictions(df), _legacy_fill(f, df))
+
+    def test_all_measured_is_unchanged(self):
+        f = self._fitted()
+        df = self._frame(["MEASURED", "MEASURED", "MEASURED"])
+        pd.testing.assert_frame_equal(f.fill_predictions(df), _legacy_fill(f, df))
