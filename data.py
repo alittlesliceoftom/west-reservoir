@@ -635,3 +635,91 @@ def combine_hourly_temps(
         combined = combined.reset_index()
 
     return combined
+
+
+# Priority when the same date appears more than once: a real measurement beats
+# an air-only row, which beats a prediction.
+SOURCE_PRIORITY = {"MEASURED": 0, "AIR_ONLY": 1, "PREDICTED": 2}
+
+DAILY_AIR_COLUMNS = ["date", "air_temp", "air_temp_min", "air_temp_max"]
+
+
+def fill_daily_from_hourly(
+    air_temps_daily: pd.DataFrame, hourly_air_temps: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Fill gaps in daily air temps using hourly data.
+
+    The daily Meteostat feed lags roughly two days; the hourly feed is more
+    current. Daily values win wherever they already exist.
+
+    Args:
+        air_temps_daily: date, air_temp, air_temp_min, air_temp_max
+        hourly_air_temps: datetime, air_temp
+
+    Returns:
+        DataFrame: date, air_temp, air_temp_min, air_temp_max
+    """
+    if hourly_air_temps is None or hourly_air_temps.empty:
+        return air_temps_daily[DAILY_AIR_COLUMNS].dropna(subset=["air_temp"])
+
+    hourly_daily_stats = (
+        hourly_air_temps.assign(date=hourly_air_temps["datetime"].dt.normalize())
+        .groupby("date")["air_temp"]
+        .agg(["mean", "min", "max"])
+        .reset_index()
+    )
+    hourly_daily_stats.columns = [
+        "date", "air_temp_h", "air_temp_min_h", "air_temp_max_h"
+    ]
+    hourly_daily_stats["date"] = pd.to_datetime(hourly_daily_stats["date"])
+
+    merged = pd.merge(air_temps_daily, hourly_daily_stats, on="date", how="outer")
+    merged["air_temp"] = merged["air_temp"].fillna(merged["air_temp_h"])
+    merged["air_temp_min"] = merged["air_temp_min"].fillna(merged["air_temp_min_h"])
+    merged["air_temp_max"] = merged["air_temp_max"].fillna(merged["air_temp_max_h"])
+
+    return merged[DAILY_AIR_COLUMNS].dropna(subset=["air_temp"])
+
+
+def build_temperatures_frame(
+    water_temps: pd.DataFrame, air_temps_hist: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Merge water and air temperatures into the main temperatures frame.
+
+    Rows with a water measurement are MEASURED; the rest are AIR_ONLY and are
+    candidates for prediction.
+
+    Args:
+        water_temps: date, water_temp
+        air_temps_hist: date, air_temp, air_temp_min, air_temp_max
+
+    Returns:
+        DataFrame sorted by date, with a 'source' column.
+    """
+    temperatures = pd.merge(water_temps, air_temps_hist, on="date", how="outer")
+    temperatures = temperatures.sort_values("date").reset_index(drop=True)
+    temperatures["source"] = "MEASURED"
+    temperatures.loc[temperatures["water_temp"].isna(), "source"] = "AIR_ONLY"
+    return temperatures
+
+
+def deduplicate_temperatures(temperatures: pd.DataFrame) -> pd.DataFrame:
+    """
+    Keep one row per date, preferring MEASURED over AIR_ONLY over PREDICTED.
+
+    Duplicate dates break the prediction chain, which walks the frame row by
+    row and would otherwise anchor on a duplicate rather than the previous day.
+
+    Args:
+        temperatures: Frame with date and source columns.
+
+    Returns:
+        One row per date, sorted by date, index reset.
+    """
+    result = temperatures.copy()
+    result["_sort_priority"] = result["source"].map(SOURCE_PRIORITY)
+    result = result.sort_values(["date", "_sort_priority"]).reset_index(drop=True)
+    result = result.drop(columns=["_sort_priority"])
+    return result.drop_duplicates(subset=["date"], keep="first").reset_index(drop=True)
