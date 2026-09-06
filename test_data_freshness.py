@@ -2,13 +2,19 @@
 Freshness checks for every data source.
 
 These exist because Meteostat stopped returning London data in March 2026 and
-nobody noticed for five months: the dashboard kept rendering, because a linear
-interpolation quietly bridged the gap (issue #33). A source going silent is
-invisible from the UI, so it needs its own test.
+nobody noticed for five months (issue #33). A source going silent is invisible
+from the UI, so it needs its own test.
+
+These check the outside world. They read each loader directly, before any of
+our own processing, and ask only one question: is this source current?
+
+Our half of that failure - silently interpolating across the resulting gap -
+is tested separately and deterministically by
+test_data.py::TestInterpolationCap. Keep the two apart: an assertion about our
+code should not depend on the weather.
 
 Unlike the rest of the suite these hit the network, so they are slower and can
-fail for reasons outside the codebase. That is the point - they are checking
-the outside world, not our logic.
+fail for reasons outside the codebase. That is the point.
 
 Run just these:      pytest test_data_freshness.py -v
 Skip them:           pytest -m "not freshness"
@@ -89,33 +95,6 @@ class TestHistoricalSources:
         df = load_historical_solar_cloud(end - pd.Timedelta(days=10), end)
         assert not df.empty, "Open-Meteo archive returned no solar/cloud rows"
         _assert_fresh(df["datetime"].max(), "solar_cloud", "Solar/cloud (Open-Meteo archive)")
-
-
-class TestHistoricalSourcesAreRealNotInterpolated:
-    """
-    A source can be 'fresh' and still be fiction.
-
-    When Meteostat died, the gap was filled by linear interpolation, which
-    produced a perfectly smooth ramp: the first week of July 2026 varied by
-    0.64C in total. Real London air swings roughly 10C every day. Flatness is
-    therefore a stronger signal of fabricated data than staleness is.
-    """
-
-    def test_hourly_air_temps_show_real_daily_variation(self):
-        end = pd.Timestamp.now().normalize()
-        df = load_hourly_air_temps(end - pd.Timedelta(days=7), end)
-        df = df.set_index("datetime")
-
-        daily_range = df["air_temp"].resample("D").agg(lambda s: s.max() - s.min())
-        daily_range = daily_range.dropna()
-
-        assert not daily_range.empty, "No complete days of hourly air temperature"
-        median_swing = float(daily_range.median())
-        assert median_swing > 2.0, (
-            f"Median daily air temperature swing is only {median_swing:.2f}C over the "
-            f"last week. Real weather varies far more than this - a near-flat series "
-            f"usually means the data is interpolated rather than measured (issue #33)."
-        )
 
 
 class TestForecastSources:

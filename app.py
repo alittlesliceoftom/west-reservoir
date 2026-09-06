@@ -21,7 +21,6 @@ from data import (
     select_storable_predictions,
     build_hourly_weather,
     combine_hourly_temps,
-    fill_daily_from_hourly,
     build_temperatures_frame,
     deduplicate_temperatures,
     DataLoadError,
@@ -569,7 +568,6 @@ def main():
             hourly_air_temps = cached_load_hourly_air_temps(start_date, end_date)
 
             # Fill missing daily temps from hourly data
-            air_temps_hist = fill_daily_from_hourly(air_temps_hist, hourly_air_temps)
 
             temperatures = build_temperatures_frame(water_temps, air_temps_hist)
 
@@ -684,7 +682,6 @@ def main():
 
             # Step 3b: Fill missing daily temps from hourly data
             # (Daily API has ~2 day lag, but hourly is more current)
-            air_temps_hist = fill_daily_from_hourly(air_temps_hist, hourly_air_temps)
 
             # Steps 4 and 5: Merge into the main temperatures DataFrame and
             # mark each row MEASURED or AIR_ONLY

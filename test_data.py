@@ -225,69 +225,7 @@ class TestSelectStorablePredictions:
 from data import (
     build_temperatures_frame,
     deduplicate_temperatures,
-    fill_daily_from_hourly,
 )
-
-
-class TestFillDailyFromHourly:
-    """The daily Meteostat feed lags ~2 days; hourly is more current."""
-
-    def _daily(self, rows):
-        """rows: list of (date, air_temp, air_temp_min, air_temp_max)."""
-        return pd.DataFrame({
-            "date": [pd.Timestamp(r[0]) for r in rows],
-            "air_temp": [r[1] for r in rows],
-            "air_temp_min": [r[2] for r in rows],
-            "air_temp_max": [r[3] for r in rows],
-        })
-
-    def _hourly(self, day, temps):
-        return pd.DataFrame({
-            "datetime": [
-                pd.Timestamp(day) + pd.Timedelta(hours=h) for h in range(len(temps))
-            ],
-            "air_temp": list(temps),
-        })
-
-    def test_fills_missing_days_from_hourly(self):
-        daily = self._daily([(datetime(2026, 5, 1), 10.0, 8.0, 12.0)])
-        hourly = self._hourly(datetime(2026, 5, 2), [float(h) for h in range(24)])
-
-        result = fill_daily_from_hourly(daily, hourly).set_index("date")
-
-        assert pd.Timestamp(2026, 5, 2) in result.index
-        assert result.loc[pd.Timestamp(2026, 5, 2), "air_temp"] == pytest.approx(11.5)
-        assert result.loc[pd.Timestamp(2026, 5, 2), "air_temp_min"] == pytest.approx(0.0)
-        assert result.loc[pd.Timestamp(2026, 5, 2), "air_temp_max"] == pytest.approx(23.0)
-
-    def test_existing_daily_values_take_precedence(self):
-        daily = self._daily([(datetime(2026, 5, 1), 10.0, 8.0, 12.0)])
-        hourly = self._hourly(datetime(2026, 5, 1), [99.0] * 24)
-
-        result = fill_daily_from_hourly(daily, hourly).set_index("date")
-        assert result.loc[pd.Timestamp(2026, 5, 1), "air_temp"] == pytest.approx(10.0)
-
-    def test_rows_without_air_temp_are_dropped(self):
-        daily = self._daily([
-            (datetime(2026, 5, 1), float("nan"), float("nan"), float("nan"))
-        ])
-        hourly = pd.DataFrame(columns=["datetime", "air_temp"])
-
-        assert fill_daily_from_hourly(daily, hourly).empty
-
-    def test_returns_expected_columns(self):
-        daily = self._daily([(datetime(2026, 5, 1), 10.0, 8.0, 12.0)])
-        hourly = pd.DataFrame(columns=["datetime", "air_temp"])
-
-        result = fill_daily_from_hourly(daily, hourly)
-        assert list(result.columns) == ["date", "air_temp", "air_temp_min", "air_temp_max"]
-
-    def test_empty_hourly_leaves_daily_untouched(self):
-        daily = self._daily([(datetime(2026, 5, 1), 10.0, 8.0, 12.0)])
-        result = fill_daily_from_hourly(daily, pd.DataFrame(columns=["datetime", "air_temp"]))
-
-        assert len(result) == 1
-        assert result.loc[0, "air_temp"] == pytest.approx(10.0)
 
 
 class TestBuildTemperaturesFrame:
@@ -400,3 +338,103 @@ class TestDeduplicateTemperatures:
         deduplicate_temperatures(df)
 
         pd.testing.assert_frame_equal(df, before)
+
+
+from data import MAX_INTERPOLATION_HOURS
+
+
+class TestInterpolationCap:
+    """
+    combine_hourly_temps must not invent weather across long gaps.
+
+    This is the direct test of the guarantee. When Meteostat silently died
+    (issue #33), the uncapped version drew a straight line across 161 days and
+    the model trained on it. The gap is bridged by OUR code, so assert on our
+    code rather than inferring it from how flat the resulting data looks.
+    """
+
+    def _series(self, start, n_hours, temp):
+        return pd.DataFrame({
+            "datetime": [pd.Timestamp(start) + pd.Timedelta(hours=i) for i in range(n_hours)],
+            "air_temp": [float(temp)] * n_hours,
+        })
+
+    def test_short_gap_is_bridged(self):
+        """A 3-hourly forecast leaves 2-hour holes; those must still be filled."""
+        hist = self._series("2026-05-01 00:00", 6, 10.0)          # 00:00-05:00
+        fore = self._series("2026-05-01 08:00", 6, 20.0)          # 08:00-13:00
+        # gap is 06:00 and 07:00 -> 2 hours, well within the cap
+
+        result = combine_hourly_temps(hist, fore).set_index("datetime")
+
+        assert pd.Timestamp("2026-05-01 06:00") in result.index
+        assert pd.Timestamp("2026-05-01 07:00") in result.index
+
+    def test_long_gap_is_not_bridged(self):
+        """The #33 failure mode: a gap far beyond the cap must stay a gap."""
+        hist = self._series("2026-05-01 00:00", 6, 10.0)           # ends 05:00
+        fore = self._series("2026-05-10 00:00", 6, 20.0)           # 9 days later
+
+        result = combine_hourly_temps(hist, fore).set_index("datetime")
+
+        # Real data on both sides survives...
+        assert pd.Timestamp("2026-05-01 00:00") in result.index
+        assert pd.Timestamp("2026-05-10 00:00") in result.index
+        # ...but the middle is absent, not invented.
+        assert pd.Timestamp("2026-05-05 12:00") not in result.index
+
+    def test_gap_exactly_at_the_cap_is_bridged(self):
+        hist = self._series("2026-05-01 00:00", 1, 10.0)                     # 00:00
+        gap_end = 1 + MAX_INTERPOLATION_HOURS                                # 07:00
+        fore = self._series(f"2026-05-01 0{gap_end}:00", 3, 20.0)
+
+        result = combine_hourly_temps(hist, fore).set_index("datetime")
+
+        missing = [
+            pd.Timestamp("2026-05-01 00:00") + pd.Timedelta(hours=h)
+            for h in range(1, MAX_INTERPOLATION_HOURS + 1)
+        ]
+        assert all(ts in result.index for ts in missing), (
+            f"a gap of exactly MAX_INTERPOLATION_HOURS ({MAX_INTERPOLATION_HOURS}) "
+            f"should still be bridged"
+        )
+
+    def test_gap_one_hour_past_the_cap_is_not_bridged(self):
+        hist = self._series("2026-05-01 00:00", 1, 10.0)                     # 00:00
+        start = 1 + MAX_INTERPOLATION_HOURS + 1                              # 08:00
+        fore = self._series(f"2026-05-01 0{start}:00", 3, 20.0)
+
+        result = combine_hourly_temps(hist, fore).set_index("datetime")
+
+        assert pd.Timestamp("2026-05-01 04:00") not in result.index
+
+    def test_no_fabricated_values_across_a_months_long_outage(self):
+        """
+        Regression test for issue #33, at the real scale.
+
+        Historical stops in March, forecast starts in September. Every hour in
+        between must be absent - previously they were filled with a smooth ramp
+        and 106 of 383 training pairs were fitted against it.
+        """
+        hist = self._series("2026-03-29 00:00", 24, 8.0)
+        fore = self._series("2026-09-06 00:00", 24, 23.0)
+
+        result = combine_hourly_temps(hist, fore)
+
+        gap_rows = result[
+            (result["datetime"] > pd.Timestamp("2026-03-30 00:00"))
+            & (result["datetime"] < pd.Timestamp("2026-09-06 00:00"))
+        ]
+        assert gap_rows.empty, (
+            f"{len(gap_rows)} hours of weather were invented across the outage"
+        )
+
+    def test_surviving_rows_keep_their_real_values(self):
+        """Capping must not corrupt the data either side of the gap."""
+        hist = self._series("2026-05-01 00:00", 6, 10.0)
+        fore = self._series("2026-05-10 00:00", 6, 20.0)
+
+        result = combine_hourly_temps(hist, fore).set_index("datetime")
+
+        assert result.loc[pd.Timestamp("2026-05-01 00:00"), "air_temp"] == pytest.approx(10.0)
+        assert result.loc[pd.Timestamp("2026-05-10 00:00"), "air_temp"] == pytest.approx(20.0)
