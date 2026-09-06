@@ -685,7 +685,9 @@ def create_horizon_accuracy_chart(
 DEFAULT_VIEW_DAYS = 30
 
 
-def _add_range_slider(fig: go.Figure, series: list) -> None:
+def _add_range_slider(
+    fig: go.Figure, series: list, include_zero: bool = False
+) -> None:
     """
     Add a range slider and open the chart on the last month of data.
 
@@ -702,6 +704,9 @@ def _add_range_slider(fig: go.Figure, series: list) -> None:
     Args:
         fig: Figure to modify.
         series: List of (x, y) pairs to consider when sizing the axes.
+        include_zero: Keep zero inside the y range. Required for bars, which
+                      grow from zero and would otherwise be clipped whenever
+                      every value in the opening window sits on one side of it.
     """
     all_x = pd.concat([pd.Series(x) for x, _ in series]).dropna()
     if all_x.empty:
@@ -725,6 +730,8 @@ def _add_range_slider(fig: go.Figure, series: list) -> None:
         return
 
     low, high = float(values.min()), float(values.max())
+    if include_zero:
+        low, high = min(low, 0.0), max(high, 0.0)
     pad = max((high - low) * 0.1, 0.5)
     fig.update_yaxes(range=[low - pad, high + pad])
 
@@ -830,11 +837,17 @@ def create_forecast_vs_actual_chart(
 def create_error_over_time_chart(
     scored: pd.DataFrame, mark_outage: bool = False
 ) -> go.Figure:
-    """Signed forecast error over time, with a zero reference line."""
-    fig = go.Figure(go.Scatter(
+    """
+    Signed forecast error over time, as bars from zero.
+
+    Bars, not a line: measurements are manual and skip days, and a connecting
+    line draws a slope across those gaps that asserts a trend nobody observed.
+    A bar stands only where a forecast was actually scored.
+    """
+    fig = go.Figure(go.Bar(
         x=scored["target_date"], y=scored["error"],
-        mode="lines+markers", name="Error",
-        line=dict(color="#ff7f0e", width=1.5), marker=dict(size=4),
+        name="Error", marker_color="#ff7f0e",
+        hovertemplate="%{x|%Y-%m-%d}<br>%{y:+.2f} C<extra></extra>",
     ))
     fig.add_hline(y=0, line_dash="dash", line_color="grey")
 
@@ -845,7 +858,9 @@ def create_error_over_time_chart(
         xaxis_title="Date", yaxis_title="Forecast - actual (C)",
         height=360, showlegend=False, margin=dict(t=30),
     )
-    _add_range_slider(fig, [(scored["target_date"], scored["error"])])
+    _add_range_slider(
+        fig, [(scored["target_date"], scored["error"])], include_zero=True
+    )
     return fig
 
 
