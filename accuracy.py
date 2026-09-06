@@ -17,6 +17,8 @@ SCORED_COLUMNS = [
 
 REPLAY_COLUMNS = ["target_date", "horizon_days", "forecast_temp", "air_source"]
 
+AIR_COLUMNS = ["datetime", "air_temp"]
+
 
 def compute_metrics(df: pd.DataFrame) -> dict:
     """
@@ -111,3 +113,57 @@ def join_actuals(forecasts: pd.DataFrame, water_temps: pd.DataFrame) -> pd.DataF
     return scored[SCORED_COLUMNS].sort_values(
         ["target_date", "horizon_days"]
     ).reset_index(drop=True)
+
+
+def splice_air_history(
+    actual_hourly: pd.DataFrame,
+    stored_run_hourly: pd.DataFrame,
+    anchor_datetime,
+) -> pd.DataFrame:
+    """
+    Reconstruct the air-temperature series the live forecast actually had.
+
+    A stored forecast run created late on day d only covers the remainder of
+    that day - roughly 16k rows at horizon 0 against 30k at horizon 1. Feeding
+    the raw run to the forecaster would simulate ~10 hours of a 24-hour period
+    and produce a number the model never computes.
+
+    What the live run had was measured air for the elapsed part of the day,
+    then forecast air from its creation time onward. This splices that.
+
+    Not the same as combine_hourly_temps, which gives historical precedence on
+    overlap. For a past anchor the actuals cover the whole window, so that
+    would override the entire stored run and the replay would silently become
+    100% actuals.
+
+    Args:
+        actual_hourly: Measured hourly air temps (datetime, air_temp).
+        stored_run_hourly: The stored forecast run, interpolated to hourly.
+        anchor_datetime: Start of the window (the 7am measurement time).
+
+    Returns:
+        DataFrame (datetime, air_temp) from anchor_datetime onward, with the
+        stored run taking precedence wherever it has data.
+    """
+    anchor = pd.Timestamp(anchor_datetime)
+
+    def _prepared(df):
+        if df is None or df.empty:
+            return pd.DataFrame(columns=AIR_COLUMNS)
+        out = df[AIR_COLUMNS].copy()
+        out["datetime"] = pd.to_datetime(out["datetime"])
+        return out[out["datetime"] >= anchor]
+
+    actuals = _prepared(actual_hourly)
+    stored = _prepared(stored_run_hourly)
+
+    if stored.empty:
+        return actuals.sort_values("datetime").reset_index(drop=True)
+
+    # Actuals only cover the head, up to where the forecast run begins.
+    head = actuals[actuals["datetime"] < stored["datetime"].min()]
+
+    combined = pd.concat([head, stored], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["datetime"], keep="last")
+
+    return combined.sort_values("datetime").reset_index(drop=True)

@@ -6,7 +6,13 @@ import pandas as pd
 import pytest
 from datetime import datetime
 
-from accuracy import BIAS_NOTE, compute_metrics, join_actuals, metrics_by_horizon
+from accuracy import (
+    BIAS_NOTE,
+    compute_metrics,
+    join_actuals,
+    metrics_by_horizon,
+    splice_air_history,
+)
 from forecast_storage import LAST_AIR_RUN_PER_DAY_SQL, LAST_WATER_RUN_PER_DAY_SQL
 
 
@@ -357,3 +363,98 @@ class TestJoinActuals:
             "target_date", "horizon_days", "forecast_temp",
             "actual_temp", "error", "air_source",
         ]
+
+
+def _air_frame(start, n_hours, air_temp, step_hours=1):
+    return pd.DataFrame({
+        "datetime": [
+            pd.Timestamp(start) + pd.Timedelta(hours=i * step_hours)
+            for i in range(n_hours)
+        ],
+        "air_temp": [air_temp] * n_hours,
+    })
+
+
+class TestSpliceAirHistory:
+
+    def test_actuals_fill_the_head_before_the_run_starts(self):
+        """The live forecast had measured air for the elapsed part of the day."""
+        anchor = pd.Timestamp(2026, 5, 1, 7)
+        actuals = _air_frame(pd.Timestamp(2026, 5, 1, 0), 48, air_temp=10.0)
+        stored = _air_frame(pd.Timestamp(2026, 5, 1, 21), 24, air_temp=20.0)
+
+        result = splice_air_history(actuals, stored, anchor)
+
+        assert result["datetime"].min() == anchor
+        before = result[result["datetime"] < pd.Timestamp(2026, 5, 1, 21)]
+        after = result[result["datetime"] >= pd.Timestamp(2026, 5, 1, 21)]
+        assert set(before["air_temp"]) == {10.0}
+        assert set(after["air_temp"]) == {20.0}
+
+    def test_no_hours_are_missing_across_the_join(self):
+        anchor = pd.Timestamp(2026, 5, 1, 7)
+        actuals = _air_frame(pd.Timestamp(2026, 5, 1, 0), 48, air_temp=10.0)
+        stored = _air_frame(pd.Timestamp(2026, 5, 1, 21), 24, air_temp=20.0)
+
+        result = splice_air_history(actuals, stored, anchor)
+        gaps = result["datetime"].diff().dropna().unique()
+
+        assert list(gaps) == [pd.Timedelta(hours=1)]
+
+    def test_no_duplicate_datetimes(self):
+        anchor = pd.Timestamp(2026, 5, 1, 7)
+        actuals = _air_frame(pd.Timestamp(2026, 5, 1, 0), 48, air_temp=10.0)
+        stored = _air_frame(pd.Timestamp(2026, 5, 1, 21), 24, air_temp=20.0)
+
+        result = splice_air_history(actuals, stored, anchor)
+        assert not result["datetime"].duplicated().any()
+
+    def test_stored_wins_where_both_have_the_same_hour(self):
+        """Past the forecast's creation time, the forecast is what was used."""
+        anchor = pd.Timestamp(2026, 5, 1, 7)
+        actuals = _air_frame(pd.Timestamp(2026, 5, 1, 0), 48, air_temp=10.0)
+        stored = _air_frame(pd.Timestamp(2026, 5, 1, 21), 24, air_temp=20.0)
+
+        result = splice_air_history(actuals, stored, anchor)
+        at_23 = result[result["datetime"] == pd.Timestamp(2026, 5, 1, 23)]
+
+        assert at_23["air_temp"].iloc[0] == pytest.approx(20.0)
+
+    def test_rows_before_the_anchor_are_dropped(self):
+        anchor = pd.Timestamp(2026, 5, 1, 7)
+        actuals = _air_frame(pd.Timestamp(2026, 4, 30, 0), 72, air_temp=10.0)
+        stored = _air_frame(pd.Timestamp(2026, 5, 1, 21), 24, air_temp=20.0)
+
+        result = splice_air_history(actuals, stored, anchor)
+        assert result["datetime"].min() == anchor
+
+    def test_empty_stored_run_returns_actuals_from_anchor(self):
+        anchor = pd.Timestamp(2026, 5, 1, 7)
+        actuals = _air_frame(pd.Timestamp(2026, 5, 1, 0), 48, air_temp=10.0)
+
+        result = splice_air_history(
+            actuals, pd.DataFrame(columns=["datetime", "air_temp"]), anchor
+        )
+
+        assert result["datetime"].min() == anchor
+        assert set(result["air_temp"]) == {10.0}
+
+    def test_empty_actuals_returns_stored_run_from_anchor(self):
+        anchor = pd.Timestamp(2026, 5, 1, 7)
+        stored = _air_frame(pd.Timestamp(2026, 5, 1, 21), 24, air_temp=20.0)
+
+        result = splice_air_history(
+            pd.DataFrame(columns=["datetime", "air_temp"]), stored, anchor
+        )
+
+        assert set(result["air_temp"]) == {20.0}
+        assert len(result) == 24
+
+    def test_both_empty_returns_empty_with_schema(self):
+        anchor = pd.Timestamp(2026, 5, 1, 7)
+        empty = pd.DataFrame(columns=["datetime", "air_temp"])
+
+        result = splice_air_history(empty, empty, anchor)
+
+        assert result.empty
+        assert list(result.columns) == ["datetime", "air_temp"]
