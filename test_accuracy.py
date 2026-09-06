@@ -598,6 +598,42 @@ class TestReplayCurrentModel:
 
         pd.testing.assert_frame_equal(forecaster.hourly_weather, before)
 
+    def test_weather_state_is_restored_when_the_provider_raises(self):
+        """
+        The `finally` around the anchor loop exists ONLY for this path.
+
+        test_forecaster_weather_state_is_restored above takes the happy path,
+        which the restore after the loop would satisfy just as well - delete
+        the try/finally and it still passes. Nothing reached the exception
+        path, so nothing pinned it. A provider that fails partway (a stored
+        run missing, a query erroring) must not leave the forecaster pointing
+        at whichever anchor's weather it died on, because the dashboard goes
+        on to use that same forecaster.
+        """
+        forecaster = WaterTempForecaster(k_air=0.02, k_solar=0.0, k_cool=0.0)
+        forecaster.set_hourly_weather(_weather_frame(datetime(2026, 1, 1), 48))
+        before = forecaster.hourly_weather.copy()
+
+        measurements = self._measurements([
+            (datetime(2026, 5, 1), 10.0),
+            (datetime(2026, 5, 2), 10.5),
+        ])
+
+        calls = []
+
+        def provider(anchor_date):
+            calls.append(anchor_date)
+            if len(calls) == 2:
+                raise RuntimeError("stored run unavailable")
+            return _weather_frame(anchor_date, 200), "FORECAST"
+
+        with pytest.raises(RuntimeError, match="stored run unavailable"):
+            replay_current_model(forecaster, measurements, provider, max_horizon=2)
+
+        # It really did get past the first anchor and swap weather in.
+        assert len(calls) == 2
+        pd.testing.assert_frame_equal(forecaster.hourly_weather, before)
+
     def test_empty_measurements_returns_empty_with_schema(self):
         forecaster = WaterTempForecaster()
         result = replay_current_model(
@@ -1015,3 +1051,126 @@ class TestWeatherForecastStorage:
                 datetime(2026, 9, 6, 21, 0),
                 source="Open-Meteo",
             )
+
+
+class TestStorageReadsCoerceTimezones:
+    """
+    The read methods are not thin SQL wrappers.
+
+    MotherDuck hands back timezone-AWARE timestamps; every other frame in this
+    codebase is naive, and comparing the two raises. So each read does
+    tz_localize(None) on its timestamp columns and pd.to_datetime on its DATE
+    columns. That is the "MotherDuck returns tz-aware, local data is naive" bug
+    class, and it had no coverage at all.
+
+    A plain in-memory table cannot reproduce it: DuckDB TIMESTAMP columns come
+    back naive, so tz_localize(None) is a no-op and an "is naive" assertion
+    passes with the coercion deleted. These fixtures therefore declare the
+    timestamp columns TIMESTAMPTZ, which is what makes fetchdf return
+    datetime64[us, UTC] and the coercion load-bearing. Verified by deleting
+    each tz_localize(None): the matching test below fails.
+    """
+
+    def _storage_on(self, conn):
+        storage = ForecastStorage()
+        storage._conn = conn
+        return storage
+
+    def _water_db(self):
+        """water_temp_predictions with tz-aware timestamps, as MotherDuck returns."""
+        conn = duckdb.connect(":memory:")
+        conn.execute("SET TimeZone='UTC'")
+        # No PRIMARY KEY: DuckDB refuses to type a key column TIMESTAMPTZ, and
+        # the key is not what is under test here.
+        conn.execute("""
+            CREATE TABLE water_temp_predictions (
+                forecast_created_date DATE NOT NULL,
+                forecast_created_timestamp TIMESTAMPTZ NOT NULL,
+                target_date DATE NOT NULL,
+                water_temp DOUBLE NOT NULL,
+                heat_transfer_coeff DOUBLE NOT NULL,
+                start_water_temp DOUBLE NOT NULL,
+                simulation_hours INTEGER NOT NULL,
+                source_air_forecast_timestamp TIMESTAMPTZ NOT NULL
+            )
+        """)
+        conn.execute("""
+            INSERT INTO water_temp_predictions VALUES
+            ('2026-09-06', '2026-09-06 21:00:00+00', '2026-09-07',
+             12.0, 0.02, 11.0, 24, '2026-09-06 21:00:00+00')
+        """)
+        return conn
+
+    def _air_db(self):
+        """air_temp_forecasts_3hourly with tz-aware timestamps."""
+        conn = duckdb.connect(":memory:")
+        conn.execute("SET TimeZone='UTC'")
+        conn.execute("""
+            CREATE TABLE air_temp_forecasts_3hourly (
+                forecast_created_timestamp TIMESTAMPTZ NOT NULL,
+                target_datetime TIMESTAMPTZ NOT NULL,
+                air_temp DOUBLE NOT NULL,
+                source VARCHAR DEFAULT 'OpenWeatherMap'
+            )
+        """)
+        conn.execute("""
+            INSERT INTO air_temp_forecasts_3hourly VALUES
+            ('2026-09-06 21:00:00+00', '2026-09-07 00:00:00+00', 14.0, 'OpenWeatherMap')
+        """)
+        return conn
+
+    def test_water_predictions_timestamps_come_back_naive(self):
+        result = self._storage_on(
+            self._water_db()
+        ).get_water_predictions_last_run_per_day()
+
+        assert result["forecast_created_timestamp"].dt.tz is None
+        # Stripped, not converted away: the wall-clock reading is preserved.
+        assert result["forecast_created_timestamp"].iloc[0] == pd.Timestamp(
+            "2026-09-06 21:00:00"
+        )
+
+    def test_water_predictions_dates_come_back_as_timestamps(self):
+        """
+        Callers compare these against pd.Timestamp measurement dates and index
+        by them. A datetime.date object would compare unequal to a Timestamp
+        of the same day and the join would silently return nothing.
+
+        Note: on local DuckDB, DATE already arrives as datetime64, so this
+        pins the contract rather than exercising the pd.to_datetime call.
+        """
+        result = self._storage_on(
+            self._water_db()
+        ).get_water_predictions_last_run_per_day()
+
+        assert isinstance(result["target_date"].iloc[0], pd.Timestamp)
+        assert isinstance(result["forecast_created_date"].iloc[0], pd.Timestamp)
+        assert result["target_date"].iloc[0] == pd.Timestamp("2026-09-07")
+
+    def test_air_forecast_target_datetimes_come_back_naive(self):
+        result = self._storage_on(
+            self._air_db()
+        ).get_air_forecasts_3hourly_last_run_per_day()
+
+        assert result["target_datetime"].dt.tz is None
+        assert result["target_datetime"].iloc[0] == pd.Timestamp("2026-09-07 00:00")
+
+    def test_air_forecast_creation_dates_come_back_as_timestamps(self):
+        result = self._storage_on(
+            self._air_db()
+        ).get_air_forecasts_3hourly_last_run_per_day()
+
+        assert isinstance(result["forecast_created_date"].iloc[0], pd.Timestamp)
+        assert result["forecast_created_date"].iloc[0] == pd.Timestamp("2026-09-06")
+
+    def test_naive_output_is_comparable_with_local_naive_frames(self):
+        """
+        The point of the coercion, stated as the thing that actually broke:
+        a tz-aware column raises on comparison with a naive one.
+        """
+        result = self._storage_on(
+            self._air_db()
+        ).get_air_forecasts_3hourly_last_run_per_day()
+
+        local = pd.Series([pd.Timestamp("2026-09-07 00:00")])
+        assert (result["target_datetime"] == local).iloc[0]
