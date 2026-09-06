@@ -16,6 +16,7 @@ This is a simple, transparent water temperature tracking and prediction system f
 ├── data.py             - Data loading and frame assembly
 ├── forecaster.py       - Physics-based prediction model
 ├── forecast_storage.py - MotherDuck forecast storage and retrieval
+├── accuracy.py         - Forecast accuracy metrics and backtest replay
 ├── quotes.py           - Static quotes for the "Heard at the Res" tab
 ├── requirements.txt    - Python dependencies
 ├── docs/superpowers/   - Design specs and implementation plans
@@ -169,6 +170,27 @@ temperatures = pd.DataFrame({
 - Retrieves stored forecasts to fill any gap between historical data and the
   live OpenWeatherMap forecast
 - Gated by `ENABLE_MOTHERDUCK` in `config.py`; the app works without it
+- `get_water_predictions_last_run_per_day()` and
+  `get_air_forecasts_3hourly_last_run_per_day()` bulk-fetch the final run of
+  each creation day for accuracy reporting. They use `rank()`, not
+  `row_number()`: one run is many rows sharing a creation timestamp
+
+#### `accuracy.py`
+- `compute_metrics()` / `metrics_by_horizon()` - MAE, bias, RMSE, within-0.5C
+  hit rate, and N. Bias is `forecast - actual`, so positive means the model
+  runs warm. N is reported everywhere because measurement coverage is sparse
+- `join_actuals()` - Join forecasts to the measurements they predicted, on
+  target date
+- `splice_air_history()` - Reconstruct the air series a stored forecast run
+  actually had: measured air for the elapsed part of the creation day, forecast
+  air after. A run created around 21:00 covers only that day's remainder, so
+  simulating from it alone would step through ~10 hours of a 24-hour period
+- `replay_current_model()` - Re-run the current model over history to show what
+  accuracy would have been. A model-development tool, not a record of real
+  performance: solar and cloud forecasts were never stored, so actual
+  solar/cloud is used throughout, which biases it optimistically
+- Weather reaches the replay through an injected provider, so all I/O stays in
+  the caller and the replay is testable without MotherDuck
 
 #### `app.py`
 - Streamlit web interface
