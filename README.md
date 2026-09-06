@@ -78,8 +78,9 @@ original single-term physics (zero solar, fully overcast).
 
 ### Prediction Process
 
-1. **Load Data**: Water temps from Google Sheets, air temps from Meteostat,
-   solar radiation and cloud cover from Open-Meteo, forecasts from OpenWeatherMap
+1. **Load Data**: Water temps from Google Sheets; historical air temperature,
+   solar radiation and cloud cover from the Open-Meteo archive; forecasts from
+   OpenWeatherMap
 2. **Merge**: Combine into single `temperatures` DataFrame, plus an hourly
    weather frame for the model
 3. **Train**: Optimise `k_air`, `k_solar` and `k_cool` on measured data
@@ -128,7 +129,7 @@ The app raises clear errors instead of silent fallbacks:
 
 - **Google Sheets unavailable**: "Cannot load required data: Failed to fetch data from Google Sheets"
 - **No API key**: "Weather forecast unavailable: OpenWeatherMap API key not found"
-- **Meteostat down**: "Cannot load required data: Failed to load historical weather data"
+- **Open-Meteo down**: "Cannot load required data: Failed to fetch historical air temps from Open-Meteo"
 
 ## Bug Fixes
 
@@ -140,7 +141,7 @@ This rebuild fixes two critical bugs from the previous version:
 ## Data Sources
 
 - **Water Temperature**: Google Sheets (manual readings)
-- **Historical Weather**: Meteostat API (London weather station)
+- **Historical Weather**: Open-Meteo archive API
 - **Weather Forecast**: OpenWeatherMap API (5-day forecast)
 - **Location**: West Reservoir, London (51.566938, -0.090492)
 

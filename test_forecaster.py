@@ -287,8 +287,12 @@ class TestPredictForward:
         )
         assert list(result["horizon_days"]) == [1, 3]
 
-    def test_duplicate_targets_are_kept_as_zero_length_legs(self):
-        """One row per target, duplicates included. Preserves legacy filler behaviour."""
+    def test_duplicate_targets_carry_the_temperature_through(self):
+        """
+        A repeated target is a zero-length leg: no time passes, so the value
+        is unchanged. It must not be mistaken for a missing-weather gap, which
+        would poison the rest of the chain with NaN.
+        """
         f = self._fitted()
         result = f.predict_forward(
             datetime(2026, 3, 1, 7), 10.0,
@@ -296,7 +300,21 @@ class TestPredictForward:
         )
         assert len(result) == 2
         assert bool(result.loc[0, "has_weather"]) is True
-        assert bool(result.loc[1, "has_weather"]) is False
+        assert bool(result.loc[1, "has_weather"]) is True
+        assert result.loc[1, "water_temp"] == pytest.approx(result.loc[0, "water_temp"])
+
+    def test_duplicate_target_does_not_break_a_longer_chain(self):
+        """The regression this fix exists to prevent."""
+        f = self._fitted()
+        result = f.predict_forward(
+            datetime(2026, 3, 1, 7), 10.0,
+            target_dates=[
+                datetime(2026, 3, 2), datetime(2026, 3, 2), datetime(2026, 3, 3),
+            ],
+        )
+        assert not result["water_temp"].isna().any(), (
+            "a duplicate date poisoned the chain with NaN"
+        )
 
     def test_nan_when_weather_runs_out(self):
         """No fabrication: legs beyond weather coverage are NaN with has_weather False."""
@@ -409,8 +427,20 @@ class TestFillPredictions:
         })
         pd.testing.assert_frame_equal(f.fill_predictions(df), _legacy_fill(f, df))
 
-    def test_matches_legacy_with_duplicate_dates(self):
-        """Duplicate dates produce a zero-length leg; the row stays untouched."""
+    def test_duplicate_dates_no_longer_poison_the_chain(self):
+        """
+        DELIBERATE DIVERGENCE FROM LEGACY.
+
+        The old predict() treated a duplicate date as a missing-weather gap,
+        so it produced NaN there and every following row inherited the NaN:
+
+            legacy: [10.0, 12.25, nan, nan]
+            now:    [10.0, 12.25, 12.25, 13.63]
+
+        A duplicate date means no time passed, not that data is missing, so
+        the temperature carries through and the chain survives. Unreachable
+        from the dashboard, which deduplicates dates first, but wrong is wrong.
+        """
         f = self._fitted()
         df = pd.DataFrame({
             "date": [
@@ -420,7 +450,19 @@ class TestFillPredictions:
             "water_temp": [10.0, float("nan"), float("nan"), float("nan")],
             "source": ["MEASURED", "AIR_ONLY", "AIR_ONLY", "AIR_ONLY"],
         })
-        pd.testing.assert_frame_equal(f.fill_predictions(df), _legacy_fill(f, df))
+
+        result = f.fill_predictions(df)
+        legacy = _legacy_fill(f, df)
+
+        # Every row is predicted, with no NaN anywhere.
+        assert not result["water_temp"].isna().any()
+        assert list(result["source"]) == [
+            "MEASURED", "PREDICTED", "PREDICTED", "PREDICTED"
+        ]
+        # The duplicate carries the previous value through unchanged.
+        assert result.loc[2, "water_temp"] == pytest.approx(result.loc[1, "water_temp"])
+        # ...and the legacy implementation genuinely did lose the chain here.
+        assert legacy["water_temp"].isna().any()
 
     def test_matches_legacy_when_weather_runs_out(self):
         f = self._fitted(n_hours=60)

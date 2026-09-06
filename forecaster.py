@@ -239,9 +239,10 @@ class WaterTempForecaster:
             A leg with no weather yields NaN, and because each leg starts from
             the previous one, every later leg is NaN too. That is deliberate:
             once the chain breaks there is no honest value to continue from.
-            Note a zero-length leg (a duplicate target date) counts as "no
-            weather" and so breaks the chain the same way - unreachable in the
-            dashboard flow, which deduplicates dates before predicting.
+
+            A zero-length leg - the same target date given twice - is not a
+            data gap. No time passes, so the temperature carries through
+            unchanged and the chain continues.
 
         Raises:
             ValueError: If both or neither of days_ahead / target_dates given.
@@ -280,6 +281,18 @@ class WaterTempForecaster:
         cursor = start_dt
 
         for target_dt in target_dts:
+            if target_dt == cursor:
+                # Zero-length leg: the same target asked for twice. No time
+                # passes, so the temperature is unchanged. This is not a data
+                # gap and must not break the chain.
+                rows.append({
+                    "target_datetime": target_dt,
+                    "horizon_days": int((target_dt - start_dt) / pd.Timedelta(days=1)),
+                    "water_temp": water,
+                    "has_weather": True,
+                })
+                continue
+
             weather_slice = self._get_weather_for_period(cursor, target_dt)
             has_weather = not weather_slice.empty
 
