@@ -1,10 +1,12 @@
 """Tests for forecast accuracy reporting"""
 
 import duckdb
+import numpy as np
 import pandas as pd
 import pytest
 from datetime import datetime
 
+from accuracy import BIAS_NOTE, compute_metrics, metrics_by_horizon
 from forecast_storage import LAST_AIR_RUN_PER_DAY_SQL, LAST_WATER_RUN_PER_DAY_SQL
 
 
@@ -168,3 +170,94 @@ class TestLastAirRunPerDay:
         result = conn.execute(LAST_AIR_RUN_PER_DAY_SQL).fetchdf()
 
         assert list(result["air_temp"]) == [14.0, 13.0]
+
+
+def _scored(pairs, horizons=None):
+    """pairs: list of (forecast, actual)."""
+    df = pd.DataFrame(
+        {"forecast_temp": [p[0] for p in pairs], "actual_temp": [p[1] for p in pairs]}
+    )
+    if horizons is not None:
+        df["horizon_days"] = horizons
+    return df
+
+
+class TestComputeMetrics:
+
+    def test_hand_computed_case(self):
+        # errors: +1.0, -1.0, +2.0, 0.0
+        # mae = 4.0/4 = 1.0 ; bias = 2.0/4 = 0.5
+        # rmse = sqrt((1+1+4+0)/4) = sqrt(1.5)
+        # within 0.5: only the 0.0 error -> 25%
+        m = compute_metrics(_scored([(11.0, 10.0), (9.0, 10.0), (14.0, 12.0), (8.0, 8.0)]))
+
+        assert m["mae"] == pytest.approx(1.0)
+        assert m["bias"] == pytest.approx(0.5)
+        assert m["rmse"] == pytest.approx(np.sqrt(1.5))
+        assert m["hit_rate_0_5"] == pytest.approx(25.0)
+        assert m["n"] == 4
+
+    def test_bias_positive_means_model_runs_warm(self):
+        m = compute_metrics(_scored([(12.0, 10.0), (13.0, 10.0)]))
+        assert m["bias"] > 0
+        assert "warm" in BIAS_NOTE
+
+    def test_bias_negative_means_model_runs_cold(self):
+        m = compute_metrics(_scored([(8.0, 10.0), (7.0, 10.0)]))
+        assert m["bias"] < 0
+
+    def test_hit_rate_boundary_is_inclusive(self):
+        """Exactly 0.5 C off counts as a hit."""
+        m = compute_metrics(_scored([(10.5, 10.0), (10.51, 10.0)]))
+        assert m["hit_rate_0_5"] == pytest.approx(50.0)
+
+    def test_nan_rows_are_excluded_not_counted(self):
+        m = compute_metrics(_scored([(11.0, 10.0), (np.nan, 10.0), (9.0, 10.0)]))
+        assert m["n"] == 2
+        assert m["mae"] == pytest.approx(1.0)
+
+    def test_empty_frame_returns_nan_metrics_and_zero_n(self):
+        m = compute_metrics(_scored([]))
+        assert m["n"] == 0
+        assert np.isnan(m["mae"])
+        assert np.isnan(m["bias"])
+        assert np.isnan(m["rmse"])
+        assert np.isnan(m["hit_rate_0_5"])
+
+    def test_all_nan_frame_returns_zero_n(self):
+        m = compute_metrics(_scored([(np.nan, 10.0)]))
+        assert m["n"] == 0
+
+
+class TestMetricsByHorizon:
+
+    def test_one_row_per_horizon_sorted(self):
+        df = _scored([(11.0, 10.0), (13.0, 10.0), (10.0, 10.0)], horizons=[2, 1, 1])
+        result = metrics_by_horizon(df)
+
+        assert list(result["horizon_days"]) == [1, 2]
+        assert list(result.columns) == [
+            "horizon_days", "mae", "bias", "rmse", "hit_rate_0_5", "n"
+        ]
+
+    def test_metrics_computed_within_horizon(self):
+        df = _scored([(11.0, 10.0), (12.0, 10.0)], horizons=[1, 2])
+        result = metrics_by_horizon(df).set_index("horizon_days")
+
+        assert result.loc[1, "mae"] == pytest.approx(1.0)
+        assert result.loc[2, "mae"] == pytest.approx(2.0)
+        assert result.loc[1, "n"] == 1
+
+    def test_horizon_with_only_nan_reports_zero_n(self):
+        df = _scored([(np.nan, 10.0), (12.0, 10.0)], horizons=[1, 2])
+        result = metrics_by_horizon(df).set_index("horizon_days")
+
+        assert result.loc[1, "n"] == 0
+        assert np.isnan(result.loc[1, "mae"])
+
+    def test_empty_frame_returns_empty_with_columns(self):
+        result = metrics_by_horizon(_scored([], horizons=[]))
+        assert result.empty
+        assert list(result.columns) == [
+            "horizon_days", "mae", "bias", "rmse", "hit_rate_0_5", "n"
+        ]
