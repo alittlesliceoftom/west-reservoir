@@ -567,8 +567,6 @@ def main():
             air_temps_hist = cached_load_historical_air_temps(start_date, end_date)
             hourly_air_temps = cached_load_hourly_air_temps(start_date, end_date)
 
-            # Fill missing daily temps from hourly data
-
             temperatures = build_temperatures_frame(water_temps, air_temps_hist)
 
             # Add forecast with 3-hourly data
@@ -679,9 +677,6 @@ def main():
 
             # Step 3: Load hourly air temperatures (for model)
             hourly_air_temps = cached_load_hourly_air_temps(start_date, end_date)
-
-            # Step 3b: Fill missing daily temps from hourly data
-            # (Daily API has ~2 day lag, but hourly is more current)
 
             # Steps 4 and 5: Merge into the main temperatures DataFrame and
             # mark each row MEASURED or AIR_ONLY
