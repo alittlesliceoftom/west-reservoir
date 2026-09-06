@@ -682,6 +682,53 @@ def create_horizon_accuracy_chart(
     return fig
 
 
+DEFAULT_VIEW_DAYS = 30
+
+
+def _add_range_slider(fig: go.Figure, series: list) -> None:
+    """
+    Add a range slider and open the chart on the last month of data.
+
+    The full series stays loaded - the slider scrubs back through it - so the
+    outage band and the year of history before it remain reachable without a
+    reload.
+
+    The y-axis is fitted to the opening window rather than the whole series:
+    water temperature spans about 0.8 to 27.3 C across the record, so a
+    full-range y-axis would squash a month of summer readings into the top
+    third of the chart. Plotly does not rescale y when the slider moves, so
+    dragging back to a colder period may need a double-click to reset the axes.
+
+    Args:
+        fig: Figure to modify.
+        series: List of (x, y) pairs to consider when sizing the axes.
+    """
+    all_x = pd.concat([pd.Series(x) for x, _ in series]).dropna()
+    if all_x.empty:
+        return
+
+    last = pd.Timestamp(all_x.max())
+    window_start = last - pd.Timedelta(days=DEFAULT_VIEW_DAYS)
+
+    fig.update_xaxes(
+        rangeslider=dict(visible=True, thickness=0.08),
+        range=[window_start, last],
+    )
+
+    visible = []
+    for x, y in series:
+        x, y = pd.Series(list(x)), pd.Series(list(y))
+        visible.append(y[(pd.to_datetime(x) >= window_start) & y.notna()])
+
+    values = pd.concat(visible).dropna() if visible else pd.Series(dtype=float)
+    if values.empty:
+        return
+
+    low, high = float(values.min()), float(values.max())
+    pad = max((high - low) * 0.1, 0.5)
+    fig.update_yaxes(range=[low - pad, high + pad])
+
+
 def _shade_meteostat_outage(fig: go.Figure, last_date) -> None:
     """
     Shade the window in which historical air temperature was interpolated.
@@ -768,8 +815,12 @@ def create_forecast_vs_actual_chart(
 
     fig.update_layout(
         xaxis_title="Date", yaxis_title="Water temperature (C)",
-        height=400, hovermode="x unified", margin=dict(t=30),
+        height=440, hovermode="x unified", margin=dict(t=30),
     )
+    _add_range_slider(fig, [
+        (measured_x, measured_y),
+        (scored["target_date"], scored["forecast_temp"]),
+    ])
     return fig
 
 
@@ -789,8 +840,9 @@ def create_error_over_time_chart(
 
     fig.update_layout(
         xaxis_title="Date", yaxis_title="Forecast - actual (C)",
-        height=320, showlegend=False, margin=dict(t=30),
+        height=360, showlegend=False, margin=dict(t=30),
     )
+    _add_range_slider(fig, [(scored["target_date"], scored["error"])])
     return fig
 
 
