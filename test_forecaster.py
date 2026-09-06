@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from datetime import datetime, timedelta
 
-from forecaster import WaterTempForecaster
+from forecaster import WaterTempForecaster, WEATHER_COLUMNS
 
 
 def _make_hourly_weather(
@@ -76,17 +76,6 @@ class TestSetHourlyWeather:
         bad = pd.DataFrame({"datetime": [datetime(2026, 1, 1)], "air_temp": [10.0]})
         with pytest.raises(ValueError, match="shortwave_radiation"):
             f.set_hourly_weather(bad)
-
-    def test_legacy_air_only_accepts(self):
-        f = WaterTempForecaster()
-        air_only = pd.DataFrame({
-            "datetime": [datetime(2026, 1, 1, 7), datetime(2026, 1, 1, 8)],
-            "air_temp": [10.0, 11.0],
-        })
-        f.set_hourly_air_temps(air_only)
-        assert f.hourly_weather is not None
-        assert (f.hourly_weather["shortwave_radiation"] == 0.0).all()
-        assert (f.hourly_weather["cloud_cover"] == 100.0).all()
 
 
 class TestSimulatePeriod:
@@ -480,3 +469,51 @@ class TestPredictForwardArguments:
         f = self._fitted()
         result = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, target_dates=[])
         assert result.empty
+
+
+class TestSimulatePeriodDirection:
+    """
+    Directional physics checks, ported from test_data.py::TestForecaster when
+    the legacy _simulate_24h list API was removed. Air conduction only, so
+    solar and cooling are zeroed to isolate it.
+    """
+
+    def _air_only(self, air_temp, n_hours=24):
+        return _make_hourly_weather(
+            datetime(2026, 1, 1, 7), n_hours,
+            air_temp=air_temp, shortwave=0.0, cloud=100.0,
+        )[list(WEATHER_COLUMNS)]
+
+    def test_no_change_when_air_equals_water(self):
+        f = WaterTempForecaster(k_air=0.02, k_solar=0.0, k_cool=0.0)
+        result = f._simulate_period(10.0, self._air_only(10.0))
+        assert result == pytest.approx(10.0)
+
+    def test_warms_towards_warmer_air(self):
+        f = WaterTempForecaster(k_air=0.02, k_solar=0.0, k_cool=0.0)
+        result = f._simulate_period(10.0, self._air_only(15.0))
+        assert 10.0 < result < 15.0
+
+    def test_cools_towards_cooler_air(self):
+        f = WaterTempForecaster(k_air=0.02, k_solar=0.0, k_cool=0.0)
+        result = f._simulate_period(10.0, self._air_only(5.0))
+        assert 5.0 < result < 10.0
+
+
+class TestExplainPredictionEmpty:
+    """Ported from test_data.py: an empty period explains as a no-op."""
+
+    def test_empty_weather_slice_returns_zero_hours(self):
+        f = WaterTempForecaster(k_air=0.02)
+        result = f.explain_prediction(
+            12.0, pd.DataFrame(columns=list(WEATHER_COLUMNS))
+        )
+        assert result["hours_simulated"] == 0
+        assert result["predicted_water_temp"] == pytest.approx(12.0)
+        assert result["hourly_breakdown"] == []
+
+    def test_none_weather_slice_returns_zero_hours(self):
+        f = WaterTempForecaster(k_air=0.02)
+        result = f.explain_prediction(12.0, None)
+        assert result["hours_simulated"] == 0
+        assert result["predicted_water_temp"] == pytest.approx(12.0)
