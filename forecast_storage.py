@@ -12,6 +12,37 @@ class ForecastStorageError(Exception):
     pass
 
 
+# Selects the final forecast run of each creation day.
+#
+# rank(), not row_number(): one run is MANY rows sharing a single
+# forecast_created_timestamp (one per target date). row_number() would keep
+# only one of them and silently drop the rest of the horizons.
+#
+# The horizon filter is load-bearing: water_temp_predictions also holds rows
+# targeting dates BEFORE the run (historical backfill written alongside real
+# forecasts). Those are not forecasts and must never be scored.
+LAST_WATER_RUN_PER_DAY_SQL = """
+    WITH ranked AS (
+        SELECT *,
+            rank() OVER (
+                PARTITION BY forecast_created_date
+                ORDER BY forecast_created_timestamp DESC
+            ) AS run_rank
+        FROM water_temp_predictions
+        WHERE date_diff('day', forecast_created_date, target_date) BETWEEN 0 AND ?
+    )
+    SELECT
+        forecast_created_date,
+        forecast_created_timestamp,
+        target_date,
+        water_temp AS forecast_temp,
+        date_diff('day', forecast_created_date, target_date) AS horizon_days
+    FROM ranked
+    WHERE run_rank = 1
+    ORDER BY target_date, horizon_days
+"""
+
+
 class ForecastStorage:
     """Handles storage and retrieval of forecasts in MotherDuck."""
 
@@ -312,6 +343,37 @@ class ForecastStorage:
 
         # MotherDuck returns timezone-aware timestamps, but our local data is naive
         result["datetime"] = pd.to_datetime(result["datetime"]).dt.tz_localize(None)
+
+        return result
+
+    def get_water_predictions_last_run_per_day(
+        self, max_horizon: int = 5
+    ) -> pd.DataFrame:
+        """
+        Retrieve stored water-temp forecasts, one run per creation day.
+
+        Uses the final run of each creation day - the forecast a user would
+        have seen at end of day.
+
+        Args:
+            max_horizon: Largest days-ahead horizon to return.
+
+        Returns:
+            DataFrame: forecast_created_date, forecast_created_timestamp,
+                       target_date, forecast_temp, horizon_days
+        """
+        conn = self._get_connection()
+        result = conn.execute(LAST_WATER_RUN_PER_DAY_SQL, [max_horizon]).fetchdf()
+
+        if result.empty:
+            return result
+
+        # MotherDuck returns timezone-aware timestamps, but our local data is naive
+        result["forecast_created_timestamp"] = pd.to_datetime(
+            result["forecast_created_timestamp"]
+        ).dt.tz_localize(None)
+        result["forecast_created_date"] = pd.to_datetime(result["forecast_created_date"])
+        result["target_date"] = pd.to_datetime(result["target_date"])
 
         return result
 
