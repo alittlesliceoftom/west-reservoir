@@ -759,7 +759,10 @@ def _shade_meteostat_outage(fig: go.Figure, last_date) -> None:
         annotation_text=(
             "Missing up-to-date weather data - accuracy affected (issue #33)"
         ),
-        annotation_position="top left",
+        # Right edge, not left: the band starts 2026-03-20, which is outside
+        # the default last-30-days view, so a left-anchored label is invisible
+        # until you scrub back.
+        annotation_position="top right",
         annotation=dict(font_size=11, font_color="#d62728"),
     )
 
