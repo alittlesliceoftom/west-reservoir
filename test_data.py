@@ -2,15 +2,36 @@
 
 import pytest
 import pandas as pd
+import requests
 from datetime import datetime, timedelta
+from unittest.mock import patch, MagicMock
 
+from config import ConfigError
 from data import (
     build_hourly_weather,
     combine_hourly_temps,
     interpolate_to_hourly,
+    load_forecast_air_temps,
+    load_forecast_solar_cloud,
+    load_historical_air_temps,
+    load_historical_solar_cloud,
+    load_hourly_air_temps,
+    load_water_temps,
+    _parse_open_meteo_hourly,
     DataLoadError,
 )
 from forecaster import WaterTempForecaster
+
+
+def _response(payload=None, text=None):
+    """A requests response mock that raises nothing."""
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    if payload is not None:
+        resp.json.return_value = payload
+    if text is not None:
+        resp.text = text
+    return resp
 
 
 class TestInterpolateToHourly:
@@ -720,3 +741,405 @@ class TestStoredSolarCloudFeedsTheModel:
         assert len(weather) == 6
         assert (weather["shortwave_radiation"] == 0.0).all()
         assert (weather["cloud_cover"] == 100.0).all()
+
+
+# ---------------------------------------------------------------------------
+# Loaders, mocked at the HTTP boundary.
+#
+# These four functions are what issue #33 came through: Meteostat moved
+# hosting, left the old endpoint serving a five-month-old snapshot, and the
+# dashboard rendered it without complaint for five months. test_data_freshness
+# asks the live sources whether they are current; nothing asked whether these
+# functions parse a response correctly or turn a failed request into a
+# DataLoadError, because they had no offline coverage at all.
+# ---------------------------------------------------------------------------
+
+
+class TestLoadWaterTemps:
+    """Google Sheets CSV: the manual measurement record."""
+
+    CSV = "Date,Temperature\n01/05/2026,12.5\n02/05/2026,13.0\n"
+
+    @patch("data.requests.get")
+    def test_parses_day_first_dates_and_sorts(self, mock_get):
+        """
+        The sheet is DD/MM/YYYY. Parsed month-first, 02/05 becomes 5 February
+        and the whole record silently reorders itself by four months.
+        """
+        mock_get.return_value = _response(text=self.CSV)
+
+        df = load_water_temps()
+
+        assert list(df.columns) == ["date", "water_temp"]
+        assert df["date"].iloc[0] == pd.Timestamp("2026-05-01")
+        assert df["date"].iloc[1] == pd.Timestamp("2026-05-02")
+        assert df["water_temp"].iloc[0] == pytest.approx(12.5)
+        assert df["date"].is_monotonic_increasing
+
+    @patch("data.requests.get")
+    def test_extra_columns_are_dropped_not_misread(self, mock_get):
+        """The sheet grows columns; the first two are the contract."""
+        mock_get.return_value = _response(
+            text="Date,Temperature,Notes\n01/05/2026,12.5,choppy\n"
+        )
+
+        df = load_water_temps()
+
+        assert list(df.columns) == ["date", "water_temp"]
+        assert df["water_temp"].iloc[0] == pytest.approx(12.5)
+
+    @patch("data.requests.get")
+    def test_unparseable_rows_are_dropped(self, mock_get):
+        mock_get.return_value = _response(
+            text="Date,Temperature\n01/05/2026,12.5\nnot-a-date,oops\n"
+        )
+
+        df = load_water_temps()
+
+        assert len(df) == 1
+
+    @patch("data.requests.get")
+    def test_a_single_column_sheet_is_an_error_not_a_guess(self, mock_get):
+        mock_get.return_value = _response(text="Date\n01/05/2026\n")
+
+        with pytest.raises(DataLoadError, match="at least 2 columns"):
+            load_water_temps()
+
+    @patch("data.requests.get")
+    def test_no_valid_rows_raises_rather_than_returning_empty(self, mock_get):
+        """An empty frame downstream looks like "no swimming yet", not a fault."""
+        mock_get.return_value = _response(
+            text="Date,Temperature\nnot-a-date,oops\n"
+        )
+
+        with pytest.raises(DataLoadError, match="No valid water temperature data"):
+            load_water_temps()
+
+    @patch("data.requests.get")
+    def test_timeout_wraps_in_dataloaderror(self, mock_get):
+        mock_get.side_effect = requests.exceptions.Timeout()
+
+        with pytest.raises(DataLoadError, match="timed out"):
+            load_water_temps()
+
+    @patch("data.requests.get")
+    def test_http_error_wraps_in_dataloaderror(self, mock_get):
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = requests.exceptions.HTTPError("500")
+        mock_get.return_value = resp
+
+        with pytest.raises(DataLoadError, match="Failed to fetch data from Google Sheets"):
+            load_water_temps()
+
+
+class TestLoadHistoricalAirTemps:
+    """Open-Meteo archive, daily. The replacement for the feed that died."""
+
+    def _payload(self):
+        return {
+            "daily": {
+                "time": ["2026-05-01", "2026-05-02"],
+                "temperature_2m_mean": [14.0, 15.0],
+                "temperature_2m_min": [10.0, 11.0],
+                "temperature_2m_max": [18.0, 19.0],
+            }
+        }
+
+    @patch("data.requests.get")
+    def test_parses_daily_block_and_hits_the_archive_endpoint(self, mock_get):
+        mock_get.return_value = _response(payload=self._payload())
+
+        df = load_historical_air_temps(datetime(2026, 5, 1), datetime(2026, 5, 2))
+
+        assert list(df.columns) == ["date", "air_temp", "air_temp_min", "air_temp_max"]
+        assert len(df) == 2
+        assert df["air_temp"].iloc[0] == pytest.approx(14.0)
+        assert df["air_temp_max"].iloc[1] == pytest.approx(19.0)
+
+        assert "archive-api.open-meteo.com" in mock_get.call_args[0][0]
+        params = mock_get.call_args[1]["params"]
+        assert params["start_date"] == "2026-05-01"
+        assert params["end_date"] == "2026-05-02"
+
+    @patch("data.requests.get")
+    def test_missing_daily_block_errors(self, mock_get):
+        mock_get.return_value = _response(payload={"reason": "out of bounds"})
+
+        with pytest.raises(DataLoadError, match="missing 'daily'"):
+            load_historical_air_temps(datetime(2026, 5, 1), datetime(2026, 5, 2))
+
+    @patch("data.requests.get")
+    def test_missing_required_field_errors(self, mock_get):
+        payload = self._payload()
+        del payload["daily"]["temperature_2m_min"]
+        mock_get.return_value = _response(payload=payload)
+
+        with pytest.raises(DataLoadError, match="temperature_2m_min"):
+            load_historical_air_temps(datetime(2026, 5, 1), datetime(2026, 5, 2))
+
+    @patch("data.requests.get")
+    def test_all_null_temperatures_raise_rather_than_returning_empty(self, mock_get):
+        """
+        This is exactly the #33 shape: a 200 response carrying no data.
+        Returning empty here lets the dashboard render a hole as a gap.
+        """
+        payload = self._payload()
+        payload["daily"]["temperature_2m_mean"] = [None, None]
+        mock_get.return_value = _response(payload=payload)
+
+        with pytest.raises(DataLoadError, match="no valid daily temperatures"):
+            load_historical_air_temps(datetime(2026, 5, 1), datetime(2026, 5, 2))
+
+    @patch("data.requests.get")
+    def test_timeout_wraps_in_dataloaderror(self, mock_get):
+        mock_get.side_effect = requests.exceptions.Timeout()
+
+        with pytest.raises(DataLoadError, match="timed out"):
+            load_historical_air_temps(datetime(2026, 5, 1), datetime(2026, 5, 2))
+
+    @patch("data.requests.get")
+    def test_http_error_wraps_in_dataloaderror(self, mock_get):
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = requests.exceptions.HTTPError("503")
+        mock_get.return_value = resp
+
+        with pytest.raises(DataLoadError, match="Failed to fetch historical air temps"):
+            load_historical_air_temps(datetime(2026, 5, 1), datetime(2026, 5, 2))
+
+
+class TestLoadHourlyAirTemps:
+    """Open-Meteo archive, hourly. Feeds the model directly."""
+
+    def _payload(self):
+        return {
+            "hourly": {
+                "time": ["2026-05-01T00:00", "2026-05-01T01:00"],
+                "temperature_2m": [14.0, 14.5],
+            }
+        }
+
+    @patch("data.requests.get")
+    def test_parses_and_renames_temperature_2m_to_air_temp(self, mock_get):
+        """Everything downstream indexes 'air_temp'; the rename is the contract."""
+        mock_get.return_value = _response(payload=self._payload())
+
+        df = load_hourly_air_temps(datetime(2026, 5, 1), datetime(2026, 5, 1))
+
+        assert list(df.columns) == ["datetime", "air_temp"]
+        assert df["air_temp"].iloc[1] == pytest.approx(14.5)
+        assert df["datetime"].iloc[0] == pd.Timestamp("2026-05-01 00:00")
+
+        params = mock_get.call_args[1]["params"]
+        assert params["hourly"] == "temperature_2m"
+
+    @patch("data.requests.get")
+    def test_missing_hourly_block_errors(self, mock_get):
+        mock_get.return_value = _response(payload={"reason": "no data"})
+
+        with pytest.raises(DataLoadError, match="missing 'hourly'"):
+            load_hourly_air_temps(datetime(2026, 5, 1), datetime(2026, 5, 1))
+
+    @patch("data.requests.get")
+    def test_timeout_wraps_in_dataloaderror(self, mock_get):
+        mock_get.side_effect = requests.exceptions.Timeout()
+
+        with pytest.raises(DataLoadError, match="timed out"):
+            load_hourly_air_temps(datetime(2026, 5, 1), datetime(2026, 5, 1))
+
+    @patch("data.requests.get")
+    def test_http_error_wraps_in_dataloaderror(self, mock_get):
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = requests.exceptions.HTTPError("500")
+        mock_get.return_value = resp
+
+        with pytest.raises(DataLoadError, match="Failed to fetch hourly air temps"):
+            load_hourly_air_temps(datetime(2026, 5, 1), datetime(2026, 5, 1))
+
+
+class TestLoadForecastAirTemps:
+    """
+    OpenWeatherMap 3-hourly readings, aggregated to daily.
+
+    Dates are deliberately not asserted: the loader uses
+    datetime.fromtimestamp, which is local-time, so the day an epoch falls on
+    depends on the machine.
+    """
+
+    def _payload(self, temps):
+        # One day's worth of 3-hourly readings, all on the same local day.
+        base = 1777000000
+        return {"list": [
+            {"dt": base + i * 3600, "main": {"temp": t}}
+            for i, t in enumerate(temps)
+        ]}
+
+    @patch("data.get_openweather_api_key", return_value="key")
+    @patch("data.requests.get")
+    def test_aggregates_a_day_to_mean_min_and_max(self, mock_get, _key):
+        mock_get.return_value = _response(payload=self._payload([10.0, 14.0, 12.0]))
+
+        df = load_forecast_air_temps(days=1)
+
+        assert list(df.columns) == ["date", "air_temp", "air_temp_min", "air_temp_max"]
+        assert len(df) == 1
+        assert df["air_temp"].iloc[0] == pytest.approx(12.0)
+        assert df["air_temp_min"].iloc[0] == pytest.approx(10.0)
+        assert df["air_temp_max"].iloc[0] == pytest.approx(14.0)
+
+    @patch("data.get_openweather_api_key", return_value="key")
+    @patch("data.requests.get")
+    def test_request_count_is_capped_at_the_free_tier_limit(self, mock_get, _key):
+        """The free tier returns 40 readings; asking for more is an error there."""
+        mock_get.return_value = _response(payload=self._payload([10.0]))
+
+        load_forecast_air_temps(days=99)
+
+        assert mock_get.call_args[1]["params"]["cnt"] == 40
+
+    @patch("data.get_openweather_api_key", return_value="key")
+    @patch("data.requests.get")
+    def test_response_without_a_list_block_errors(self, mock_get, _key):
+        mock_get.return_value = _response(payload={"message": "Invalid API key"})
+
+        with pytest.raises(DataLoadError, match="Invalid response from OpenWeatherMap"):
+            load_forecast_air_temps(days=5)
+
+    @patch("data.get_openweather_api_key", side_effect=ConfigError("no key"))
+    def test_missing_api_key_surfaces_as_a_dataloaderror(self, _key):
+        """
+        Callers catch DataLoadError. A ConfigError escaping here would take
+        the dashboard down instead of showing the historical-only message.
+        """
+        with pytest.raises(DataLoadError, match="no key"):
+            load_forecast_air_temps(days=5)
+
+    @patch("data.get_openweather_api_key", return_value="key")
+    @patch("data.requests.get")
+    def test_timeout_wraps_in_dataloaderror(self, mock_get, _key):
+        mock_get.side_effect = requests.exceptions.Timeout()
+
+        with pytest.raises(DataLoadError, match="timed out"):
+            load_forecast_air_temps(days=5)
+
+    @patch("data.get_openweather_api_key", return_value="key")
+    @patch("data.requests.get")
+    def test_http_error_wraps_in_dataloaderror(self, mock_get, _key):
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = requests.exceptions.HTTPError("401")
+        mock_get.return_value = resp
+
+        with pytest.raises(DataLoadError, match="Failed to fetch forecast"):
+            load_forecast_air_temps(days=5)
+
+
+# ---------------------------------------------------------------------------
+# Open-Meteo solar/cloud, moved here verbatim from test_open_meteo.py.
+#
+# Kept in full: this is the only coverage of _parse_open_meteo_hourly,
+# load_historical_solar_cloud and load_forecast_solar_cloud.
+# ---------------------------------------------------------------------------
+
+
+def _good_solar_payload():
+    return {
+        "hourly": {
+            "time": [
+                "2026-01-01T00:00",
+                "2026-01-01T01:00",
+                "2026-01-01T02:00",
+            ],
+            "shortwave_radiation": [0.0, 0.0, 0.0],
+            "cloud_cover": [80, 75, 60],
+        }
+    }
+
+
+class TestParseOpenMeteoHourly:
+    def test_parses_happy_path(self):
+        df = _parse_open_meteo_hourly(_good_solar_payload())
+        assert list(df.columns) == ["datetime", "shortwave_radiation", "cloud_cover"]
+        assert len(df) == 3
+        assert df["cloud_cover"].iloc[1] == 75
+        assert df["datetime"].is_monotonic_increasing
+
+    def test_missing_hourly_block_errors(self):
+        with pytest.raises(DataLoadError, match="missing 'hourly'"):
+            _parse_open_meteo_hourly({"reason": "no data"})
+
+    def test_missing_field_errors(self):
+        payload = {"hourly": {"time": ["2026-01-01T00:00"], "shortwave_radiation": [0]}}
+        with pytest.raises(DataLoadError, match="cloud_cover"):
+            _parse_open_meteo_hourly(payload)
+
+    def test_drops_nan_rows(self):
+        payload = {
+            "hourly": {
+                "time": ["2026-01-01T00:00", "2026-01-01T01:00"],
+                "shortwave_radiation": [100.0, None],
+                "cloud_cover": [50, 60],
+            }
+        }
+        df = _parse_open_meteo_hourly(payload)
+        assert len(df) == 1
+
+    def test_all_nan_raises(self):
+        payload = {
+            "hourly": {
+                "time": ["2026-01-01T00:00"],
+                "shortwave_radiation": [None],
+                "cloud_cover": [None],
+            }
+        }
+        with pytest.raises(DataLoadError, match="no valid"):
+            _parse_open_meteo_hourly(payload)
+
+
+class TestLoadHistoricalSolarCloud:
+    @patch("data.requests.get")
+    def test_calls_archive_endpoint(self, mock_get):
+        mock_get.return_value = _response(payload=_good_solar_payload())
+
+        df = load_historical_solar_cloud(datetime(2026, 1, 1), datetime(2026, 1, 2))
+
+        assert len(df) == 3
+        assert "archive-api.open-meteo.com" in mock_get.call_args[0][0]
+        params = mock_get.call_args[1]["params"]
+        assert params["start_date"] == "2026-01-01"
+        assert params["end_date"] == "2026-01-02"
+        assert "shortwave_radiation" in params["hourly"]
+        assert "cloud_cover" in params["hourly"]
+
+    @patch("data.requests.get")
+    def test_timeout_wraps_in_dataloaderror(self, mock_get):
+        mock_get.side_effect = requests.exceptions.Timeout()
+        with pytest.raises(DataLoadError, match="timed out"):
+            load_historical_solar_cloud(datetime(2026, 1, 1), datetime(2026, 1, 2))
+
+    @patch("data.requests.get")
+    def test_http_error_wraps_in_dataloaderror(self, mock_get):
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = requests.exceptions.HTTPError("500")
+        mock_get.return_value = resp
+        with pytest.raises(DataLoadError, match="Failed to fetch"):
+            load_historical_solar_cloud(datetime(2026, 1, 1), datetime(2026, 1, 2))
+
+
+class TestLoadForecastSolarCloud:
+    @patch("data.requests.get")
+    def test_calls_forecast_endpoint(self, mock_get):
+        mock_get.return_value = _response(payload=_good_solar_payload())
+
+        df = load_forecast_solar_cloud(days=5)
+
+        assert len(df) == 3
+        called_url = mock_get.call_args[0][0]
+        assert "api.open-meteo.com" in called_url
+        assert "forecast" in called_url
+        assert mock_get.call_args[1]["params"]["forecast_days"] == 5
+
+    @patch("data.requests.get")
+    def test_empty_hourly_raises(self, mock_get):
+        mock_get.return_value = _response(payload={"reason": "out of bounds"})
+
+        with pytest.raises(DataLoadError):
+            load_forecast_solar_cloud(days=5)
