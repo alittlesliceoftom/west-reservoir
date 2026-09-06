@@ -67,6 +67,28 @@ LAST_AIR_RUN_PER_DAY_SQL = """
 """
 
 
+# Final hourly solar/cloud forecast run of each creation day, all rows of it.
+# Same shape and same rank() reasoning as the air query above.
+LAST_SOLAR_CLOUD_RUN_PER_DAY_SQL = """
+    WITH ranked AS (
+        SELECT
+            CAST(forecast_created_timestamp AS DATE) AS forecast_created_date,
+            target_datetime,
+            shortwave_radiation,
+            cloud_cover,
+            rank() OVER (
+                PARTITION BY CAST(forecast_created_timestamp AS DATE)
+                ORDER BY forecast_created_timestamp DESC
+            ) AS run_rank
+        FROM solar_cloud_forecasts_hourly
+    )
+    SELECT forecast_created_date, target_datetime, shortwave_radiation, cloud_cover
+    FROM ranked
+    WHERE run_rank = 1
+    ORDER BY forecast_created_date, target_datetime
+"""
+
+
 class ForecastStorage:
     """Handles storage and retrieval of forecasts in MotherDuck."""
 
@@ -146,6 +168,24 @@ class ForecastStorage:
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_forecast_3h_target
             ON air_temp_forecasts_3hourly(target_datetime, forecast_created_timestamp)
+        """)
+
+        # Hourly, not 3-hourly: Open-Meteo returns hourly natively, so nothing
+        # needs interpolating on the way in.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS solar_cloud_forecasts_hourly (
+                forecast_created_timestamp TIMESTAMP NOT NULL,
+                target_datetime TIMESTAMP NOT NULL,
+                shortwave_radiation DOUBLE NOT NULL,
+                cloud_cover DOUBLE NOT NULL,
+                source VARCHAR DEFAULT 'Open-Meteo',
+                PRIMARY KEY (forecast_created_timestamp, target_datetime)
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_solar_cloud_target
+            ON solar_cloud_forecasts_hourly(target_datetime, forecast_created_timestamp)
         """)
 
     def store_air_forecast(
@@ -286,6 +326,79 @@ class ForecastStorage:
                 pass  # Silently ignore duplicates
             else:
                 raise ForecastStorageError(f"Failed to store 3-hourly air forecast: {e}")
+
+    def store_solar_cloud_forecast(
+        self,
+        forecast_df: pd.DataFrame,
+        forecast_created_timestamp: datetime
+    ) -> None:
+        """
+        Store the hourly solar radiation and cloud cover forecast.
+
+        Stored so backtests can feed the model the solar/cloud forecast it
+        actually had, rather than what actually happened. Until this has been
+        accumulating, replay results are an optimistic bound (issue #29).
+
+        Args:
+            forecast_df: DataFrame with columns: datetime, shortwave_radiation,
+                         cloud_cover
+            forecast_created_timestamp: When this forecast was fetched
+        """
+        if forecast_df is None or forecast_df.empty:
+            return
+
+        conn = self._get_connection()
+
+        forecast_to_store = forecast_df.copy()
+        # Truncate to hour so the PK naturally deduplicates within each hour
+        forecast_created_hour = forecast_created_timestamp.replace(minute=0, second=0, microsecond=0)
+        forecast_to_store['forecast_created_timestamp'] = forecast_created_hour
+        forecast_to_store['target_datetime'] = forecast_to_store['datetime']
+        forecast_to_store['source'] = 'Open-Meteo'
+
+        forecast_to_store = forecast_to_store[[
+            'forecast_created_timestamp',
+            'target_datetime',
+            'shortwave_radiation',
+            'cloud_cover',
+            'source'
+        ]]
+
+        try:
+            conn.execute("""
+                INSERT INTO solar_cloud_forecasts_hourly
+                SELECT * FROM forecast_to_store
+            """)
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "primary key" in err_msg or "unique" in err_msg or "duplicate" in err_msg:
+                pass  # Likely duplicate key - not a critical error
+            else:
+                raise ForecastStorageError(f"Failed to store solar/cloud forecast: {e}")
+
+    def get_solar_cloud_forecasts_last_run_per_day(self) -> pd.DataFrame:
+        """
+        Retrieve every stored solar/cloud forecast, one run per creation day.
+
+        Fetched in bulk for the same reason as the air forecasts: the replay
+        covers hundreds of anchors, so per-anchor queries are not an option.
+
+        Returns:
+            DataFrame: forecast_created_date, target_datetime,
+                       shortwave_radiation, cloud_cover
+        """
+        conn = self._get_connection()
+        result = conn.execute(LAST_SOLAR_CLOUD_RUN_PER_DAY_SQL).fetchdf()
+
+        if result.empty:
+            return result
+
+        result["forecast_created_date"] = pd.to_datetime(result["forecast_created_date"])
+        result["target_datetime"] = pd.to_datetime(
+            result["target_datetime"]
+        ).dt.tz_localize(None)
+
+        return result
 
     def get_forecast_for_date(self, target_date: datetime) -> Optional[pd.DataFrame]:
         """

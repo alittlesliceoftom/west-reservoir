@@ -14,8 +14,14 @@ from accuracy import (
     replay_current_model,
     splice_air_history,
 )
+from data import build_hourly_weather
 from forecaster import WaterTempForecaster
-from forecast_storage import LAST_AIR_RUN_PER_DAY_SQL, LAST_WATER_RUN_PER_DAY_SQL
+from forecast_storage import (
+    ForecastStorage,
+    LAST_AIR_RUN_PER_DAY_SQL,
+    LAST_SOLAR_CLOUD_RUN_PER_DAY_SQL,
+    LAST_WATER_RUN_PER_DAY_SQL,
+)
 
 
 def _local_predictions_db(rows):
@@ -593,3 +599,267 @@ class TestReplayCurrentModel:
         assert list(result.columns) == [
             "target_date", "horizon_days", "forecast_temp", "air_source"
         ]
+
+
+def _local_solar_db(rows):
+    """In-memory DuckDB with the solar_cloud_forecasts_hourly schema."""
+    conn = duckdb.connect(":memory:")
+    conn.execute("""
+        CREATE TABLE solar_cloud_forecasts_hourly (
+            forecast_created_timestamp TIMESTAMP NOT NULL,
+            target_datetime TIMESTAMP NOT NULL,
+            shortwave_radiation DOUBLE NOT NULL,
+            cloud_cover DOUBLE NOT NULL,
+            source VARCHAR DEFAULT 'Open-Meteo',
+            PRIMARY KEY (forecast_created_timestamp, target_datetime)
+        )
+    """)
+    for created_ts, target_dt, solar, cloud in rows:
+        conn.execute(
+            "INSERT INTO solar_cloud_forecasts_hourly VALUES (?, ?, ?, ?, 'Open-Meteo')",
+            [created_ts, target_dt, solar, cloud],
+        )
+    return conn
+
+
+class TestLastSolarCloudRunPerDay:
+    """The bulk query the replay uses: one run per creation day, all its rows."""
+
+    def test_picks_last_run_and_keeps_all_its_rows(self):
+        rows = [
+            (datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 0), 0.0, 90.0),
+            (datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 12), 500.0, 10.0),
+            (datetime(2026, 5, 1, 8), datetime(2026, 5, 2, 12), 999.0, 99.0),
+        ]
+        conn = _local_solar_db(rows)
+        result = conn.execute(LAST_SOLAR_CLOUD_RUN_PER_DAY_SQL).fetchdf()
+
+        assert len(result) == 2
+        assert 999.0 not in list(result["shortwave_radiation"])
+
+    def test_carries_both_measures(self):
+        rows = [(datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 12), 500.0, 10.0)]
+        conn = _local_solar_db(rows)
+        result = conn.execute(LAST_SOLAR_CLOUD_RUN_PER_DAY_SQL).fetchdf()
+
+        assert result.loc[0, "shortwave_radiation"] == pytest.approx(500.0)
+        assert result.loc[0, "cloud_cover"] == pytest.approx(10.0)
+
+    def test_groups_by_creation_date_not_timestamp(self):
+        rows = [
+            (datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 0), 0.0, 90.0),
+            (datetime(2026, 5, 2, 20), datetime(2026, 5, 3, 0), 0.0, 80.0),
+        ]
+        conn = _local_solar_db(rows)
+        result = conn.execute(LAST_SOLAR_CLOUD_RUN_PER_DAY_SQL).fetchdf()
+
+        assert len(result) == 2
+        assert sorted(
+            pd.to_datetime(result["forecast_created_date"]).dt.day
+        ) == [1, 2]
+
+    def test_rows_ordered_by_target_datetime(self):
+        rows = [
+            (datetime(2026, 5, 1, 20), datetime(2026, 5, 3, 0), 1.0, 50.0),
+            (datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 0), 2.0, 60.0),
+        ]
+        conn = _local_solar_db(rows)
+        result = conn.execute(LAST_SOLAR_CLOUD_RUN_PER_DAY_SQL).fetchdf()
+
+        assert list(result["shortwave_radiation"]) == [2.0, 1.0]
+
+
+class TestStoredSolarCloudFeedsTheModel:
+    """
+    Issue #29's acceptance test: a stored run can be read back and fed straight
+    into build_hourly_weather in place of the actuals.
+    """
+
+    def _air(self, start, hours):
+        return pd.DataFrame({
+            "datetime": [
+                pd.Timestamp(start) + pd.Timedelta(hours=i) for i in range(hours)
+            ],
+            "air_temp": [15.0] * hours,
+        })
+
+    def _solar(self, start, hours, radiation, cloud):
+        return pd.DataFrame({
+            "datetime": [
+                pd.Timestamp(start) + pd.Timedelta(hours=i) for i in range(hours)
+            ],
+            "shortwave_radiation": [radiation] * hours,
+            "cloud_cover": [cloud] * hours,
+        })
+
+    def test_stored_forecast_beats_actuals_on_overlap(self):
+        """The replay must use what the forecast had, not what happened."""
+        air = self._air("2026-05-01 07:00", 12)
+        actual = self._solar("2026-05-01 07:00", 12, radiation=900.0, cloud=0.0)
+        stored = self._solar("2026-05-01 07:00", 12, radiation=100.0, cloud=95.0)
+
+        weather = build_hourly_weather(air, actual, stored)
+
+        assert set(weather["shortwave_radiation"]) == {100.0}
+        assert set(weather["cloud_cover"]) == {95.0}
+
+    def test_actuals_fill_hours_the_stored_run_misses(self):
+        air = self._air("2026-05-01 07:00", 12)
+        actual = self._solar("2026-05-01 07:00", 12, radiation=900.0, cloud=0.0)
+        stored = self._solar("2026-05-01 13:00", 6, radiation=100.0, cloud=95.0)
+
+        weather = build_hourly_weather(air, actual, stored).set_index("datetime")
+
+        assert weather.loc[pd.Timestamp("2026-05-01 08:00"), "cloud_cover"] == 0.0
+        assert weather.loc[pd.Timestamp("2026-05-01 14:00"), "cloud_cover"] == 95.0
+
+    def test_model_output_differs_with_stored_versus_actual_solar(self):
+        """If swapping the source changed nothing, storing it would be pointless."""
+        air = self._air("2026-05-01 07:00", 25)
+        sunny = self._solar("2026-05-01 07:00", 25, radiation=900.0, cloud=0.0)
+        overcast = self._solar("2026-05-01 07:00", 25, radiation=50.0, cloud=100.0)
+
+        forecaster = WaterTempForecaster(k_air=0.01, k_solar=5e-4, k_cool=0.01)
+
+        forecaster.set_hourly_weather(build_hourly_weather(air, sunny, None))
+        with_sun = forecaster.predict_forward(
+            pd.Timestamp("2026-05-01"), 12.0, days_ahead=1
+        ).loc[0, "water_temp"]
+
+        forecaster.set_hourly_weather(build_hourly_weather(air, overcast, None))
+        with_cloud = forecaster.predict_forward(
+            pd.Timestamp("2026-05-01"), 12.0, days_ahead=1
+        ).loc[0, "water_temp"]
+
+        assert with_sun > with_cloud
+
+    def test_no_stored_run_falls_back_to_actuals(self):
+        air = self._air("2026-05-01 07:00", 12)
+        actual = self._solar("2026-05-01 07:00", 12, radiation=900.0, cloud=0.0)
+
+        weather = build_hourly_weather(air, actual, None)
+
+        assert set(weather["shortwave_radiation"]) == {900.0}
+
+
+class TestSolarCloudStorageRoundTrip:
+    """
+    Exercises the real ForecastStorage methods against a local DuckDB.
+
+    The SQL constants are tested above, but the methods around them - column
+    order, the hour truncation, duplicate swallowing, the tz treatment - are
+    where storage bugs actually live, and none of that is covered by testing
+    the SQL alone.
+    """
+
+    def _storage(self):
+        storage = ForecastStorage()
+        # Bypass MotherDuck: every method reads self._conn.
+        storage._conn = duckdb.connect(":memory:")
+        storage.initialize_schema()
+        return storage
+
+    def _forecast(self, start, hours):
+        return pd.DataFrame({
+            "datetime": [
+                pd.Timestamp(start) + pd.Timedelta(hours=i) for i in range(hours)
+            ],
+            "shortwave_radiation": [float(100 * i) for i in range(hours)],
+            "cloud_cover": [float(i) for i in range(hours)],
+        })
+
+    def test_stored_rows_come_back(self):
+        storage = self._storage()
+        storage.store_solar_cloud_forecast(
+            self._forecast("2026-09-07 00:00", 24), datetime(2026, 9, 6, 21, 43, 17)
+        )
+
+        result = storage.get_solar_cloud_forecasts_last_run_per_day()
+
+        assert len(result) == 24
+        assert list(result.columns) == [
+            "forecast_created_date", "target_datetime",
+            "shortwave_radiation", "cloud_cover",
+        ]
+
+    def test_creation_timestamp_is_truncated_to_the_hour(self):
+        """The PK dedupes within an hour only if the minutes are dropped."""
+        storage = self._storage()
+        storage.store_solar_cloud_forecast(
+            self._forecast("2026-09-07 00:00", 3), datetime(2026, 9, 6, 21, 43, 17)
+        )
+        stored = storage._conn.execute(
+            "SELECT DISTINCT forecast_created_timestamp FROM solar_cloud_forecasts_hourly"
+        ).fetchdf()
+
+        assert pd.Timestamp(stored.iloc[0, 0]) == pd.Timestamp("2026-09-06 21:00")
+
+    def test_storing_twice_in_the_same_hour_is_silently_ignored(self):
+        storage = self._storage()
+        forecast = self._forecast("2026-09-07 00:00", 5)
+
+        storage.store_solar_cloud_forecast(forecast, datetime(2026, 9, 6, 21, 0))
+        storage.store_solar_cloud_forecast(forecast, datetime(2026, 9, 6, 21, 30))
+
+        assert len(storage.get_solar_cloud_forecasts_last_run_per_day()) == 5
+
+    def test_a_later_run_supersedes_an_earlier_one_the_same_day(self):
+        storage = self._storage()
+        storage.store_solar_cloud_forecast(
+            self._forecast("2026-09-07 00:00", 3), datetime(2026, 9, 6, 8, 0)
+        )
+        late = self._forecast("2026-09-07 00:00", 3)
+        late["cloud_cover"] = 77.0
+        storage.store_solar_cloud_forecast(late, datetime(2026, 9, 6, 21, 0))
+
+        result = storage.get_solar_cloud_forecasts_last_run_per_day()
+
+        assert len(result) == 3
+        assert set(result["cloud_cover"]) == {77.0}
+
+    def test_empty_forecast_is_not_stored(self):
+        storage = self._storage()
+        storage.store_solar_cloud_forecast(
+            pd.DataFrame(columns=["datetime", "shortwave_radiation", "cloud_cover"]),
+            datetime(2026, 9, 6, 21, 0),
+        )
+
+        assert storage.get_solar_cloud_forecasts_last_run_per_day().empty
+
+    def test_none_forecast_is_not_stored(self):
+        storage = self._storage()
+        storage.store_solar_cloud_forecast(None, datetime(2026, 9, 6, 21, 0))
+
+        assert storage.get_solar_cloud_forecasts_last_run_per_day().empty
+
+    def test_empty_table_returns_empty_frame(self):
+        assert self._storage().get_solar_cloud_forecasts_last_run_per_day().empty
+
+    def test_round_trip_output_feeds_build_hourly_weather(self):
+        """Issue #29's acceptance criterion, end to end."""
+        storage = self._storage()
+        storage.store_solar_cloud_forecast(
+            self._forecast("2026-09-07 00:00", 24), datetime(2026, 9, 6, 21, 0)
+        )
+        run = storage.get_solar_cloud_forecasts_last_run_per_day()
+
+        air = pd.DataFrame({
+            "datetime": [
+                pd.Timestamp("2026-09-07 00:00") + pd.Timedelta(hours=i)
+                for i in range(24)
+            ],
+            "air_temp": [15.0] * 24,
+        })
+        weather = build_hourly_weather(
+            air,
+            None,
+            run[["target_datetime", "shortwave_radiation", "cloud_cover"]].rename(
+                columns={"target_datetime": "datetime"}
+            ),
+        )
+
+        assert len(weather) == 24
+        assert weather["shortwave_radiation"].max() == pytest.approx(2300.0)
+        # Straight into the model, no further massaging.
+        forecaster = WaterTempForecaster()
+        forecaster.set_hourly_weather(weather)
