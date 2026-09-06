@@ -637,6 +637,11 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
     return fig
 
 
+def _horizon_label(horizon: int) -> str:
+    """'1 day ahead', '2 days ahead', '0 days ahead' (same-day nowcast)."""
+    return f"{horizon} day{'' if horizon == 1 else 's'} ahead"
+
+
 def create_horizon_accuracy_chart(
     horizon_metrics: pd.DataFrame, selected_horizon: int
 ) -> go.Figure:
@@ -679,7 +684,7 @@ def create_forecast_vs_actual_chart(scored: pd.DataFrame, horizon: int) -> go.Fi
     ))
     fig.add_trace(go.Scatter(
         x=scored["target_date"], y=scored["forecast_temp"],
-        name=f"Forecast ({horizon} day ahead)", mode="lines+markers",
+        name=f"Forecast ({_horizon_label(horizon)})", mode="lines+markers",
         line=dict(color="#1f77b4", width=2, dash="dot"), marker=dict(size=5),
     ))
 
@@ -905,7 +910,7 @@ def main():
 
                     if not at_horizon.empty:
                         st.subheader(
-                            f"Forecast vs measured ({selected_horizon} days ahead)"
+                            f"Forecast vs measured ({_horizon_label(selected_horizon)})"
                         )
                         st.plotly_chart(
                             create_forecast_vs_actual_chart(
@@ -915,7 +920,7 @@ def main():
                         )
 
                         st.subheader(
-                            f"Error over time ({selected_horizon} days ahead)"
+                            f"Error over time ({_horizon_label(selected_horizon)})"
                         )
                         st.plotly_chart(
                             create_error_over_time_chart(at_horizon),
