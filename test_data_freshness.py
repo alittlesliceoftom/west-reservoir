@@ -53,7 +53,7 @@ MAX_LAG_DAYS = {
 }
 
 
-def _lag_days(latest) -> float:
+def _lag_days(latest) -> int:
     """Whole days between the latest datapoint and today."""
     now = pd.Timestamp.now().normalize()
     return (now - pd.Timestamp(latest).normalize()).days

@@ -86,10 +86,10 @@ def retrieve_gap_fill_forecasts(
 ) -> pd.DataFrame:
     """
     Retrieve stored 3-hourly forecasts from MotherDuck to fill the gap
-    between Meteostat historical data and live OWM forecast.
+    between the Open-Meteo archive and the live OWM forecast.
 
     Args:
-        hist_end: Last timestamp from Meteostat hourly data
+        hist_end: Last timestamp from the Open-Meteo hourly archive
         fore_start: First timestamp from OWM 3-hourly forecast
 
     Returns:
@@ -245,18 +245,18 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
             cutoff_past = now - timedelta(hours=48)
             cutoff_future = now + timedelta(hours=48)
 
-            # Historical: last 48h of hourly Meteostat data
+            # Historical: last 48h of hourly archive data
             past_hourly = hourly_air_temps[hourly_air_temps["datetime"] >= cutoff_past]
 
             fig = go.Figure()
 
-            # Meteostat hourly (solid red)
+            # Open-Meteo hourly archive (solid red)
             fig.add_trace(
                 go.Scatter(
                     x=past_hourly["datetime"],
                     y=past_hourly["air_temp"],
                     mode="lines",
-                    name="Historical (Meteostat hourly)",
+                    name="Historical (hourly archive)",
                     line=dict(color="red", width=1),
                 )
             )
@@ -422,7 +422,7 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
     )
 
     # Daily air temperature as whisker plot (min-avg-max)
-    # For past dates prefer Meteostat (historical), for today prefer forecast (Meteostat is partial day only)
+    # For past dates prefer the archive (historical), for today prefer forecast (the archive is partial day only)
     air_data = filtered[filtered["air_temp"].notna()].copy()
     past_air = air_data[air_data["date"].dt.date < today].drop_duplicates(subset=["date"], keep="first")
     today_air = air_data[air_data["date"].dt.date == today].drop_duplicates(subset=["date"], keep="last")
@@ -714,7 +714,7 @@ def main():
                 forecast_hourly = interpolate_to_hourly(forecast_3hourly)
 
                 # Step 6b: Retrieve stored forecasts from MotherDuck to fill the gap
-                # Gap is between: last Meteostat timestamp -> first OWM timestamp
+                # Gap is between: last archive timestamp -> first OWM timestamp
                 if ENABLE_MOTHERDUCK and not hourly_air_temps.empty and not forecast_3hourly.empty:
                     hist_end = hourly_air_temps["datetime"].max()
                     fore_start = forecast_3hourly["datetime"].min()
@@ -930,7 +930,7 @@ def main():
                 "Please check:\n"
                 "- Internet connection is working\n"
                 "- Google Sheets is accessible\n"
-                "- Meteostat service is available"
+                "- Open-Meteo service is available"
             )
             st.stop()
 
