@@ -659,11 +659,24 @@ def combine_hourly_temps(
     # gaps so fit() skips those periods instead of learning from a ruler.
     if not combined.empty:
         combined = combined.set_index("datetime").sort_index()
-        combined = combined.resample("h").interpolate(
-            method="linear", limit=MAX_INTERPOLATION_HOURS, limit_area="inside"
+        hourly = combined.resample("h").asfreq()
+
+        missing = hourly["air_temp"].isna()
+        # Length of the run of consecutive missing hours each row belongs to.
+        run_id = (missing != missing.shift()).cumsum()
+        run_length = missing.groupby(run_id).transform("sum")
+
+        filled = hourly["air_temp"].interpolate(method="linear", limit_area="inside")
+
+        # Fill a gap only if the WHOLE run is short enough. Passing `limit` to
+        # interpolate() is not equivalent: it fills that many hours inward from
+        # each edge, so a months-long outage still gets fabricated hours at its
+        # boundaries. The rule is per-gap, so it has to be applied per-gap.
+        hourly["air_temp"] = filled.where(
+            ~missing | (run_length <= MAX_INTERPOLATION_HOURS)
         )
-        combined = combined.reset_index()
-        combined = combined.dropna(subset=["air_temp"])
+
+        combined = hourly.reset_index().dropna(subset=["air_temp"])
 
     return combined
 
@@ -671,46 +684,6 @@ def combine_hourly_temps(
 # Priority when the same date appears more than once: a real measurement beats
 # an air-only row, which beats a prediction.
 SOURCE_PRIORITY = {"MEASURED": 0, "AIR_ONLY": 1, "PREDICTED": 2}
-
-DAILY_AIR_COLUMNS = ["date", "air_temp", "air_temp_min", "air_temp_max"]
-
-
-def fill_daily_from_hourly(
-    air_temps_daily: pd.DataFrame, hourly_air_temps: pd.DataFrame
-) -> pd.DataFrame:
-    """
-    Fill gaps in daily air temps using hourly data.
-
-    Both feeds come from the Open-Meteo archive and are equally current, but
-    the daily series can still have holes. Daily values win where they exist.
-
-    Args:
-        air_temps_daily: date, air_temp, air_temp_min, air_temp_max
-        hourly_air_temps: datetime, air_temp
-
-    Returns:
-        DataFrame: date, air_temp, air_temp_min, air_temp_max
-    """
-    if hourly_air_temps is None or hourly_air_temps.empty:
-        return air_temps_daily[DAILY_AIR_COLUMNS].dropna(subset=["air_temp"])
-
-    hourly_daily_stats = (
-        hourly_air_temps.assign(date=hourly_air_temps["datetime"].dt.normalize())
-        .groupby("date")["air_temp"]
-        .agg(["mean", "min", "max"])
-        .reset_index()
-    )
-    hourly_daily_stats.columns = [
-        "date", "air_temp_h", "air_temp_min_h", "air_temp_max_h"
-    ]
-    hourly_daily_stats["date"] = pd.to_datetime(hourly_daily_stats["date"])
-
-    merged = pd.merge(air_temps_daily, hourly_daily_stats, on="date", how="outer")
-    merged["air_temp"] = merged["air_temp"].fillna(merged["air_temp_h"])
-    merged["air_temp_min"] = merged["air_temp_min"].fillna(merged["air_temp_min_h"])
-    merged["air_temp_max"] = merged["air_temp_max"].fillna(merged["air_temp_max_h"])
-
-    return merged[DAILY_AIR_COLUMNS].dropna(subset=["air_temp"])
 
 
 def build_temperatures_frame(
