@@ -922,7 +922,7 @@ def main():
     simple physics model to predict future temperatures.
 
     The model simulates hour-by-hour heat transfer between air and water. Forecast
-    weather data from OpenWeatherMap and historic data from Meteostat inform the
+    weather data from OpenWeatherMap and historic data from Open-Meteo inform the
     predictions.
                 """
             )

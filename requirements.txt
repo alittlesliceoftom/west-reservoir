@@ -1,7 +1,7 @@
-streamlit==1.53.0
-pandas==2.1.4
-plotly==5.17.0
-requests==2.31.0
-scipy==1.11.4
-duckdb==1.4.4
-pytest==7.4.4
+streamlit==1.63.0
+pandas==3.0.5
+plotly==7.0.0
+requests==2.34.2
+scipy==1.18.1
+duckdb==1.5.5
+pytest==9.1.1
