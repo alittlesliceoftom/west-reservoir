@@ -149,6 +149,17 @@ def cached_replay(water_temps, coefficients, max_horizon: int = 5):
         else {}
     )
 
+    # Solar/cloud forecasts, stored from 2026-09-06 onward (issue #29). Anchors
+    # from before then have none, and fall back to actual solar/cloud - the
+    # remaining leak, and why replay numbers are an optimistic bound until this
+    # table has been accumulating for a while.
+    stored_solar = storage.get_solar_cloud_forecasts_last_run_per_day()
+    solar_runs_by_date = (
+        {date: group for date, group in stored_solar.groupby("forecast_created_date")}
+        if not stored_solar.empty
+        else {}
+    )
+
     start_date = pd.Timestamp(water_temps["date"].min()).normalize()
     end_date = pd.Timestamp.now().normalize()
 
@@ -192,7 +203,20 @@ def cached_replay(water_temps, coefficients, max_horizon: int = 5):
         if hourly_air.empty:
             return None, air_source
 
-        return build_hourly_weather(hourly_air, solar_hist, None), air_source
+        # Stored solar/cloud is passed as the forecast argument, so it wins on
+        # overlap and the actuals only fill hours it does not cover - the same
+        # precedence the live forecast had.
+        solar_run = solar_runs_by_date.get(anchor_date)
+        solar_forecast = (
+            solar_run[["target_datetime", "shortwave_radiation", "cloud_cover"]].rename(
+                columns={"target_datetime": "datetime"}
+            )
+            if solar_run is not None and not solar_run.empty
+            else None
+        )
+
+        weather = build_hourly_weather(hourly_air, solar_hist, solar_forecast)
+        return weather, air_source
 
     return replay_current_model(
         forecaster, water_temps, weather_provider, max_horizon=max_horizon
@@ -975,11 +999,13 @@ def main():
                 st.caption(
                     "Today's model re-run over history, using the air temperature "
                     "each forecast actually had available: measured up to the time "
-                    "the forecast was made, forecast after. Optimistic, because "
-                    "solar and cloud forecasts were never stored, so actual solar "
-                    "and cloud are used throughout. Points marked with a cross had "
-                    "no stored air forecast either and used measured air for the "
-                    "whole window."
+                    "the forecast was made, forecast after. Solar and cloud use "
+                    "the stored forecast where we have one - we only started "
+                    "keeping those on 2026-09-06 (issue #29), and dates before "
+                    "that fall back to actual solar and cloud, which the forecast "
+                    "never had. Read those as an optimistic bound. Points marked "
+                    "with a cross had no stored air forecast either and used "
+                    "measured air for the whole window."
                 )
                 horizon_options = [1, 2, 3, 4, 5]
             else:
@@ -1197,6 +1223,27 @@ def main():
                 solar_fore = cached_load_forecast_solar_cloud(days=5)
             except DataLoadError as e:
                 st.warning(f"Open-Meteo forecast solar/cloud unavailable: {e}")
+
+            # Store the solar/cloud forecast alongside the air forecast, so a
+            # backtest can feed the model what it actually had rather than what
+            # actually happened (issue #29). Reuses the air run's timestamp
+            # where there is one, so both halves join as a single forecast run.
+            if ENABLE_MOTHERDUCK and solar_fore is not None and not solar_fore.empty:
+                if st.session_state.get('last_solar_fetch_date') != datetime.now().date():
+                    try:
+                        storage = ForecastStorage()
+                        storage.initialize_schema()
+                        storage.store_solar_cloud_forecast(
+                            solar_fore,
+                            st.session_state.get(
+                                'last_forecast_timestamp', datetime.now()
+                            ),
+                        )
+                        st.session_state['last_solar_fetch_date'] = datetime.now().date()
+                    except ForecastStorageError as e:
+                        st.warning(f"Could not store solar/cloud forecast: {e}")
+                    except Exception as e:
+                        st.warning(f"Solar/cloud storage error: {e}")
 
             hourly_weather = build_hourly_weather(combined_hourly, solar_hist, solar_fore)
 
