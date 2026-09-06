@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 from datetime import datetime
 
-from accuracy import BIAS_NOTE, compute_metrics, metrics_by_horizon
+from accuracy import BIAS_NOTE, compute_metrics, join_actuals, metrics_by_horizon
 from forecast_storage import LAST_AIR_RUN_PER_DAY_SQL, LAST_WATER_RUN_PER_DAY_SQL
 
 
@@ -260,4 +260,100 @@ class TestMetricsByHorizon:
         assert result.empty
         assert list(result.columns) == [
             "horizon_days", "mae", "bias", "rmse", "hit_rate_0_5", "n"
+        ]
+
+
+class TestJoinActuals:
+
+    def _forecasts(self, rows):
+        """rows: list of (target_date, horizon_days, forecast_temp)."""
+        return pd.DataFrame({
+            "target_date": [pd.Timestamp(r[0]) for r in rows],
+            "horizon_days": [r[1] for r in rows],
+            "forecast_temp": [r[2] for r in rows],
+        })
+
+    def _measurements(self, rows):
+        """rows: list of (date, water_temp)."""
+        return pd.DataFrame({
+            "date": [pd.Timestamp(r[0]) for r in rows],
+            "water_temp": [r[1] for r in rows],
+        })
+
+    def test_inner_join_keeps_only_measured_days(self):
+        forecasts = self._forecasts([
+            (datetime(2026, 5, 1), 1, 11.0),
+            (datetime(2026, 5, 2), 1, 12.0),
+        ])
+        measurements = self._measurements([(datetime(2026, 5, 1), 10.0)])
+
+        result = join_actuals(forecasts, measurements)
+
+        assert len(result) == 1
+        assert result.loc[0, "actual_temp"] == pytest.approx(10.0)
+
+    def test_error_is_forecast_minus_actual(self):
+        forecasts = self._forecasts([(datetime(2026, 5, 1), 1, 11.5)])
+        measurements = self._measurements([(datetime(2026, 5, 1), 10.0)])
+
+        result = join_actuals(forecasts, measurements)
+        assert result.loc[0, "error"] == pytest.approx(1.5)
+
+    def test_duplicate_measurement_dates_do_not_multiply_rows(self):
+        """Duplicate dates have broken this codebase before - keep the last."""
+        forecasts = self._forecasts([(datetime(2026, 5, 1), 1, 11.0)])
+        measurements = self._measurements([
+            (datetime(2026, 5, 1), 10.0),
+            (datetime(2026, 5, 1), 10.4),
+        ])
+
+        result = join_actuals(forecasts, measurements)
+
+        assert len(result) == 1
+        assert result.loc[0, "actual_temp"] == pytest.approx(10.4)
+
+    def test_time_component_on_dates_does_not_break_join(self):
+        forecasts = self._forecasts([(datetime(2026, 5, 1, 7, 0), 1, 11.0)])
+        measurements = self._measurements([(datetime(2026, 5, 1, 0, 0), 10.0)])
+
+        result = join_actuals(forecasts, measurements)
+        assert len(result) == 1
+
+    def test_air_source_preserved_when_present(self):
+        forecasts = self._forecasts([(datetime(2026, 5, 1), 1, 11.0)])
+        forecasts["air_source"] = ["ACTUAL"]
+        measurements = self._measurements([(datetime(2026, 5, 1), 10.0)])
+
+        result = join_actuals(forecasts, measurements)
+        assert result.loc[0, "air_source"] == "ACTUAL"
+
+    def test_air_source_defaults_to_forecast_when_absent(self):
+        forecasts = self._forecasts([(datetime(2026, 5, 1), 1, 11.0)])
+        measurements = self._measurements([(datetime(2026, 5, 1), 10.0)])
+
+        result = join_actuals(forecasts, measurements)
+        assert result.loc[0, "air_source"] == "FORECAST"
+
+    def test_nan_forecasts_are_kept_for_metrics_to_exclude(self):
+        """Coverage gaps stay visible in the frame; compute_metrics drops them."""
+        forecasts = self._forecasts([(datetime(2026, 5, 1), 1, np.nan)])
+        measurements = self._measurements([(datetime(2026, 5, 1), 10.0)])
+
+        result = join_actuals(forecasts, measurements)
+        assert len(result) == 1
+        assert np.isnan(result.loc[0, "forecast_temp"])
+
+    def test_missing_measurement_values_are_dropped(self):
+        forecasts = self._forecasts([(datetime(2026, 5, 1), 1, 11.0)])
+        measurements = self._measurements([(datetime(2026, 5, 1), np.nan)])
+
+        result = join_actuals(forecasts, measurements)
+        assert result.empty
+
+    def test_empty_forecasts_returns_empty_with_schema(self):
+        result = join_actuals(self._forecasts([]), self._measurements([]))
+        assert result.empty
+        assert list(result.columns) == [
+            "target_date", "horizon_days", "forecast_temp",
+            "actual_temp", "error", "air_source",
         ]
