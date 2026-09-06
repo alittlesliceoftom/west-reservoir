@@ -28,6 +28,14 @@ from data import (
 from forecaster import WaterTempForecaster
 from config import ENABLE_MOTHERDUCK
 from quotes import QUOTES
+from accuracy import (
+    BIAS_NOTE,
+    compute_metrics,
+    join_actuals,
+    metrics_by_horizon,
+    replay_current_model,
+    splice_air_history,
+)
 
 if ENABLE_MOTHERDUCK:
     from forecast_storage import ForecastStorage, ForecastStorageError
@@ -75,6 +83,112 @@ def cached_load_historical_solar_cloud(start_date, end_date):
 def cached_load_forecast_solar_cloud(days):
     """Load forecast solar/cloud from Open-Meteo with 6-hour cache."""
     return load_forecast_solar_cloud(days=days)
+
+
+@st.cache_data(ttl=3600)
+def cached_load_stored_forecasts(max_horizon: int = 5):
+    """Stored water-temp forecasts, one run per creation day."""
+    storage = ForecastStorage()
+    return storage.get_water_predictions_last_run_per_day(max_horizon=max_horizon)
+
+
+@st.cache_data(ttl=3600)
+def cached_fitted_model_coefficients(water_temps, start_date, end_date):
+    """
+    Fit the model on historical weather and return its coefficients.
+
+    The accuracy tab fits its own model rather than reusing the Temperature
+    tab's: that block calls st.stop() on a data error, which halts the script.
+    Fitting needs only historical weather, so this is cheap and self-contained.
+
+    Returns:
+        (k_air, k_solar, k_cool) - a tuple, so it is hashable as a cache key.
+    """
+    hourly_air = cached_load_hourly_air_temps(start_date, end_date)
+
+    try:
+        solar_hist = cached_load_historical_solar_cloud(start_date, end_date)
+    except DataLoadError:
+        solar_hist = None
+
+    weather = build_hourly_weather(hourly_air, solar_hist, None)
+
+    forecaster = WaterTempForecaster()
+    forecaster.set_hourly_weather(weather)
+    forecaster.fit(water_temps.assign(source="MEASURED"))
+
+    return (forecaster.k_air, forecaster.k_solar, forecaster.k_cool)
+
+
+@st.cache_data(ttl=3600)
+def cached_replay(water_temps, coefficients, max_horizon: int = 5):
+    """
+    Backtest replay over history, using the given model coefficients.
+
+    Keyed on `coefficients`, so refitting invalidates the cached result.
+
+    All weather is fetched in bulk and sliced per anchor - the replay covers
+    hundreds of anchors, so per-anchor fetching is not an option.
+    """
+    k_air, k_solar, k_cool = coefficients
+    forecaster = WaterTempForecaster(k_air=k_air, k_solar=k_solar, k_cool=k_cool)
+
+    storage = ForecastStorage()
+    stored_air = storage.get_air_forecasts_3hourly_last_run_per_day()
+    runs_by_date = (
+        {date: group for date, group in stored_air.groupby("forecast_created_date")}
+        if not stored_air.empty
+        else {}
+    )
+
+    start_date = pd.Timestamp(water_temps["date"].min()).normalize()
+    end_date = pd.Timestamp.now().normalize()
+
+    # Measured air: the head of each window before its forecast was made, and
+    # the whole window for anchors with no stored forecast at all.
+    try:
+        actual_hourly = cached_load_hourly_air_temps(start_date, end_date)
+    except DataLoadError:
+        actual_hourly = pd.DataFrame(columns=["datetime", "air_temp"])
+
+    # Solar/cloud was never stored, so actuals are all we have - for every date.
+    try:
+        solar_hist = cached_load_historical_solar_cloud(start_date, end_date)
+    except DataLoadError:
+        solar_hist = None
+
+    def weather_provider(anchor_date):
+        anchor_dt = anchor_date + pd.Timedelta(hours=WaterTempForecaster.MEASUREMENT_HOUR)
+        window_end = anchor_dt + pd.Timedelta(days=max_horizon)
+
+        window_actuals = actual_hourly[
+            (actual_hourly["datetime"] >= anchor_dt)
+            & (actual_hourly["datetime"] < window_end)
+        ]
+
+        run = runs_by_date.get(anchor_date)
+        if run is not None and not run.empty:
+            stored_hourly = interpolate_to_hourly(
+                run[["target_datetime", "air_temp"]].rename(
+                    columns={"target_datetime": "datetime"}
+                )
+            )
+            # A run made at ~21:00 covers only the day's remainder; splice the
+            # measured air the live forecast already had for the elapsed hours.
+            hourly_air = splice_air_history(window_actuals, stored_hourly, anchor_dt)
+            air_source = "FORECAST"
+        else:
+            hourly_air = window_actuals
+            air_source = "ACTUAL"
+
+        if hourly_air.empty:
+            return None, air_source
+
+        return build_hourly_weather(hourly_air, solar_hist, None), air_source
+
+    return replay_current_model(
+        forecaster, water_temps, weather_provider, max_horizon=max_horizon
+    )
 
 
 
