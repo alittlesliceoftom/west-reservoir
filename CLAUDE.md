@@ -98,7 +98,7 @@ temperatures = pd.DataFrame({
 ### Data Flow
 
 1. Load water temps from Google Sheets → `water_temp` column
-2. Load historical air temps from Meteostat → `air_temp` column
+2. Load historical air temps from Open-Meteo archive → `air_temp` column
 3. Merge into single `temperatures` DataFrame
 4. Load future air temps from OpenWeatherMap → extend DataFrame
 5. Train forecaster on rows with `source == 'MEASURED'`
@@ -115,7 +115,8 @@ temperatures = pd.DataFrame({
 
 #### `data.py`
 - `load_water_temps()` - Load from Google Sheets or raise `DataLoadError`
-- `load_historical_air_temps()` - Load from Meteostat or raise `DataLoadError`
+- `load_historical_air_temps()` - Load daily air temps from Open-Meteo archive or raise `DataLoadError`
+- `load_hourly_air_temps()` - Load hourly air temps from Open-Meteo archive or raise `DataLoadError`
 - `load_forecast_air_temps()` - Load from OpenWeatherMap or raise `DataLoadError`
 - All functions raise explicit errors with helpful messages
 
@@ -147,8 +148,8 @@ temperatures = pd.DataFrame({
 - `ForecastStorage` class wrapping MotherDuck (DuckDB in the cloud)
 - Stores air-temp forecasts (daily and 3-hourly) and water-temp predictions,
   so today's forecasts can be scored against tomorrow's measurements
-- Retrieves stored forecasts to fill the gap between Meteostat historical data
-  and the live OpenWeatherMap forecast
+- Retrieves stored forecasts to fill any gap between historical data and the
+  live OpenWeatherMap forecast
 - Gated by `ENABLE_MOTHERDUCK` in `config.py`; the app works without it
 
 #### `app.py`
@@ -168,9 +169,11 @@ temperatures = pd.DataFrame({
   - URL: `https://docs.google.com/spreadsheets/d/1HNnucep6pv2jCFg2bYR_gV78XbYvWYyjx9y9tTNVapw/export?format=csv&gid=0`
   - Format: DD/MM/YYYY, Temperature (°C)
 
-- **Historical Weather**: Meteostat API (London weather station data)
+- **Historical Weather**: Open-Meteo archive API
   - Location: West Reservoir (51.566938, -0.090492)
-  - Provides: Daily average air temperature
+  - Provides: Hourly and daily air temperature, shortwave radiation, cloud cover
+  - Replaced Meteostat in Sept 2026: Meteostat moved hosting and left the old
+    endpoint frozen since 2026-03-20, silently serving 5-month-old data (#33)
 
 - **Weather Forecast**: OpenWeatherMap API (5-day forecast)
   - Requires API key (see setup above)
@@ -258,11 +261,13 @@ When making changes, test:
 
 ## Common Issues
 
-### "No module named 'meteostat'"
+### Data source freshness
+A source can go silent while the dashboard still renders - that is exactly how
+Meteostat went unnoticed for five months (#33). Run the freshness checks:
 ```bash
-source env/bin/activate
-pip install meteostat scipy
+python3 -m pytest test_data_freshness.py -v
 ```
+Skip them (they hit the network) with `pytest -m "not freshness"`.
 
 ### "OpenWeatherMap API key not found"
 This is expected if no API key is set. The app will show historical data only.

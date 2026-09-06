@@ -5,13 +5,17 @@ import requests
 from datetime import datetime, timedelta
 from io import StringIO
 from typing import Optional
-from meteostat import Point, Daily, Hourly
 
 from config import GOOGLE_SHEETS_URL, RESERVOIR_LAT, RESERVOIR_LON, REQUEST_TIMEOUT, get_openweather_api_key
 
 
 OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+
+# Longest run of missing hours we will bridge by linear interpolation.
+# Sized to cover 3-hourly forecast data (2 missing hours between points) with
+# room to spare; anything longer is a genuine data gap, not a sampling artefact.
+MAX_INTERPOLATION_HOURS = 6
 
 
 class DataLoadError(Exception):
@@ -79,7 +83,11 @@ def load_water_temps() -> pd.DataFrame:
 
 def load_historical_air_temps(start_date: datetime, end_date: datetime) -> pd.DataFrame:
     """
-    Load historical air temperature data from Meteostat.
+    Load historical daily air temperature from the Open-Meteo archive.
+
+    Previously sourced from Meteostat, which stopped returning data for every
+    London station in March 2026 (see issue #33). Open-Meteo is already used
+    for solar and cloud, so this adds no new dependency.
 
     Args:
         start_date: Start date for historical data
@@ -91,47 +99,62 @@ def load_historical_air_temps(start_date: datetime, end_date: datetime) -> pd.Da
     Raises:
         DataLoadError: If data cannot be loaded
     """
+    params = {
+        "latitude": RESERVOIR_LAT,
+        "longitude": RESERVOIR_LON,
+        "start_date": pd.Timestamp(start_date).date().isoformat(),
+        "end_date": pd.Timestamp(end_date).date().isoformat(),
+        "daily": "temperature_2m_mean,temperature_2m_min,temperature_2m_max",
+        "timezone": "UTC",
+    }
+
     try:
-        location = Point(RESERVOIR_LAT, RESERVOIR_LON)
-        weather_data = Daily(location, start_date, end_date)
-        weather_df = weather_data.fetch()
+        response = requests.get(OPEN_METEO_ARCHIVE_URL, params=params, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        payload = response.json()
 
-        if weather_df.empty:
-            raise DataLoadError(
-                f"No historical weather data available from Meteostat for "
-                f"{start_date.date()} to {end_date.date()}"
-            )
+    except requests.exceptions.Timeout:
+        raise DataLoadError(
+            f"Request to Open-Meteo archive timed out after {REQUEST_TIMEOUT} seconds"
+        )
+    except requests.exceptions.RequestException as e:
+        raise DataLoadError(f"Failed to fetch historical air temps from Open-Meteo: {e}")
 
-        # Reset index to get date as column
-        weather_df = weather_df.reset_index()
+    daily = payload.get("daily")
+    if not daily:
+        raise DataLoadError(
+            f"Open-Meteo response missing 'daily' block: {payload.get('reason', payload)}"
+        )
 
-        # Select and rename columns (avg, min, max)
-        weather_df = weather_df[["time", "tavg", "tmin", "tmax"]].copy()
-        weather_df.columns = ["date", "air_temp", "air_temp_min", "air_temp_max"]
+    required = ("time", "temperature_2m_mean", "temperature_2m_min", "temperature_2m_max")
+    for key in required:
+        if key not in daily:
+            raise DataLoadError(f"Open-Meteo response missing required field '{key}'")
 
-        # Remove rows with missing average temperature data
-        weather_df = weather_df.dropna(subset=["air_temp"])
+    df = pd.DataFrame({
+        "date": pd.to_datetime(daily["time"]),
+        "air_temp": pd.to_numeric(daily["temperature_2m_mean"], errors="coerce"),
+        "air_temp_min": pd.to_numeric(daily["temperature_2m_min"], errors="coerce"),
+        "air_temp_max": pd.to_numeric(daily["temperature_2m_max"], errors="coerce"),
+    })
 
-        if weather_df.empty:
-            raise DataLoadError(
-                f"Historical weather data contains no valid temperature readings for "
-                f"{start_date.date()} to {end_date.date()}"
-            )
+    df = df.dropna(subset=["air_temp"])
 
-        # Ensure date is datetime
-        weather_df["date"] = pd.to_datetime(weather_df["date"])
+    if df.empty:
+        raise DataLoadError(
+            f"Open-Meteo returned no valid daily temperatures for "
+            f"{pd.Timestamp(start_date).date()} to {pd.Timestamp(end_date).date()}"
+        )
 
-        return weather_df.sort_values("date").reset_index(drop=True)
-
-    except DataLoadError:
-        raise
-    except Exception as e:
-        raise DataLoadError(f"Failed to load historical weather data from Meteostat: {e}")
+    return df.sort_values("date").reset_index(drop=True)
 
 
 def load_hourly_air_temps(start_date: datetime, end_date: datetime) -> pd.DataFrame:
     """
-    Load hourly air temperature data from Meteostat.
+    Load historical hourly air temperature from the Open-Meteo archive.
+
+    Previously sourced from Meteostat, which stopped returning data for every
+    London station in March 2026 (see issue #33).
 
     Args:
         start_date: Start datetime for historical data
@@ -143,42 +166,30 @@ def load_hourly_air_temps(start_date: datetime, end_date: datetime) -> pd.DataFr
     Raises:
         DataLoadError: If data cannot be loaded
     """
+    params = {
+        "latitude": RESERVOIR_LAT,
+        "longitude": RESERVOIR_LON,
+        "start_date": pd.Timestamp(start_date).date().isoformat(),
+        "end_date": pd.Timestamp(end_date).date().isoformat(),
+        "hourly": "temperature_2m",
+        "timezone": "UTC",
+    }
+
     try:
-        location = Point(RESERVOIR_LAT, RESERVOIR_LON)
-        weather_data = Hourly(location, start_date, end_date)
-        weather_df = weather_data.fetch()
-
-        if weather_df.empty:
-            raise DataLoadError(
-                f"No hourly weather data available from Meteostat for "
-                f"{start_date} to {end_date}"
-            )
-
-        # Reset index to get datetime as column
-        weather_df = weather_df.reset_index()
-
-        # Select and rename columns
-        weather_df = weather_df[["time", "temp"]].copy()
-        weather_df.columns = ["datetime", "air_temp"]
-
-        # Remove rows with missing temperature data
-        weather_df = weather_df.dropna()
-
-        if weather_df.empty:
-            raise DataLoadError(
-                f"Hourly weather data contains no valid temperature readings for "
-                f"{start_date} to {end_date}"
-            )
-
-        # Ensure datetime is datetime type
-        weather_df["datetime"] = pd.to_datetime(weather_df["datetime"])
-
-        return weather_df.sort_values("datetime").reset_index(drop=True)
+        response = requests.get(OPEN_METEO_ARCHIVE_URL, params=params, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        return _parse_open_meteo_hourly(
+            response.json(), fields={"temperature_2m": "air_temp"}
+        )
 
     except DataLoadError:
         raise
-    except Exception as e:
-        raise DataLoadError(f"Failed to load hourly weather data from Meteostat: {e}")
+    except requests.exceptions.Timeout:
+        raise DataLoadError(
+            f"Request to Open-Meteo archive timed out after {REQUEST_TIMEOUT} seconds"
+        )
+    except requests.exceptions.RequestException as e:
+        raise DataLoadError(f"Failed to fetch hourly air temps from Open-Meteo: {e}")
 
 
 def load_forecast_air_temps(days: int = 5) -> pd.DataFrame:
@@ -341,40 +352,49 @@ def load_forecast_air_temps_3hourly(days: int = 5) -> pd.DataFrame:
         raise DataLoadError(f"Error processing 3-hourly OpenWeatherMap forecast: {e}")
 
 
-def _parse_open_meteo_hourly(payload: dict) -> pd.DataFrame:
+def _parse_open_meteo_hourly(
+    payload: dict,
+    fields: dict = None,
+) -> pd.DataFrame:
     """
     Parse an Open-Meteo hourly response into a DataFrame.
 
     Args:
-        payload: JSON response with 'hourly' dict containing 'time',
-                 'shortwave_radiation', 'cloud_cover'
+        payload: JSON response with an 'hourly' dict containing 'time' plus
+                 the requested variables.
+        fields: Mapping of Open-Meteo variable name -> output column name.
+                Defaults to the solar/cloud pair.
 
     Returns:
-        DataFrame with columns: datetime, shortwave_radiation, cloud_cover
+        DataFrame with a 'datetime' column plus the mapped columns.
 
     Raises:
         DataLoadError: If payload is missing required fields or empty
     """
+    if fields is None:
+        fields = {
+            "shortwave_radiation": "shortwave_radiation",
+            "cloud_cover": "cloud_cover",
+        }
+
     hourly = payload.get("hourly")
     if not hourly:
         raise DataLoadError(
             f"Open-Meteo response missing 'hourly' block: {payload.get('reason', payload)}"
         )
 
-    required = ("time", "shortwave_radiation", "cloud_cover")
-    for key in required:
+    for key in ("time", *fields):
         if key not in hourly:
             raise DataLoadError(
                 f"Open-Meteo response missing required field '{key}'"
             )
 
-    df = pd.DataFrame({
-        "datetime": pd.to_datetime(hourly["time"]),
-        "shortwave_radiation": pd.to_numeric(hourly["shortwave_radiation"], errors="coerce"),
-        "cloud_cover": pd.to_numeric(hourly["cloud_cover"], errors="coerce"),
-    })
+    data = {"datetime": pd.to_datetime(hourly["time"])}
+    for source_name, column in fields.items():
+        data[column] = pd.to_numeric(hourly[source_name], errors="coerce")
 
-    df = df.dropna(subset=["shortwave_radiation", "cloud_cover"])
+    df = pd.DataFrame(data)
+    df = df.dropna(subset=list(fields.values()))
 
     if df.empty:
         raise DataLoadError("Open-Meteo response contained no valid hourly rows")
@@ -561,19 +581,20 @@ def combine_hourly_temps(
     gap_fill: pd.DataFrame = None
 ) -> pd.DataFrame:
     """
-    Combine historical hourly temps (Meteostat) with forecast hourly temps (OWM interpolated).
+    Combine historical hourly temps (Open-Meteo archive) with forecast hourly temps (OWM interpolated).
 
     Historical data takes precedence for overlapping times.
     Gap-fill data (from stored MotherDuck forecasts) fills the gap between historical and forecast.
-    If no gap-fill data, falls back to linear interpolation.
+    If no gap-fill data, short gaps are interpolated (see MAX_INTERPOLATION_HOURS);
+    longer gaps are left as gaps rather than invented.
 
     Priority order:
-    1. Historical (Meteostat) - trusted measured data
+    1. Historical (Open-Meteo archive) - trusted measured data
     2. Gap-fill (stored forecasts from MotherDuck) - yesterday's forecast for today
     3. Forecast (live OWM) - current forecast for future
 
     Args:
-        historical: DataFrame with 'datetime' and 'air_temp' columns (Meteostat)
+        historical: DataFrame with 'datetime' and 'air_temp' columns (Open-Meteo archive)
         forecast: DataFrame with 'datetime' and 'air_temp' columns (interpolated OWM)
         gap_fill: Optional DataFrame with 'datetime' and 'air_temp' columns (stored forecasts)
 
@@ -629,10 +650,20 @@ def combine_hourly_temps(
     # Resample to consistent hourly frequency for the forecaster.
     # Gap fill and forecast data may be 3-hourly; the chart shows raw points
     # but the forecaster needs true hourly data for correct heat transfer steps.
+    #
+    # Interpolation is capped at MAX_INTERPOLATION_HOURS. Bridging a 3-hourly
+    # forecast is legitimate; drawing a straight line across a months-long
+    # outage is inventing weather. When Meteostat silently died in March 2026
+    # the uncapped version filled 161 days with a smooth ramp and the model
+    # trained on it without complaint (see issue #33). Real gaps must stay
+    # gaps so fit() skips those periods instead of learning from a ruler.
     if not combined.empty:
         combined = combined.set_index("datetime").sort_index()
-        combined = combined.resample("h").interpolate(method="linear")
+        combined = combined.resample("h").interpolate(
+            method="linear", limit=MAX_INTERPOLATION_HOURS, limit_area="inside"
+        )
         combined = combined.reset_index()
+        combined = combined.dropna(subset=["air_temp"])
 
     return combined
 
@@ -650,8 +681,8 @@ def fill_daily_from_hourly(
     """
     Fill gaps in daily air temps using hourly data.
 
-    The daily Meteostat feed lags roughly two days; the hourly feed is more
-    current. Daily values win wherever they already exist.
+    Both feeds come from the Open-Meteo archive and are equally current, but
+    the daily series can still have holes. Daily values win where they exist.
 
     Args:
         air_temps_daily: date, air_temp, air_temp_min, air_temp_max
