@@ -17,6 +17,8 @@ from data import (
     load_forecast_air_temps_3hourly,
     load_historical_solar_cloud,
     load_forecast_solar_cloud,
+    load_forecast_weather,
+    daily_from_hourly_forecast,
     interpolate_to_hourly,
     select_storable_predictions,
     build_hourly_weather,
@@ -49,6 +51,12 @@ CACHE_TTL = timedelta(hours=6)
 # Open-Meteo replaced it in the code on 2026-09-06; the window closes for real
 # once that ships to the deployed app.
 METEOSTAT_OUTAGE_START = pd.Timestamp("2026-03-20")
+
+# Days of forecast to fetch. Open-Meteo serves 16 free where OpenWeatherMap
+# capped us at 5. Held at 5 for now: water-temp error grows with horizon
+# (0.28 C at one day, 1.31 C at five), so a 16-day water forecast would be
+# mostly drift. Raise this to show more of the air forecast.
+FORECAST_DAYS = 5
 
 
 @st.cache_data(ttl=CACHE_TTL)
@@ -91,6 +99,12 @@ def cached_load_historical_solar_cloud(start_date, end_date):
 def cached_load_forecast_solar_cloud(days):
     """Load forecast solar/cloud from Open-Meteo with 6-hour cache."""
     return load_forecast_solar_cloud(days=days)
+
+
+@st.cache_data(ttl=CACHE_TTL)
+def cached_load_forecast_weather(days):
+    """Load the hourly forecast for every model input in one call, 6-hour cache."""
+    return load_forecast_weather(days=days)
 
 
 @st.cache_data(ttl=3600)
@@ -909,23 +923,25 @@ def main():
             temperatures = build_temperatures_frame(water_temps, air_temps_hist)
 
             combined_hourly = hourly_air_temps
+            forecast_weather = None
             try:
-                forecast_3hourly = cached_load_forecast_air_temps_3hourly(days=5)
-                forecast_hourly = interpolate_to_hourly(forecast_3hourly)
+                forecast_weather = cached_load_forecast_weather(days=FORECAST_DAYS)
 
                 gap_fill_hourly = None
-                if ENABLE_MOTHERDUCK and not hourly_air_temps.empty and not forecast_3hourly.empty:
+                if ENABLE_MOTHERDUCK and not hourly_air_temps.empty and not forecast_weather.empty:
                     hist_end = hourly_air_temps["datetime"].max()
-                    fore_start = forecast_3hourly["datetime"].min()
+                    fore_start = forecast_weather["datetime"].min()
                     gap_hours = (fore_start - hist_end).total_seconds() / 3600
                     if gap_hours > 1:
                         gap_fill_hourly = retrieve_gap_fill_forecasts(hist_end, fore_start)
 
                 combined_hourly = combine_hourly_temps(
-                    hourly_air_temps, forecast_hourly, gap_fill_hourly
+                    hourly_air_temps,
+                    forecast_weather[["datetime", "air_temp"]],
+                    gap_fill_hourly,
                 )
 
-                forecast = cached_load_forecast_air_temps(days=5)
+                forecast = daily_from_hourly_forecast(forecast_weather)
                 forecast["source"] = "AIR_ONLY"
                 temperatures = pd.concat([temperatures, forecast], ignore_index=True)
                 # Create deduplicated version for prediction chain
@@ -934,17 +950,14 @@ def main():
                 temperatures_deduped = temperatures.copy()
 
             solar_hist = None
-            solar_fore = None
             try:
                 solar_hist = cached_load_historical_solar_cloud(start_date, end_date)
             except DataLoadError:
                 pass
-            try:
-                solar_fore = cached_load_forecast_solar_cloud(days=5)
-            except DataLoadError:
-                pass
 
-            hourly_weather = build_hourly_weather(combined_hourly, solar_hist, solar_fore)
+            hourly_weather = build_hourly_weather(
+                combined_hourly, solar_hist, forecast_weather
+            )
 
             forecaster = WaterTempForecaster()
             forecaster.set_hourly_weather(hourly_weather)
@@ -1169,12 +1182,13 @@ def main():
 
             temperatures = build_temperatures_frame(water_temps, air_temps_hist)
 
-            forecast_3hourly = None
+            forecast_weather = None
             gap_fill_hourly = None
             try:
-                forecast_3hourly = cached_load_forecast_air_temps_3hourly(days=5)
+                forecast_weather = cached_load_forecast_weather(days=FORECAST_DAYS)
 
-                # Store 3-hourly in MotherDuck (only once per day)
+                # One write, every measure. All three arrive in a single frame,
+                # so the whole run lands as one row per hour (issue #39).
                 if ENABLE_MOTHERDUCK:
                     if 'last_forecast_fetch_date' not in st.session_state or \
                        st.session_state['last_forecast_fetch_date'] != datetime.now().date():
@@ -1182,7 +1196,9 @@ def main():
                             storage = ForecastStorage()
                             storage.initialize_schema()
                             forecast_timestamp = datetime.now()
-                            storage.store_air_forecast_3hourly(forecast_3hourly, forecast_timestamp)
+                            storage.store_weather_forecast(
+                                forecast_weather, forecast_timestamp, source="Open-Meteo"
+                            )
                             st.session_state['last_forecast_fetch_date'] = datetime.now().date()
                             st.session_state['last_forecast_timestamp'] = forecast_timestamp
                         except ForecastStorageError as e:
@@ -1190,23 +1206,24 @@ def main():
                         except Exception as e:
                             st.warning(f"Forecast storage error: {e}")
 
-                forecast_hourly = interpolate_to_hourly(forecast_3hourly)
-
-                # Gap is between: last archive timestamp -> first OWM timestamp
-                if ENABLE_MOTHERDUCK and not hourly_air_temps.empty and not forecast_3hourly.empty:
+                # Gap is between: last archive timestamp -> first forecast timestamp
+                if ENABLE_MOTHERDUCK and not hourly_air_temps.empty and not forecast_weather.empty:
                     hist_end = hourly_air_temps["datetime"].max()
-                    fore_start = forecast_3hourly["datetime"].min()
+                    fore_start = forecast_weather["datetime"].min()
 
                     gap_hours = (fore_start - hist_end).total_seconds() / 3600
                     if gap_hours > 1:
                         gap_fill_hourly = retrieve_gap_fill_forecasts(hist_end, fore_start)
 
                 combined_hourly = combine_hourly_temps(
-                    hourly_air_temps, forecast_hourly, gap_fill_hourly
+                    hourly_air_temps,
+                    forecast_weather[["datetime", "air_temp"]],
+                    gap_fill_hourly,
                 )
 
-                # Also load daily forecast for the temperatures DataFrame (for chart display)
-                forecast = cached_load_forecast_air_temps(days=5)
+                # Daily min/mean/max for the chart, derived from the same hourly
+                # series the model runs on, so the two cannot disagree.
+                forecast = daily_from_hourly_forecast(forecast_weather)
                 forecast["source"] = "AIR_ONLY"
                 temperatures = pd.concat([temperatures, forecast], ignore_index=True)
                 temperatures = temperatures.sort_values("date").reset_index(drop=True)
@@ -1221,39 +1238,14 @@ def main():
                 temperatures_deduped = temperatures.copy()  # No duplicates without forecast
 
             solar_hist = None
-            solar_fore = None
             try:
                 solar_hist = cached_load_historical_solar_cloud(start_date, end_date)
             except DataLoadError as e:
                 st.warning(f"Open-Meteo historical solar/cloud unavailable: {e}")
-            try:
-                solar_fore = cached_load_forecast_solar_cloud(days=5)
-            except DataLoadError as e:
-                st.warning(f"Open-Meteo forecast solar/cloud unavailable: {e}")
 
-            # Store the solar/cloud forecast alongside the air forecast, so a
-            # backtest can feed the model what it actually had rather than what
-            # actually happened (issue #29). Reuses the air run's timestamp
-            # where there is one, so both halves join as a single forecast run.
-            if ENABLE_MOTHERDUCK and solar_fore is not None and not solar_fore.empty:
-                if st.session_state.get('last_solar_fetch_date') != datetime.now().date():
-                    try:
-                        storage = ForecastStorage()
-                        storage.initialize_schema()
-                        storage.store_weather_forecast(
-                            solar_fore,
-                            st.session_state.get(
-                                'last_forecast_timestamp', datetime.now()
-                            ),
-                            source="Open-Meteo",
-                        )
-                        st.session_state['last_solar_fetch_date'] = datetime.now().date()
-                    except ForecastStorageError as e:
-                        st.warning(f"Could not store solar/cloud forecast: {e}")
-                    except Exception as e:
-                        st.warning(f"Solar/cloud storage error: {e}")
-
-            hourly_weather = build_hourly_weather(combined_hourly, solar_hist, solar_fore)
+            hourly_weather = build_hourly_weather(
+                combined_hourly, solar_hist, forecast_weather
+            )
 
             forecaster = WaterTempForecaster()
             forecaster.set_hourly_weather(hourly_weather)

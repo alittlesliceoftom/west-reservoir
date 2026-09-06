@@ -77,7 +77,9 @@ python3 -m pytest test_forecaster.py -v
 
 ## Weather API Setup (Optional)
 
-To enable weather forecasts and predictions:
+**No API key is needed for the live app.** Every weather feed is Open-Meteo,
+which is keyless. The OpenWeatherMap loaders are kept as a fallback and are not
+called; the setup below applies only if you switch back to them.
 
 1. **Get a free API key from OpenWeatherMap:**
    - Visit https://openweathermap.org/api
@@ -119,7 +121,8 @@ temperatures = pd.DataFrame({
 1. Load water temps from Google Sheets → `water_temp` column
 2. Load historical air temps from Open-Meteo archive → `air_temp` column
 3. Merge into single `temperatures` DataFrame
-4. Load future air temps from OpenWeatherMap → extend DataFrame
+4. Load the hourly forecast (air, solar, cloud) from Open-Meteo in one call
+   → extend DataFrame
 5. Train forecaster on rows with `source == 'MEASURED'`
 6. Predict water temps for rows with `source == 'AIR_ONLY'`
 7. Update `source` to `'PREDICTED'` for those rows
@@ -136,7 +139,13 @@ temperatures = pd.DataFrame({
 - `load_water_temps()` - Load from Google Sheets or raise `DataLoadError`
 - `load_historical_air_temps()` - Load daily air temps from Open-Meteo archive or raise `DataLoadError`
 - `load_hourly_air_temps()` - Load hourly air temps from Open-Meteo archive or raise `DataLoadError`
-- `load_forecast_air_temps()` - Load from OpenWeatherMap or raise `DataLoadError`
+- `load_forecast_weather()` - Load the hourly forecast for every model input
+  (air temp, shortwave radiation, cloud cover) from Open-Meteo in ONE call.
+  This is the live path
+- `daily_from_hourly_forecast()` - Collapse that hourly series into the daily
+  min/mean/max the chart wants, so chart and model cannot disagree
+- `load_forecast_air_temps()` / `load_forecast_air_temps_3hourly()` - The
+  OpenWeatherMap forecast loaders. Kept as a fallback, not called by the app
 - All functions raise explicit errors with helpful messages
 
 #### `forecaster.py`
@@ -234,9 +243,15 @@ temperatures = pd.DataFrame({
   - Replaced Meteostat in Sept 2026: Meteostat moved hosting and left the old
     endpoint frozen since 2026-03-20, silently serving 5-month-old data (#33)
 
-- **Weather Forecast**: OpenWeatherMap API (5-day forecast)
-  - Requires API key (see setup above)
-  - Provides: Daily air temperature predictions
+- **Weather Forecast**: Open-Meteo forecast API, hourly, no key required
+  - Provides: air temperature, shortwave radiation and cloud cover in one call
+  - Up to 16 days available; `FORECAST_DAYS` in `app.py` holds it at 5, because
+    water-temp error grows with horizon (0.28 C at one day, 1.31 C at five)
+  - Replaced OpenWeatherMap in Sept 2026 (#39). Measured over June-August 2026,
+    Open-Meteo's air forecast beat OpenWeatherMap's at one day ahead (MAE 0.94 C
+    against 1.38 C); OpenWeatherMap scored better from two days out, but that
+    comparison derived its lead time from a date difference and so flattered it.
+    OpenWeatherMap is retained in the code as a fallback
 
 ## Development Guidelines
 
@@ -329,8 +344,8 @@ python3 -m pytest test_data_freshness.py -v
 Skip them (they hit the network) with `pytest -m "not freshness"`.
 
 ### "OpenWeatherMap API key not found"
-This is expected if no API key is set. The app will show historical data only.
-See "Weather API Setup" above to enable forecasts.
+The live app no longer calls OpenWeatherMap, so this should not appear. If it
+does, something is using the fallback loaders - see "Weather API Setup".
 
 ### "Cannot load required data: Failed to fetch data from Google Sheets"
 Check internet connection and verify Google Sheets URL is accessible.
