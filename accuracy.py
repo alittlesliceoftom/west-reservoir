@@ -72,3 +72,42 @@ def metrics_by_horizon(df: pd.DataFrame) -> pd.DataFrame:
         rows.append(metrics)
 
     return pd.DataFrame(rows, columns=METRIC_COLUMNS)
+
+
+def join_actuals(forecasts: pd.DataFrame, water_temps: pd.DataFrame) -> pd.DataFrame:
+    """
+    Join forecasts to the measurements they were predicting.
+
+    Only days with a measurement can be scored; unmeasured days drop out and
+    are reflected in the reported N. Forecast NaNs are kept so coverage gaps
+    stay visible - compute_metrics excludes them.
+
+    Args:
+        forecasts: target_date, horizon_days, forecast_temp, optional air_source
+        water_temps: load_water_temps() frame with date, water_temp
+
+    Returns:
+        DataFrame with SCORED_COLUMNS. air_source defaults to 'FORECAST'.
+    """
+    if forecasts.empty or water_temps.empty:
+        return pd.DataFrame(columns=SCORED_COLUMNS)
+
+    actuals = water_temps.dropna(subset=["water_temp"]).copy()
+    actuals["target_date"] = pd.to_datetime(actuals["date"]).dt.normalize()
+    # Duplicate measurement dates have broken prediction chains before; keep last.
+    actuals = actuals.drop_duplicates(subset=["target_date"], keep="last")
+    actuals = actuals[["target_date", "water_temp"]].rename(
+        columns={"water_temp": "actual_temp"}
+    )
+
+    scored = forecasts.copy()
+    scored["target_date"] = pd.to_datetime(scored["target_date"]).dt.normalize()
+    if "air_source" not in scored.columns:
+        scored["air_source"] = "FORECAST"
+
+    scored = scored.merge(actuals, on="target_date", how="inner")
+    scored["error"] = scored["forecast_temp"] - scored["actual_temp"]
+
+    return scored[SCORED_COLUMNS].sort_values(
+        ["target_date", "horizon_days"]
+    ).reset_index(drop=True)
