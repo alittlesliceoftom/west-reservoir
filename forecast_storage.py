@@ -12,6 +12,11 @@ class ForecastStorageError(Exception):
     pass
 
 
+# Measure columns of weather_forecasts_hourly, in table order. A new model
+# input is added here and as a column, not as a new table.
+WEATHER_MEASURES = ["air_temp", "shortwave_radiation", "cloud_cover"]
+
+
 # Selects the final forecast run of each creation day.
 #
 # rank(), not row_number(): one run is MANY rows sharing a single
@@ -67,25 +72,34 @@ LAST_AIR_RUN_PER_DAY_SQL = """
 """
 
 
-# Final hourly solar/cloud forecast run of each creation day, all rows of it.
-# Same shape and same rank() reasoning as the air query above.
-LAST_SOLAR_CLOUD_RUN_PER_DAY_SQL = """
+# Final hourly weather forecast run of each creation day, all rows of it.
+# Same rank() reasoning as the air query above. Partitioned by source as well
+# as creation day, so one source going quiet does not suppress another's run.
+LAST_WEATHER_RUN_PER_DAY_SQL = """
     WITH ranked AS (
         SELECT
             CAST(forecast_created_timestamp AS DATE) AS forecast_created_date,
             target_datetime,
+            source,
+            air_temp,
             shortwave_radiation,
             cloud_cover,
             rank() OVER (
-                PARTITION BY CAST(forecast_created_timestamp AS DATE)
+                PARTITION BY CAST(forecast_created_timestamp AS DATE), source
                 ORDER BY forecast_created_timestamp DESC
             ) AS run_rank
-        FROM solar_cloud_forecasts_hourly
+        FROM weather_forecasts_hourly
     )
-    SELECT forecast_created_date, target_datetime, shortwave_radiation, cloud_cover
+    SELECT
+        forecast_created_date,
+        target_datetime,
+        source,
+        air_temp,
+        shortwave_radiation,
+        cloud_cover
     FROM ranked
     WHERE run_rank = 1
-    ORDER BY forecast_created_date, target_datetime
+    ORDER BY forecast_created_date, target_datetime, source
 """
 
 
@@ -117,24 +131,6 @@ class ForecastStorage:
     def initialize_schema(self) -> None:
         """Create tables if they don't exist. Idempotent."""
         conn = self._get_connection()
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS air_temp_forecasts (
-                forecast_created_date DATE NOT NULL,
-                forecast_created_timestamp TIMESTAMP NOT NULL,
-                target_date DATE NOT NULL,
-                air_temp DOUBLE NOT NULL,
-                air_temp_min DOUBLE NOT NULL,
-                air_temp_max DOUBLE NOT NULL,
-                source VARCHAR DEFAULT 'OpenWeatherMap',
-                PRIMARY KEY (forecast_created_timestamp, target_date)
-            )
-        """)
-
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_forecast_for_date
-            ON air_temp_forecasts(target_date, forecast_created_date)
-        """)
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS water_temp_predictions (
@@ -170,69 +166,34 @@ class ForecastStorage:
             ON air_temp_forecasts_3hourly(target_datetime, forecast_created_timestamp)
         """)
 
-        # Hourly, not 3-hourly: Open-Meteo returns hourly natively, so nothing
-        # needs interpolating on the way in.
+        # One hourly table for every weather forecast, whatever the measure.
+        #
+        # Wide, with a source dimension: a new model input is a new column, not
+        # a new table with its own store method, retrieval method and near
+        # identical rank() query. Measure columns are nullable because a source
+        # supplies only what it publishes - Open-Meteo sends solar and cloud,
+        # OpenWeatherMap sends air temperature - and source is in the key so two
+        # sources can forecast the same hour without colliding.
+        #
+        # Hourly because Open-Meteo returns hourly natively, so nothing needs
+        # interpolating on the way in. Air temperature joins this table when it
+        # moves to Open-Meteo hourly (issue #39).
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS solar_cloud_forecasts_hourly (
+            CREATE TABLE IF NOT EXISTS weather_forecasts_hourly (
                 forecast_created_timestamp TIMESTAMP NOT NULL,
                 target_datetime TIMESTAMP NOT NULL,
-                shortwave_radiation DOUBLE NOT NULL,
-                cloud_cover DOUBLE NOT NULL,
-                source VARCHAR DEFAULT 'Open-Meteo',
-                PRIMARY KEY (forecast_created_timestamp, target_datetime)
+                source VARCHAR NOT NULL,
+                air_temp DOUBLE,
+                shortwave_radiation DOUBLE,
+                cloud_cover DOUBLE,
+                PRIMARY KEY (forecast_created_timestamp, target_datetime, source)
             )
         """)
 
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_solar_cloud_target
-            ON solar_cloud_forecasts_hourly(target_datetime, forecast_created_timestamp)
+            CREATE INDEX IF NOT EXISTS idx_weather_forecast_target
+            ON weather_forecasts_hourly(target_datetime, forecast_created_timestamp)
         """)
-
-    def store_air_forecast(
-        self,
-        forecast_df: pd.DataFrame,
-        forecast_created_timestamp: datetime
-    ) -> None:
-        """
-        Store raw air temperature forecast.
-
-        Args:
-            forecast_df: DataFrame with columns: date, air_temp, air_temp_min, air_temp_max
-            forecast_created_timestamp: When this forecast was fetched
-        """
-        conn = self._get_connection()
-
-        # Truncate to hour so the PK naturally deduplicates within each hour
-        forecast_created_hour = forecast_created_timestamp.replace(minute=0, second=0, microsecond=0)
-        forecast_to_store = forecast_df.copy()
-        forecast_to_store['forecast_created_date'] = forecast_created_hour.date()
-        forecast_to_store['forecast_created_timestamp'] = forecast_created_hour
-        forecast_to_store['target_date'] = forecast_to_store['date'].dt.date
-        forecast_to_store['source'] = 'OpenWeatherMap'
-
-        # Select columns in correct order
-        forecast_to_store = forecast_to_store[[
-            'forecast_created_date',
-            'forecast_created_timestamp',
-            'target_date',
-            'air_temp',
-            'air_temp_min',
-            'air_temp_max',
-            'source'
-        ]]
-
-        try:
-            conn.execute("""
-                INSERT INTO air_temp_forecasts
-                SELECT * FROM forecast_to_store
-            """)
-        except Exception as e:
-            # Likely duplicate key - not a critical error
-            err_msg = str(e).lower()
-            if "primary key" in err_msg or "unique" in err_msg or "duplicate" in err_msg:
-                pass  # Silently ignore duplicates
-            else:
-                raise ForecastStorageError(f"Failed to store air forecast: {e}")
 
     def store_water_predictions(
         self,
@@ -327,25 +288,37 @@ class ForecastStorage:
             else:
                 raise ForecastStorageError(f"Failed to store 3-hourly air forecast: {e}")
 
-    def store_solar_cloud_forecast(
+    def store_weather_forecast(
         self,
         forecast_df: pd.DataFrame,
-        forecast_created_timestamp: datetime
+        forecast_created_timestamp: datetime,
+        source: str
     ) -> None:
         """
-        Store the hourly solar radiation and cloud cover forecast.
+        Store an hourly weather forecast in weather_forecasts_hourly.
 
-        Stored so backtests can feed the model the solar/cloud forecast it
-        actually had, rather than what actually happened. Until this has been
-        accumulating, replay results are an optimistic bound (issue #29).
+        Whichever of the measure columns the frame carries are stored; the rest
+        are left NULL, because a source publishes only what it publishes.
+
+        Stored so backtests can feed the model the forecast it actually had
+        rather than what actually happened. Until this has been accumulating,
+        replay results are an optimistic bound (issue #29).
 
         Args:
-            forecast_df: DataFrame with columns: datetime, shortwave_radiation,
-                         cloud_cover
-            forecast_created_timestamp: When this forecast was fetched
+            forecast_df: DataFrame with 'datetime' plus any of 'air_temp',
+                         'shortwave_radiation', 'cloud_cover'.
+            forecast_created_timestamp: When this forecast was fetched.
+            source: Who published it, e.g. 'Open-Meteo'.
         """
         if forecast_df is None or forecast_df.empty:
             return
+
+        measures = [c for c in WEATHER_MEASURES if c in forecast_df.columns]
+        if not measures:
+            raise ForecastStorageError(
+                "Forecast has none of the measure columns "
+                f"{WEATHER_MEASURES}: got {list(forecast_df.columns)}"
+            )
 
         conn = self._get_connection()
 
@@ -354,19 +327,23 @@ class ForecastStorage:
         forecast_created_hour = forecast_created_timestamp.replace(minute=0, second=0, microsecond=0)
         forecast_to_store['forecast_created_timestamp'] = forecast_created_hour
         forecast_to_store['target_datetime'] = forecast_to_store['datetime']
-        forecast_to_store['source'] = 'Open-Meteo'
+        forecast_to_store['source'] = source
+
+        # Absent measures are stored as NULL, so the column list is fixed and
+        # the insert does not depend on which source is writing.
+        for measure in WEATHER_MEASURES:
+            if measure not in forecast_to_store.columns:
+                forecast_to_store[measure] = None
 
         forecast_to_store = forecast_to_store[[
             'forecast_created_timestamp',
             'target_datetime',
-            'shortwave_radiation',
-            'cloud_cover',
-            'source'
-        ]]
+            'source',
+        ] + WEATHER_MEASURES]
 
         try:
             conn.execute("""
-                INSERT INTO solar_cloud_forecasts_hourly
+                INSERT INTO weather_forecasts_hourly
                 SELECT * FROM forecast_to_store
             """)
         except Exception as e:
@@ -374,21 +351,21 @@ class ForecastStorage:
             if "primary key" in err_msg or "unique" in err_msg or "duplicate" in err_msg:
                 pass  # Likely duplicate key - not a critical error
             else:
-                raise ForecastStorageError(f"Failed to store solar/cloud forecast: {e}")
+                raise ForecastStorageError(f"Failed to store weather forecast: {e}")
 
-    def get_solar_cloud_forecasts_last_run_per_day(self) -> pd.DataFrame:
+    def get_weather_forecasts_last_run_per_day(self) -> pd.DataFrame:
         """
-        Retrieve every stored solar/cloud forecast, one run per creation day.
+        Retrieve every stored weather forecast, one run per creation day.
 
         Fetched in bulk for the same reason as the air forecasts: the replay
         covers hundreds of anchors, so per-anchor queries are not an option.
 
         Returns:
-            DataFrame: forecast_created_date, target_datetime,
-                       shortwave_radiation, cloud_cover
+            DataFrame: forecast_created_date, target_datetime, source,
+                       air_temp, shortwave_radiation, cloud_cover
         """
         conn = self._get_connection()
-        result = conn.execute(LAST_SOLAR_CLOUD_RUN_PER_DAY_SQL).fetchdf()
+        result = conn.execute(LAST_WEATHER_RUN_PER_DAY_SQL).fetchdf()
 
         if result.empty:
             return result

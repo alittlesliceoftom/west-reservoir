@@ -18,8 +18,9 @@ from data import build_hourly_weather
 from forecaster import WaterTempForecaster
 from forecast_storage import (
     ForecastStorage,
+    ForecastStorageError,
     LAST_AIR_RUN_PER_DAY_SQL,
-    LAST_SOLAR_CLOUD_RUN_PER_DAY_SQL,
+    LAST_WEATHER_RUN_PER_DAY_SQL,
     LAST_WATER_RUN_PER_DAY_SQL,
 )
 
@@ -601,28 +602,29 @@ class TestReplayCurrentModel:
         ]
 
 
-def _local_solar_db(rows):
-    """In-memory DuckDB with the solar_cloud_forecasts_hourly schema."""
+def _local_solar_db(rows, source="Open-Meteo"):
+    """In-memory DuckDB with the weather_forecasts_hourly schema."""
     conn = duckdb.connect(":memory:")
     conn.execute("""
-        CREATE TABLE solar_cloud_forecasts_hourly (
+        CREATE TABLE weather_forecasts_hourly (
             forecast_created_timestamp TIMESTAMP NOT NULL,
             target_datetime TIMESTAMP NOT NULL,
-            shortwave_radiation DOUBLE NOT NULL,
-            cloud_cover DOUBLE NOT NULL,
-            source VARCHAR DEFAULT 'Open-Meteo',
-            PRIMARY KEY (forecast_created_timestamp, target_datetime)
+            source VARCHAR NOT NULL,
+            air_temp DOUBLE,
+            shortwave_radiation DOUBLE,
+            cloud_cover DOUBLE,
+            PRIMARY KEY (forecast_created_timestamp, target_datetime, source)
         )
     """)
     for created_ts, target_dt, solar, cloud in rows:
         conn.execute(
-            "INSERT INTO solar_cloud_forecasts_hourly VALUES (?, ?, ?, ?, 'Open-Meteo')",
-            [created_ts, target_dt, solar, cloud],
+            "INSERT INTO weather_forecasts_hourly VALUES (?, ?, ?, NULL, ?, ?)",
+            [created_ts, target_dt, source, solar, cloud],
         )
     return conn
 
 
-class TestLastSolarCloudRunPerDay:
+class TestLastWeatherRunPerDay:
     """The bulk query the replay uses: one run per creation day, all its rows."""
 
     def test_picks_last_run_and_keeps_all_its_rows(self):
@@ -632,7 +634,7 @@ class TestLastSolarCloudRunPerDay:
             (datetime(2026, 5, 1, 8), datetime(2026, 5, 2, 12), 999.0, 99.0),
         ]
         conn = _local_solar_db(rows)
-        result = conn.execute(LAST_SOLAR_CLOUD_RUN_PER_DAY_SQL).fetchdf()
+        result = conn.execute(LAST_WEATHER_RUN_PER_DAY_SQL).fetchdf()
 
         assert len(result) == 2
         assert 999.0 not in list(result["shortwave_radiation"])
@@ -640,7 +642,7 @@ class TestLastSolarCloudRunPerDay:
     def test_carries_both_measures(self):
         rows = [(datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 12), 500.0, 10.0)]
         conn = _local_solar_db(rows)
-        result = conn.execute(LAST_SOLAR_CLOUD_RUN_PER_DAY_SQL).fetchdf()
+        result = conn.execute(LAST_WEATHER_RUN_PER_DAY_SQL).fetchdf()
 
         assert result.loc[0, "shortwave_radiation"] == pytest.approx(500.0)
         assert result.loc[0, "cloud_cover"] == pytest.approx(10.0)
@@ -651,7 +653,7 @@ class TestLastSolarCloudRunPerDay:
             (datetime(2026, 5, 2, 20), datetime(2026, 5, 3, 0), 0.0, 80.0),
         ]
         conn = _local_solar_db(rows)
-        result = conn.execute(LAST_SOLAR_CLOUD_RUN_PER_DAY_SQL).fetchdf()
+        result = conn.execute(LAST_WEATHER_RUN_PER_DAY_SQL).fetchdf()
 
         assert len(result) == 2
         assert sorted(
@@ -664,7 +666,7 @@ class TestLastSolarCloudRunPerDay:
             (datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 0), 2.0, 60.0),
         ]
         conn = _local_solar_db(rows)
-        result = conn.execute(LAST_SOLAR_CLOUD_RUN_PER_DAY_SQL).fetchdf()
+        result = conn.execute(LAST_WEATHER_RUN_PER_DAY_SQL).fetchdf()
 
         assert list(result["shortwave_radiation"]) == [2.0, 1.0]
 
@@ -742,7 +744,7 @@ class TestStoredSolarCloudFeedsTheModel:
         assert set(weather["shortwave_radiation"]) == {900.0}
 
 
-class TestSolarCloudStorageRoundTrip:
+class TestWeatherForecastStorage:
     """
     Exercises the real ForecastStorage methods against a local DuckDB.
 
@@ -770,26 +772,30 @@ class TestSolarCloudStorageRoundTrip:
 
     def test_stored_rows_come_back(self):
         storage = self._storage()
-        storage.store_solar_cloud_forecast(
-            self._forecast("2026-09-07 00:00", 24), datetime(2026, 9, 6, 21, 43, 17)
+        storage.store_weather_forecast(
+            self._forecast("2026-09-07 00:00", 24),
+            datetime(2026, 9, 6, 21, 43, 17),
+            source="Open-Meteo",
         )
 
-        result = storage.get_solar_cloud_forecasts_last_run_per_day()
+        result = storage.get_weather_forecasts_last_run_per_day()
 
         assert len(result) == 24
         assert list(result.columns) == [
-            "forecast_created_date", "target_datetime",
-            "shortwave_radiation", "cloud_cover",
+            "forecast_created_date", "target_datetime", "source",
+            "air_temp", "shortwave_radiation", "cloud_cover",
         ]
 
     def test_creation_timestamp_is_truncated_to_the_hour(self):
         """The PK dedupes within an hour only if the minutes are dropped."""
         storage = self._storage()
-        storage.store_solar_cloud_forecast(
-            self._forecast("2026-09-07 00:00", 3), datetime(2026, 9, 6, 21, 43, 17)
+        storage.store_weather_forecast(
+            self._forecast("2026-09-07 00:00", 3),
+            datetime(2026, 9, 6, 21, 43, 17),
+            source="Open-Meteo",
         )
         stored = storage._conn.execute(
-            "SELECT DISTINCT forecast_created_timestamp FROM solar_cloud_forecasts_hourly"
+            "SELECT DISTINCT forecast_created_timestamp FROM weather_forecasts_hourly"
         ).fetchdf()
 
         assert pd.Timestamp(stored.iloc[0, 0]) == pd.Timestamp("2026-09-06 21:00")
@@ -798,50 +804,63 @@ class TestSolarCloudStorageRoundTrip:
         storage = self._storage()
         forecast = self._forecast("2026-09-07 00:00", 5)
 
-        storage.store_solar_cloud_forecast(forecast, datetime(2026, 9, 6, 21, 0))
-        storage.store_solar_cloud_forecast(forecast, datetime(2026, 9, 6, 21, 30))
+        storage.store_weather_forecast(
+            forecast, datetime(2026, 9, 6, 21, 0), source="Open-Meteo"
+        )
+        storage.store_weather_forecast(
+            forecast, datetime(2026, 9, 6, 21, 30), source="Open-Meteo"
+        )
 
-        assert len(storage.get_solar_cloud_forecasts_last_run_per_day()) == 5
+        assert len(storage.get_weather_forecasts_last_run_per_day()) == 5
 
     def test_a_later_run_supersedes_an_earlier_one_the_same_day(self):
         storage = self._storage()
-        storage.store_solar_cloud_forecast(
-            self._forecast("2026-09-07 00:00", 3), datetime(2026, 9, 6, 8, 0)
+        storage.store_weather_forecast(
+            self._forecast("2026-09-07 00:00", 3),
+            datetime(2026, 9, 6, 8, 0),
+            source="Open-Meteo",
         )
         late = self._forecast("2026-09-07 00:00", 3)
         late["cloud_cover"] = 77.0
-        storage.store_solar_cloud_forecast(late, datetime(2026, 9, 6, 21, 0))
+        storage.store_weather_forecast(
+            late, datetime(2026, 9, 6, 21, 0), source="Open-Meteo"
+        )
 
-        result = storage.get_solar_cloud_forecasts_last_run_per_day()
+        result = storage.get_weather_forecasts_last_run_per_day()
 
         assert len(result) == 3
         assert set(result["cloud_cover"]) == {77.0}
 
     def test_empty_forecast_is_not_stored(self):
         storage = self._storage()
-        storage.store_solar_cloud_forecast(
+        storage.store_weather_forecast(
             pd.DataFrame(columns=["datetime", "shortwave_radiation", "cloud_cover"]),
             datetime(2026, 9, 6, 21, 0),
+            source="Open-Meteo",
         )
 
-        assert storage.get_solar_cloud_forecasts_last_run_per_day().empty
+        assert storage.get_weather_forecasts_last_run_per_day().empty
 
     def test_none_forecast_is_not_stored(self):
         storage = self._storage()
-        storage.store_solar_cloud_forecast(None, datetime(2026, 9, 6, 21, 0))
+        storage.store_weather_forecast(
+            None, datetime(2026, 9, 6, 21, 0), source="Open-Meteo"
+        )
 
-        assert storage.get_solar_cloud_forecasts_last_run_per_day().empty
+        assert storage.get_weather_forecasts_last_run_per_day().empty
 
     def test_empty_table_returns_empty_frame(self):
-        assert self._storage().get_solar_cloud_forecasts_last_run_per_day().empty
+        assert self._storage().get_weather_forecasts_last_run_per_day().empty
 
     def test_round_trip_output_feeds_build_hourly_weather(self):
         """Issue #29's acceptance criterion, end to end."""
         storage = self._storage()
-        storage.store_solar_cloud_forecast(
-            self._forecast("2026-09-07 00:00", 24), datetime(2026, 9, 6, 21, 0)
+        storage.store_weather_forecast(
+            self._forecast("2026-09-07 00:00", 24),
+            datetime(2026, 9, 6, 21, 0),
+            source="Open-Meteo",
         )
-        run = storage.get_solar_cloud_forecasts_last_run_per_day()
+        run = storage.get_weather_forecasts_last_run_per_day()
 
         air = pd.DataFrame({
             "datetime": [
@@ -863,3 +882,92 @@ class TestSolarCloudStorageRoundTrip:
         # Straight into the model, no further massaging.
         forecaster = WaterTempForecaster()
         forecaster.set_hourly_weather(weather)
+
+    def test_a_source_may_supply_only_some_measures(self):
+        """Open-Meteo sends solar and cloud; air temp is left NULL, not zero."""
+        storage = self._storage()
+        storage.store_weather_forecast(
+            self._forecast("2026-09-07 00:00", 3),
+            datetime(2026, 9, 6, 21, 0),
+            source="Open-Meteo",
+        )
+
+        result = storage.get_weather_forecasts_last_run_per_day()
+
+        assert result["air_temp"].isna().all()
+        assert result["shortwave_radiation"].notna().all()
+
+    def test_air_only_source_stores_air_and_leaves_the_rest_null(self):
+        """The shape air temperature will arrive in when it moves here (#39)."""
+        storage = self._storage()
+        air_only = pd.DataFrame({
+            "datetime": [
+                pd.Timestamp("2026-09-07 00:00") + pd.Timedelta(hours=i)
+                for i in range(3)
+            ],
+            "air_temp": [12.0, 12.5, 13.0],
+        })
+        storage.store_weather_forecast(
+            air_only, datetime(2026, 9, 6, 21, 0), source="OpenWeatherMap"
+        )
+
+        result = storage.get_weather_forecasts_last_run_per_day()
+
+        assert list(result["air_temp"]) == [12.0, 12.5, 13.0]
+        assert result["shortwave_radiation"].isna().all()
+
+    def test_two_sources_can_forecast_the_same_hour(self):
+        """Source is in the primary key, so neither write displaces the other."""
+        storage = self._storage()
+        target = [pd.Timestamp("2026-09-07 00:00")]
+        storage.store_weather_forecast(
+            pd.DataFrame({"datetime": target, "air_temp": [12.0]}),
+            datetime(2026, 9, 6, 21, 0),
+            source="OpenWeatherMap",
+        )
+        storage.store_weather_forecast(
+            pd.DataFrame({
+                "datetime": target,
+                "shortwave_radiation": [400.0],
+                "cloud_cover": [20.0],
+            }),
+            datetime(2026, 9, 6, 21, 0),
+            source="Open-Meteo",
+        )
+
+        result = storage.get_weather_forecasts_last_run_per_day()
+
+        assert len(result) == 2
+        assert set(result["source"]) == {"OpenWeatherMap", "Open-Meteo"}
+
+    def test_one_source_going_quiet_does_not_hide_the_others_run(self):
+        """rank() partitions by source as well as day."""
+        storage = self._storage()
+        storage.store_weather_forecast(
+            self._forecast("2026-09-07 00:00", 2),
+            datetime(2026, 9, 6, 8, 0),
+            source="Open-Meteo",
+        )
+        storage.store_weather_forecast(
+            pd.DataFrame({
+                "datetime": [pd.Timestamp("2026-09-07 00:00")],
+                "air_temp": [12.0],
+            }),
+            datetime(2026, 9, 6, 21, 0),
+            source="OpenWeatherMap",
+        )
+
+        result = storage.get_weather_forecasts_last_run_per_day()
+
+        # The later OWM run must not suppress the earlier Open-Meteo one.
+        assert len(result[result["source"] == "Open-Meteo"]) == 2
+        assert len(result[result["source"] == "OpenWeatherMap"]) == 1
+
+    def test_frame_without_any_measure_column_is_rejected(self):
+        storage = self._storage()
+        with pytest.raises(ForecastStorageError, match="measure column"):
+            storage.store_weather_forecast(
+                pd.DataFrame({"datetime": [pd.Timestamp("2026-09-07")], "wind": [3.0]}),
+                datetime(2026, 9, 6, 21, 0),
+                source="Open-Meteo",
+            )

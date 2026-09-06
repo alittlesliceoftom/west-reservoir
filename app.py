@@ -149,14 +149,14 @@ def cached_replay(water_temps, coefficients, max_horizon: int = 5):
         else {}
     )
 
-    # Solar/cloud forecasts, stored from 2026-09-06 onward (issue #29). Anchors
-    # from before then have none, and fall back to actual solar/cloud - the
-    # remaining leak, and why replay numbers are an optimistic bound until this
-    # table has been accumulating for a while.
-    stored_solar = storage.get_solar_cloud_forecasts_last_run_per_day()
-    solar_runs_by_date = (
-        {date: group for date, group in stored_solar.groupby("forecast_created_date")}
-        if not stored_solar.empty
+    # Stored weather forecasts, kept from 2026-09-06 onward (issue #29).
+    # Anchors from before then have none and fall back to actual solar/cloud -
+    # the remaining leak, and why replay numbers are an optimistic bound until
+    # this table has been accumulating for a while.
+    stored_weather = storage.get_weather_forecasts_last_run_per_day()
+    weather_runs_by_date = (
+        {date: group for date, group in stored_weather.groupby("forecast_created_date")}
+        if not stored_weather.empty
         else {}
     )
 
@@ -206,14 +206,17 @@ def cached_replay(water_temps, coefficients, max_horizon: int = 5):
         # Stored solar/cloud is passed as the forecast argument, so it wins on
         # overlap and the actuals only fill hours it does not cover - the same
         # precedence the live forecast had.
-        solar_run = solar_runs_by_date.get(anchor_date)
-        solar_forecast = (
-            solar_run[["target_datetime", "shortwave_radiation", "cloud_cover"]].rename(
-                columns={"target_datetime": "datetime"}
+        run = weather_runs_by_date.get(anchor_date)
+        solar_forecast = None
+        if run is not None and not run.empty:
+            solar_forecast = run[
+                ["target_datetime", "shortwave_radiation", "cloud_cover"]
+            ].rename(columns={"target_datetime": "datetime"}).dropna(
+                subset=["shortwave_radiation", "cloud_cover"]
             )
-            if solar_run is not None and not solar_run.empty
-            else None
-        )
+            # A source that publishes only air temperature leaves these NULL.
+            if solar_forecast.empty:
+                solar_forecast = None
 
         weather = build_hourly_weather(hourly_air, solar_hist, solar_forecast)
         return weather, air_source
@@ -1233,11 +1236,12 @@ def main():
                     try:
                         storage = ForecastStorage()
                         storage.initialize_schema()
-                        storage.store_solar_cloud_forecast(
+                        storage.store_weather_forecast(
                             solar_fore,
                             st.session_state.get(
                                 'last_forecast_timestamp', datetime.now()
                             ),
+                            source="Open-Meteo",
                         )
                         st.session_state['last_solar_fetch_date'] = datetime.now().date()
                     except ForecastStorageError as e:
