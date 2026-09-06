@@ -11,8 +11,10 @@ from accuracy import (
     compute_metrics,
     join_actuals,
     metrics_by_horizon,
+    replay_current_model,
     splice_air_history,
 )
+from forecaster import WaterTempForecaster
 from forecast_storage import LAST_AIR_RUN_PER_DAY_SQL, LAST_WATER_RUN_PER_DAY_SQL
 
 
@@ -458,3 +460,136 @@ class TestSpliceAirHistory:
 
         assert result.empty
         assert list(result.columns) == ["datetime", "air_temp"]
+
+
+def _weather_frame(start, n_hours, air_temp=15.0):
+    return pd.DataFrame({
+        "datetime": [pd.Timestamp(start) + pd.Timedelta(hours=i) for i in range(n_hours)],
+        "air_temp": [air_temp] * n_hours,
+        "shortwave_radiation": [0.0] * n_hours,
+        "cloud_cover": [100.0] * n_hours,
+    })
+
+
+class TestReplayCurrentModel:
+
+    def _measurements(self, dates_temps):
+        return pd.DataFrame({
+            "date": [pd.Timestamp(d) for d, _ in dates_temps],
+            "water_temp": [t for _, t in dates_temps],
+        })
+
+    def _provider(self, label="FORECAST", n_hours=200, air_temp=15.0):
+        def provider(anchor_date):
+            return _weather_frame(anchor_date, n_hours, air_temp), label
+        return provider
+
+    def test_one_row_per_anchor_and_horizon(self):
+        forecaster = WaterTempForecaster(k_air=0.02, k_solar=0.0, k_cool=0.0)
+        measurements = self._measurements([
+            (datetime(2026, 5, 1), 10.0),
+            (datetime(2026, 5, 2), 10.5),
+        ])
+
+        result = replay_current_model(
+            forecaster, measurements, self._provider(), max_horizon=3
+        )
+
+        assert set(result["horizon_days"]) == {1, 2, 3}
+        assert len(result) == 6
+
+    def test_horizon_zero_is_never_produced(self):
+        """The replay is anchored on the measurement itself; it starts at day 1."""
+        forecaster = WaterTempForecaster(k_air=0.02, k_solar=0.0, k_cool=0.0)
+        measurements = self._measurements([(datetime(2026, 5, 1), 10.0)])
+
+        result = replay_current_model(
+            forecaster, measurements, self._provider(), max_horizon=3
+        )
+        assert 0 not in set(result["horizon_days"])
+
+    def test_air_source_label_from_provider(self):
+        forecaster = WaterTempForecaster(k_air=0.02, k_solar=0.0, k_cool=0.0)
+        measurements = self._measurements([(datetime(2026, 5, 1), 10.0)])
+
+        result = replay_current_model(
+            forecaster, measurements, self._provider(label="ACTUAL"), max_horizon=2
+        )
+        assert set(result["air_source"]) == {"ACTUAL"}
+
+    def test_per_anchor_air_source_is_preserved(self):
+        """Anchors with stored forecasts and anchors falling back must be distinguishable."""
+        forecaster = WaterTempForecaster(k_air=0.02, k_solar=0.0, k_cool=0.0)
+        measurements = self._measurements([
+            (datetime(2026, 5, 1), 10.0),
+            (datetime(2026, 5, 2), 10.5),
+        ])
+
+        def provider(anchor_date):
+            label = "FORECAST" if anchor_date.day == 1 else "ACTUAL"
+            return _weather_frame(anchor_date, 200), label
+
+        result = replay_current_model(forecaster, measurements, provider, max_horizon=1)
+
+        by_date = result.set_index("target_date")["air_source"]
+        assert by_date[pd.Timestamp(2026, 5, 2)] == "FORECAST"
+        assert by_date[pd.Timestamp(2026, 5, 3)] == "ACTUAL"
+
+    def test_warming_air_produces_warming_water(self):
+        forecaster = WaterTempForecaster(k_air=0.05, k_solar=0.0, k_cool=0.0)
+        measurements = self._measurements([(datetime(2026, 5, 1), 10.0)])
+
+        result = replay_current_model(
+            forecaster, measurements, self._provider(air_temp=25.0), max_horizon=3
+        ).sort_values("horizon_days").reset_index(drop=True)
+
+        assert result.loc[0, "forecast_temp"] > 10.0
+        assert result["forecast_temp"].is_monotonic_increasing
+
+    def test_anchor_with_no_weather_yields_nan_not_fabrication(self):
+        forecaster = WaterTempForecaster(k_air=0.02, k_solar=0.0, k_cool=0.0)
+        measurements = self._measurements([(datetime(2026, 5, 1), 10.0)])
+
+        def provider(anchor_date):
+            return None, "ACTUAL"
+
+        result = replay_current_model(forecaster, measurements, provider, max_horizon=2)
+
+        assert len(result) == 2
+        assert result["forecast_temp"].isna().all()
+        assert set(result["air_source"]) == {"ACTUAL"}
+
+    def test_measurements_with_nan_are_not_used_as_anchors(self):
+        forecaster = WaterTempForecaster(k_air=0.02, k_solar=0.0, k_cool=0.0)
+        measurements = self._measurements([
+            (datetime(2026, 5, 1), np.nan),
+            (datetime(2026, 5, 2), 10.0),
+        ])
+
+        result = replay_current_model(
+            forecaster, measurements, self._provider(), max_horizon=1
+        )
+
+        assert len(result) == 1
+        assert result.loc[0, "target_date"] == pd.Timestamp(2026, 5, 3)
+
+    def test_forecaster_weather_state_is_restored(self):
+        """The replay must not leave the forecaster pointing at replay weather."""
+        forecaster = WaterTempForecaster(k_air=0.02, k_solar=0.0, k_cool=0.0)
+        forecaster.set_hourly_weather(_weather_frame(datetime(2026, 1, 1), 48))
+        before = forecaster.hourly_weather.copy()
+
+        measurements = self._measurements([(datetime(2026, 5, 1), 10.0)])
+        replay_current_model(forecaster, measurements, self._provider(), max_horizon=2)
+
+        pd.testing.assert_frame_equal(forecaster.hourly_weather, before)
+
+    def test_empty_measurements_returns_empty_with_schema(self):
+        forecaster = WaterTempForecaster()
+        result = replay_current_model(
+            forecaster, self._measurements([]), self._provider(), max_horizon=2
+        )
+        assert result.empty
+        assert list(result.columns) == [
+            "target_date", "horizon_days", "forecast_temp", "air_source"
+        ]

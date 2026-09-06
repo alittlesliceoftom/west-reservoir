@@ -167,3 +167,86 @@ def splice_air_history(
     combined = combined.drop_duplicates(subset=["datetime"], keep="last")
 
     return combined.sort_values("datetime").reset_index(drop=True)
+
+
+def replay_current_model(
+    forecaster,
+    water_temps: pd.DataFrame,
+    weather_provider,
+    max_horizon: int = 5,
+) -> pd.DataFrame:
+    """
+    Re-run the current model over history: what accuracy would have been.
+
+    For each measured day, anchor on that measurement and forecast forward
+    max_horizon days. Each anchor is an independent trajectory.
+
+    This is a model-development tool, not a record of real performance. It is
+    optimistically biased: solar and cloud forecasts were never stored, so
+    actual solar/cloud is used for every date. See the design spec.
+
+    Args:
+        forecaster: A fitted WaterTempForecaster. Its coefficients are used
+                    as-is; nothing is refitted.
+        water_temps: load_water_temps() frame with date, water_temp.
+        weather_provider: Callable taking an anchor date (pd.Timestamp) and
+                          returning (hourly_weather_df_or_None, air_source).
+                          All I/O belongs in the caller so it can be bulk-fetched.
+        max_horizon: Days ahead to forecast from each anchor.
+
+    Returns:
+        DataFrame with REPLAY_COLUMNS. forecast_temp is NaN where weather
+        coverage was unavailable. Horizons start at 1 - the anchor is the
+        measurement itself, so there is no horizon 0.
+    """
+    if water_temps.empty:
+        return pd.DataFrame(columns=REPLAY_COLUMNS)
+
+    anchors = water_temps.dropna(subset=["water_temp"]).copy()
+    anchors["date"] = pd.to_datetime(anchors["date"]).dt.normalize()
+    anchors = anchors.drop_duplicates(subset=["date"], keep="last").sort_values("date")
+
+    if anchors.empty:
+        return pd.DataFrame(columns=REPLAY_COLUMNS)
+
+    # The replay swaps weather in per anchor; put back whatever was there.
+    saved_weather = forecaster.hourly_weather
+
+    frames = []
+    try:
+        for _, anchor in anchors.iterrows():
+            anchor_date = anchor["date"]
+            hourly_weather, air_source = weather_provider(anchor_date)
+
+            if hourly_weather is None or hourly_weather.empty:
+                frames.append(pd.DataFrame({
+                    "target_date": [
+                        anchor_date + pd.Timedelta(days=h)
+                        for h in range(1, max_horizon + 1)
+                    ],
+                    "horizon_days": list(range(1, max_horizon + 1)),
+                    "forecast_temp": [np.nan] * max_horizon,
+                    "air_source": [air_source] * max_horizon,
+                }))
+                continue
+
+            forecaster.set_hourly_weather(hourly_weather)
+            predictions = forecaster.predict_forward(
+                start_datetime=anchor_date,
+                start_water_temp=float(anchor["water_temp"]),
+                days_ahead=max_horizon,
+            )
+
+            frames.append(pd.DataFrame({
+                "target_date": predictions["target_datetime"].dt.normalize(),
+                "horizon_days": predictions["horizon_days"],
+                "forecast_temp": predictions["water_temp"],
+                "air_source": air_source,
+            }))
+    finally:
+        forecaster.hourly_weather = saved_weather
+
+    result = pd.concat(frames, ignore_index=True)
+    return result[REPLAY_COLUMNS].sort_values(
+        ["target_date", "horizon_days"]
+    ).reset_index(drop=True)
