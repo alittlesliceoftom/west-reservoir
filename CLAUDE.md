@@ -27,6 +27,24 @@ and tell you nothing you cannot get from `wc -l`.
 
 ## Common Development Commands
 
+### Python Version
+
+**Python 3.14** (verified on 3.14.7). The project ran on 3.10 until September
+2026; the whole dependency stack was upgraded together and verified to produce
+byte-identical forecasts on both interpreters before switching.
+
+Recreate the environment from scratch:
+
+```bash
+python3.14 -m venv env
+source env/bin/activate
+pip install -r requirements.txt
+```
+
+Dependencies are pinned deliberately. Upgrade them together, and re-run both
+the suite and the real-data equivalence check before changing a pin — pandas in
+particular has changed prediction-relevant defaults across major versions.
+
 ### Running the Application
 
 ```bash

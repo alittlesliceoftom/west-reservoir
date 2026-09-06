@@ -4,7 +4,7 @@
 
 **Goal:** Add a Forecast Accuracy tab reporting how well our water-temperature forecasts have performed, broken down by how many days ahead they were made — built on a forecaster API that can actually forecast.
 
-**Architecture:** Four PRs. PR 0 is housekeeping: correct the docs, clean dependencies, stop storing backfilled predictions as forecasts, and lift the duplicated data pipeline into `data.py`. PR 1 replaces `WaterTempForecaster.predict()` — today a DataFrame gap-filler — with `predict_forward`, one simulation checkpointed at each target. PR 2 adds the whole backend (`accuracy.py` plus two MotherDuck queries), unit-tested, touching no UI. PR 3 adds the Streamlit tab. Two independent comparisons share one output schema so the same charts render both: **stored forecasts** (the honest record) and **model replay** (current model re-run over history).
+**Architecture:** Five PRs. PR 1.5 was inserted mid-flight after a routine check found the historical air-temperature feed had been dead for five months (issue #33), and covers that repair plus the dependency upgrade it exposed. PR 0 is housekeeping: correct the docs, clean dependencies, stop storing backfilled predictions as forecasts, and lift the duplicated data pipeline into `data.py`. PR 1 replaces `WaterTempForecaster.predict()` — today a DataFrame gap-filler — with `predict_forward`, one simulation checkpointed at each target. PR 2 adds the whole backend (`accuracy.py` plus two MotherDuck queries), unit-tested, touching no UI. PR 3 adds the Streamlit tab. Two independent comparisons share one output schema so the same charts render both: **stored forecasts** (the honest record) and **model replay** (current model re-run over history).
 
 **Tech Stack:** Python 3, pandas, numpy, scipy, duckdb/MotherDuck, Streamlit 1.53.0, Plotly 5.17.0, pytest.
 
@@ -1186,6 +1186,131 @@ PRBODY
 
 ---
 
+
+# PR 1.5 — Data Source Repair and Dependency Upgrade
+
+Inserted mid-flight after a routine verification found the historical air
+temperature feed had been dead for five months. Split into two shipped PRs:
+
+**PR 1.5a — Open-Meteo migration and freshness tests.** DONE.
+
+**PR 1.5b — Python and dependency upgrade.** Next.
+
+## Why this exists
+
+Meteostat moved its data hosting to `data.meteostat.net` and stopped rebuilding
+`bulk.meteostat.net/v2/` on **2026-03-20**. The old host still returns HTTP 200,
+so `meteostat` 1.6.5 kept reading a frozen snapshot — globally, not just London
+(issue #33).
+
+Nobody noticed for five months because `combine_hourly_temps` linearly
+interpolated across the resulting 161-day hole. The model was handed a smooth
+ramp and trained on it without complaint: the whole first week of July 2026
+varied by **0.64 C**, where real London air swings roughly 10 C a day. **106 of
+383 training pairs** were fitted against that line.
+
+This directly threatened the accuracy work. The replay's design falls back to
+"actual" air temperature where no stored forecast exists — which would have
+meant scoring the model against a straight line and reporting the result as
+accuracy. The stored-forecast comparison was never affected, since it needs
+only water measurements.
+
+## PR 1.5a — completed
+
+- Historical daily and hourly air temperature now come from the Open-Meteo
+  archive, already in use for solar and cloud. Verified current to today, with
+  **18.5 C** of real variation across that same July week.
+- Interpolation capped at `MAX_INTERPOLATION_HOURS` (6). Bridging 3-hourly
+  forecast data is legitimate; papering over an outage is not. Real gaps stay
+  gaps so `fit()` skips them.
+- `test_data_freshness.py` checks every source is current **and that hourly air
+  actually varies** — flatness catches interpolated fiction that a staleness
+  check alone would pass. Confirmed it would have caught the outage: the old
+  interpolated series had a median daily swing of 0.089 C against a 2.0 C
+  threshold.
+- `meteostat` dependency dropped. Recoverable from git history if ever wanted;
+  issue #33 records exactly how to rebuild it against the new host in ~30 lines.
+- Fixed `predict_forward` treating a zero-length leg (duplicate target date) as
+  a missing-weather gap, which poisoned the rest of the chain with NaN.
+
+Issue #34 tracks running the freshness checks on a schedule and opening a
+GitHub issue automatically when a source goes stale.
+
+## PR 1.5b — Python and dependency upgrade
+
+The Meteostat investigation surfaced a second problem: the project runs
+**Python 3.10.4**, and `meteostat` 2.x requires `>=3.11`. That specific upgrade
+is no longer needed since Meteostat is gone, but it revealed how far behind the
+runtime and pins have drifted — several are two or more years old.
+
+### Task 1.5b.1: Upgrade Python and dependency pins
+
+**Files:**
+- Modify: `requirements.txt`
+- Modify: `CLAUDE.md` (record the required Python version)
+- Possibly: `.devcontainer/`, if it pins a Python version
+
+- [ ] **Step 1: Establish the target Python version**
+
+The only interpreter installed besides 3.10.4 is **3.14.7**. Before committing
+to it, verify the whole stack installs and the suite passes on it in a
+throwaway venv — 3.14 is recent enough that some scientific wheels may lag.
+
+If any dependency has no 3.14 wheel and will not build, fall back to installing
+3.12 or 3.13 via Homebrew rather than forcing it. Record whichever version is
+chosen, and why, in CLAUDE.md.
+
+- [ ] **Step 2: Install the stack in a throwaway venv and run the suite**
+
+```bash
+python3.14 -m venv /tmp/testenv && /tmp/testenv/bin/pip install -q --upgrade pip
+/tmp/testenv/bin/pip install streamlit pandas plotly requests scipy duckdb pytest
+/tmp/testenv/bin/python -m pytest -q
+```
+
+Expected: all tests pass. Investigate every failure individually — a genuine
+incompatibility must not be papered over by loosening a pin.
+
+Watch specifically for:
+- **pandas 3.x behaviour changes.** `pandas==2.1.4` is pinned today. Copy-on-write
+  became the default in pandas 3.0, and `deduplicate_temperatures` /
+  `fill_predictions` mutate frames in place after copying. The golden tests and
+  the real-data equivalence script are the guard here.
+- **`resample(...).interpolate(limit=..., limit_area=...)`**, used by the new
+  interpolation cap.
+- **Streamlit API drift**, particularly `width='stretch'` versus the older
+  `use_container_width`.
+
+- [ ] **Step 3: Pin the resolved versions**
+
+Record the exact versions that passed, not floating ranges — this project pins
+deliberately (see `duckdb==1.4.4`, pinned for MotherDuck compatibility, commit
+ab5e3f9). Keep that pin unless MotherDuck is verified against a newer one.
+
+- [ ] **Step 4: Verify equivalence on real data**
+
+Run the golden equivalence check (legacy `predict()` versus `fill_predictions`
+over the real production frame) on the new interpreter. A pandas upgrade
+changing prediction values would be a silent, serious regression, and this is
+the check that catches it.
+
+- [ ] **Step 5: Verify the app renders**
+
+Launch Streamlit on the new interpreter and confirm the Temperature tab
+matches: measured, today's and tomorrow's forecasts, weekly extremes, chart
+series and reading count. Compare against a capture taken on 3.10 first.
+
+- [ ] **Step 6: Recreate the project venv**
+
+Only after the throwaway venv is green. `env/` is the user's working
+environment, shared with their own shell, so **confirm before replacing it**.
+
+- [ ] **Step 7: Document and commit**
+
+CLAUDE.md should state the required Python version and how to recreate the
+venv. Commit with the tested version numbers in the message.
+
+---
 # PR 2 — Accuracy Backend
 
 Tasks 3–8. All backend, fully unit-tested, **zero `app.py` changes**. Reviews and ships independently of any UI.
