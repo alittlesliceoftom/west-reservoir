@@ -43,6 +43,30 @@ LAST_WATER_RUN_PER_DAY_SQL = """
 """
 
 
+# Final 3-hourly air forecast run of each creation day, all rows of that run.
+#
+# This table has no forecast_created_date column, so the partition casts the
+# timestamp. rank() for the same reason as above: a run is many rows sharing
+# one creation timestamp.
+LAST_AIR_RUN_PER_DAY_SQL = """
+    WITH ranked AS (
+        SELECT
+            CAST(forecast_created_timestamp AS DATE) AS forecast_created_date,
+            target_datetime,
+            air_temp,
+            rank() OVER (
+                PARTITION BY CAST(forecast_created_timestamp AS DATE)
+                ORDER BY forecast_created_timestamp DESC
+            ) AS run_rank
+        FROM air_temp_forecasts_3hourly
+    )
+    SELECT forecast_created_date, target_datetime, air_temp
+    FROM ranked
+    WHERE run_rank = 1
+    ORDER BY forecast_created_date, target_datetime
+"""
+
+
 class ForecastStorage:
     """Handles storage and retrieval of forecasts in MotherDuck."""
 
@@ -374,6 +398,31 @@ class ForecastStorage:
         ).dt.tz_localize(None)
         result["forecast_created_date"] = pd.to_datetime(result["forecast_created_date"])
         result["target_date"] = pd.to_datetime(result["target_date"])
+
+        return result
+
+    def get_air_forecasts_3hourly_last_run_per_day(self) -> pd.DataFrame:
+        """
+        Retrieve every stored 3-hourly air forecast, one run per creation day.
+
+        Fetched in bulk for backtesting: the replay needs the forecast created
+        ON each anchor date. Do not use get_forecast_for_date for this - it
+        returns the most recent forecast covering a date, which for a past
+        anchor may be a later, better-informed run (future leakage).
+
+        Returns:
+            DataFrame: forecast_created_date, target_datetime, air_temp
+        """
+        conn = self._get_connection()
+        result = conn.execute(LAST_AIR_RUN_PER_DAY_SQL).fetchdf()
+
+        if result.empty:
+            return result
+
+        result["forecast_created_date"] = pd.to_datetime(result["forecast_created_date"])
+        result["target_datetime"] = pd.to_datetime(
+            result["target_datetime"]
+        ).dt.tz_localize(None)
 
         return result
 
