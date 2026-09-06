@@ -300,6 +300,15 @@ class ForecastStorage:
         Whichever of the measure columns the frame carries are stored; the rest
         are left NULL, because a source publishes only what it publishes.
 
+        **A source must write all of its measures in one frame.** The primary
+        key is (created_timestamp, target_datetime, source), so a second call
+        for the same source and hour - solar first, then air - collides and is
+        swallowed as a duplicate, losing the second set of measures without an
+        error. When air temperature moves here (issue #39) it must arrive in
+        the same frame as solar and cloud, not as a separate write. If that
+        ever becomes inconvenient, switch this to ON CONFLICT DO UPDATE with
+        COALESCE per column so partial writes merge instead.
+
         Stored so backtests can feed the model the forecast it actually had
         rather than what actually happened. Until this has been accumulating,
         replay results are an optimistic bound (issue #29).
