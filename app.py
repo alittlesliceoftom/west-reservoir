@@ -709,7 +709,9 @@ def _shade_meteostat_outage(fig: go.Figure, last_date) -> None:
         opacity=0.10,
         line_width=0,
         layer="below",
-        annotation_text="Meteostat outage: air temp interpolated (#33)",
+        annotation_text=(
+            "Missing up-to-date weather data - accuracy affected (issue #33)"
+        ),
         annotation_position="top left",
         annotation=dict(font_size=11, font_color="#d62728"),
     )
@@ -913,15 +915,18 @@ def main():
                 horizon_options = [1, 2, 3, 4, 5]
             else:
                 st.caption(
-                    "The honest record: what we published, scored against what was "
-                    "then measured. The shaded window is the Meteostat outage "
-                    "(issue #33): from 2026-03-20 the historical air feed was "
-                    "frozen and the gap was filled by interpolation, so forecasts "
-                    "published then were both trained and simulated on a straight "
-                    "line. One-day-ahead error runs about 0.21 C before that date "
-                    "and 0.61 C after, and it widens month by month as the "
-                    "interpolated gap grows. Read that window as a broken feed, "
-                    "not a broken model."
+                    "The honest record: what we published, scored against what "
+                    "was then measured."
+                )
+                st.caption(
+                    "Shaded period: from 2026-03-20 we were missing up-to-date "
+                    "weather data, and forecast accuracy was affected. "
+                    "One-day-ahead error went from 0.21 C before to 0.61 C after, "
+                    "and got worse the longer it went on (April 0.42 C, June "
+                    "0.59 C, August 1.35 C). The weather data has since been "
+                    "fixed. See "
+                    "[issue #33](https://github.com/alittlesliceoftom/"
+                    "west-reservoir/issues/33) on GitHub for more information."
                 )
                 horizon_options = [0, 1, 2, 3, 4, 5]
 
