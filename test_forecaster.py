@@ -234,7 +234,7 @@ class TestPredictForward:
     def test_single_target_matches_manual_simulation(self):
         f = self._fitted()
         start = datetime(2026, 3, 1, 7)
-        result = f.predict_forward(start, 10.0, targets=1)
+        result = f.predict_forward(start, 10.0, days_ahead=1)
 
         assert list(result.columns) == [
             "target_datetime", "horizon_days", "water_temp", "has_weather"
@@ -253,7 +253,7 @@ class TestPredictForward:
         """A 3-day forecast is one continuous run, equal to 3 chained 1-day runs."""
         f = self._fitted()
         start = datetime(2026, 3, 1, 7)
-        result = f.predict_forward(start, 10.0, targets=3)
+        result = f.predict_forward(start, 10.0, days_ahead=3)
 
         assert list(result["horizon_days"]) == [1, 2, 3]
 
@@ -267,8 +267,8 @@ class TestPredictForward:
     def test_start_datetime_normalised_to_measurement_hour(self):
         """A midnight or mid-afternoon anchor is snapped to 7am."""
         f = self._fitted()
-        at_seven = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, targets=2)
-        at_midnight = f.predict_forward(datetime(2026, 3, 1, 0), 10.0, targets=2)
+        at_seven = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, days_ahead=2)
+        at_midnight = f.predict_forward(datetime(2026, 3, 1, 0), 10.0, days_ahead=2)
         pd.testing.assert_frame_equal(at_seven, at_midnight)
 
     def test_explicit_irregular_dates(self):
@@ -276,7 +276,7 @@ class TestPredictForward:
         f = self._fitted()
         start = datetime(2026, 3, 1, 7)
         result = f.predict_forward(
-            start, 10.0, targets=[datetime(2026, 3, 2), datetime(2026, 3, 5)]
+            start, 10.0, target_dates=[datetime(2026, 3, 2), datetime(2026, 3, 5)]
         )
         assert list(result["horizon_days"]) == [1, 4]
 
@@ -294,7 +294,7 @@ class TestPredictForward:
         f = self._fitted()
         result = f.predict_forward(
             datetime(2026, 3, 1, 7), 10.0,
-            targets=[datetime(2026, 3, 4), datetime(2026, 3, 2)],
+            target_dates=[datetime(2026, 3, 4), datetime(2026, 3, 2)],
         )
         assert list(result["horizon_days"]) == [1, 3]
 
@@ -303,7 +303,7 @@ class TestPredictForward:
         f = self._fitted()
         result = f.predict_forward(
             datetime(2026, 3, 1, 7), 10.0,
-            targets=[datetime(2026, 3, 2), datetime(2026, 3, 2)],
+            target_dates=[datetime(2026, 3, 2), datetime(2026, 3, 2)],
         )
         assert len(result) == 2
         assert bool(result.loc[0, "has_weather"]) is True
@@ -312,7 +312,7 @@ class TestPredictForward:
     def test_nan_when_weather_runs_out(self):
         """No fabrication: legs beyond weather coverage are NaN with has_weather False."""
         f = self._fitted(n_hours=30)  # covers ~1 day past the 7am anchor
-        result = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, targets=3)
+        result = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, days_ahead=3)
 
         assert len(result) == 3
         assert not np.isnan(result.loc[0, "water_temp"])
@@ -322,19 +322,19 @@ class TestPredictForward:
 
     def test_nan_propagates_once_coverage_lost(self):
         f = self._fitted(n_hours=30)
-        result = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, targets=4)
+        result = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, days_ahead=4)
         tail = result[result["horizon_days"] >= 3]["water_temp"]
         assert tail.isna().all()
 
     def test_no_weather_set_returns_all_nan(self):
         f = WaterTempForecaster()
-        result = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, targets=2)
+        result = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, days_ahead=2)
         assert result["water_temp"].isna().all()
         assert not result["has_weather"].any()
 
     def test_zero_targets_returns_empty_frame(self):
         f = self._fitted()
-        result = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, targets=0)
+        result = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, days_ahead=0)
         assert result.empty
         assert list(result.columns) == [
             "target_datetime", "horizon_days", "water_temp", "has_weather"
@@ -447,3 +447,36 @@ class TestFillPredictions:
         f = self._fitted()
         df = self._frame(["MEASURED", "MEASURED", "MEASURED"])
         pd.testing.assert_frame_equal(f.fill_predictions(df), _legacy_fill(f, df))
+
+
+class TestPredictForwardArguments:
+    """Exactly one of days_ahead / target_dates must be given."""
+
+    def _fitted(self):
+        f = WaterTempForecaster(k_air=0.02, k_solar=0.0, k_cool=0.0)
+        f.set_hourly_weather(_make_hourly_weather(datetime(2026, 3, 1, 0), 200))
+        return f
+
+    def test_neither_argument_raises(self):
+        f = self._fitted()
+        with pytest.raises(ValueError, match="exactly one"):
+            f.predict_forward(datetime(2026, 3, 1, 7), 10.0)
+
+    def test_both_arguments_raise(self):
+        f = self._fitted()
+        with pytest.raises(ValueError, match="exactly one"):
+            f.predict_forward(
+                datetime(2026, 3, 1, 7), 10.0,
+                days_ahead=2, target_dates=[datetime(2026, 3, 2)],
+            )
+
+    def test_days_ahead_zero_is_not_treated_as_missing(self):
+        """0 is falsy but explicitly given - must not trip the validation."""
+        f = self._fitted()
+        result = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, days_ahead=0)
+        assert result.empty
+
+    def test_empty_target_dates_is_not_treated_as_missing(self):
+        f = self._fitted()
+        result = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, target_dates=[])
+        assert result.empty
