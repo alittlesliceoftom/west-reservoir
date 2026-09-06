@@ -29,11 +29,9 @@ from forecaster import WaterTempForecaster
 from config import ENABLE_MOTHERDUCK
 from quotes import QUOTES
 
-# Conditional MotherDuck import
 if ENABLE_MOTHERDUCK:
     from forecast_storage import ForecastStorage, ForecastStorageError
 
-# Cache TTL for data (6 hours)
 CACHE_TTL = timedelta(hours=6)
 
 
@@ -106,7 +104,6 @@ def retrieve_gap_fill_forecasts(
         if gap_data is None or gap_data.empty:
             return pd.DataFrame(columns=["datetime", "air_temp"])
 
-        # Interpolate 3-hourly to hourly
         gap_hourly = interpolate_to_hourly(gap_data)
         return gap_hourly
 
@@ -133,7 +130,6 @@ def display_debug_panel(
 ):
     """Display comprehensive debug information."""
     with st.expander("Details for nerds", expanded=False):
-        # Section 1: Data Overview
         st.subheader("Data Overview")
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -145,7 +141,6 @@ def display_debug_panel(
         with col3:
             st.metric("Hourly Air Temps", len(hourly_air_temps))
 
-        # Section 2: Model Parameters
         st.subheader("Model Parameters")
         st.write(f"**k_air (conduction)**: {forecaster.k_air:.4f} per hour")
         st.write(f"**k_solar (shortwave heating)**: {forecaster.k_solar:.6f} °C per (W/m²) per hour")
@@ -156,19 +151,16 @@ def display_debug_panel(
             "**Physics**: ΔT = k_air·(T_air − T_water) + k_solar·I − k_cool·(1 − cloud/100)"
         )
 
-        # Section 3: Tomorrow's Calculation (if available)
         has_predictions = any(temperatures["source"] == "PREDICTED")
         if has_predictions:
             st.subheader("Tomorrow's Prediction (24h Simulation)")
 
-            # Find latest measured row
             measured_data = temperatures[temperatures["source"] == "MEASURED"]
 
             if not measured_data.empty:
                 latest = measured_data.iloc[-1]
                 latest_date = pd.Timestamp(latest["date"])
 
-                # Get the 24 hours from this measurement to next
                 start_dt = latest_date.replace(hour=forecaster.MEASUREMENT_HOUR)
                 end_dt = start_dt + timedelta(hours=24)
 
@@ -197,7 +189,6 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                         """
                     )
 
-                    # Show hourly breakdown in sub-expander
                     with st.expander("Hourly Simulation Detail"):
                         breakdown_df = pd.DataFrame(explanation["hourly_breakdown"])
                         breakdown_df["hour"] = breakdown_df["hour"].apply(
@@ -238,19 +229,16 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
             else:
                 st.info("No measured data available")
 
-        # Section 4: Hourly Air Temperature Chart
         st.subheader("Air Temperature: Last 48h + Next 48h")
         if not hourly_air_temps.empty:
             now = datetime.now()
             cutoff_past = now - timedelta(hours=48)
             cutoff_future = now + timedelta(hours=48)
 
-            # Historical: last 48h of hourly archive data
             past_hourly = hourly_air_temps[hourly_air_temps["datetime"] >= cutoff_past]
 
             fig = go.Figure()
 
-            # Open-Meteo hourly archive (solid red)
             fig.add_trace(
                 go.Scatter(
                     x=past_hourly["datetime"],
@@ -261,7 +249,6 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                 )
             )
 
-            # Gap fill from MotherDuck stored forecasts
             if gap_fill_hourly is not None and not gap_fill_hourly.empty:
                 gap_window = gap_fill_hourly[
                     (gap_fill_hourly["datetime"] >= cutoff_past) &
@@ -279,18 +266,14 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                         )
                     )
 
-            # OWM 3-hourly raw points + interpolated line
             if forecast_3hourly is not None and not forecast_3hourly.empty:
-                # Filter to next 48h
                 forecast_window = forecast_3hourly[
                     forecast_3hourly["datetime"] <= cutoff_future
                 ]
 
                 if not forecast_window.empty:
-                    # Interpolate to hourly for the line
                     forecast_interpolated = interpolate_to_hourly(forecast_window)
 
-                    # Interpolated line (orange dashed)
                     fig.add_trace(
                         go.Scatter(
                             x=forecast_interpolated["datetime"],
@@ -301,7 +284,6 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                         )
                     )
 
-                    # Raw 3-hourly points (orange markers)
                     fig.add_trace(
                         go.Scatter(
                             x=forecast_window["datetime"],
@@ -327,7 +309,6 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
             st.plotly_chart(fig, width='stretch')
             st.caption("Chart shows raw data points. Non-hourly data (e.g. 3-hourly forecasts) is resampled to hourly before feeding into the prediction model.")
 
-        # Section 5: Raw DataFrame
         st.subheader("Raw Data (Last 10 Rows)")
         display_df = temperatures.tail(10)[
             ["date", "water_temp", "air_temp", "source"]
@@ -335,7 +316,6 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
         display_df["date"] = display_df["date"].dt.strftime("%Y-%m-%d")
         st.dataframe(display_df, width='stretch')
 
-        # Section 6: Forecast Storage Status
         st.subheader("Forecast Storage (MotherDuck)")
 
         if ENABLE_MOTHERDUCK:
@@ -391,12 +371,10 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
     today = datetime.now().date()
     cutoff_date = today - timedelta(days=5)
 
-    # Filter to last 5 days + any future dates
     filtered = temperatures[
         (temperatures["date"].dt.date >= cutoff_date)
     ].copy()
 
-    # Split data by source
     measured = filtered[filtered["source"] == "MEASURED"]
     predicted = filtered[filtered["source"] == "PREDICTED"]
 
@@ -421,7 +399,6 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
         yshift=10,
     )
 
-    # Daily air temperature as whisker plot (min-avg-max)
     # For past dates prefer the archive (historical), for today prefer forecast (the archive is partial day only)
     air_data = filtered[filtered["air_temp"].notna()].copy()
     past_air = air_data[air_data["date"].dt.date < today].drop_duplicates(subset=["date"], keep="first")
@@ -431,11 +408,9 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
     if not all_with_air.empty:
         has_minmax = all_with_air["air_temp_min"].notna().any()
         if has_minmax:
-            # Calculate error bar distances
             all_with_air["error_plus"] = all_with_air["air_temp_max"] - all_with_air["air_temp"]
             all_with_air["error_minus"] = all_with_air["air_temp"] - all_with_air["air_temp_min"]
 
-            # Trace 1: Red error bars (range)
             fig.add_trace(
                 go.Scatter(
                     x=all_with_air["date"],
@@ -443,7 +418,6 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
                     mode="markers",
                     name="Air temperature range",
                     marker=dict(size=0),  # Hide markers, only show error bars
-                    # line=dict(color="rgba(255, 100, 100, 0.4)", width=10),
                     error_y=dict(
                         type="data",
                         symmetric=False,
@@ -459,7 +433,6 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
                 )
             )
 
-            # Trace 2: Black center markers (average)
             fig.add_trace(
                 go.Scatter(
                     x=all_with_air["date"],
@@ -474,7 +447,6 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
                 )
             )
 
-    # Water temperature - solid line for measured data
     if not measured.empty:
         fig.add_trace(
             go.Scatter(
@@ -500,7 +472,6 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
         past_gaps = predicted[predicted["date"] < last_measured_date].sort_values("date")
         future_forecast = predicted[predicted["date"] >= last_measured_date].sort_values("date")
 
-        # Past gap-fills: isolated markers only (no connecting line)
         if not past_gaps.empty:
             fig.add_trace(
                 go.Scatter(
@@ -519,7 +490,6 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
                 )
             )
 
-        # Future forecasts: dashed line connected from last measured point
         if not future_forecast.empty:
             last_measured = measured[measured["date"] == last_measured_date].iloc[[-1]]
             predicted_with_connection = pd.concat([last_measured, future_forecast]).sort_values("date")
@@ -555,11 +525,9 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
 
 def main():
     """Main application."""
-    # Check for forecast_graph view - early return for graph-only view
     view = st.query_params.get("view")
 
     if view == "forecast_graph":
-        # Graph-only view: load data, create chart, display, and exit
         try:
             water_temps = cached_load_water_temps()
             start_date = pd.Timestamp(water_temps["date"].min()).normalize()
@@ -569,14 +537,11 @@ def main():
 
             temperatures = build_temperatures_frame(water_temps, air_temps_hist)
 
-            # Add forecast with 3-hourly data
             combined_hourly = hourly_air_temps
             try:
-                # Load 3-hourly and combine
                 forecast_3hourly = cached_load_forecast_air_temps_3hourly(days=5)
                 forecast_hourly = interpolate_to_hourly(forecast_3hourly)
 
-                # Retrieve gap-fill data from MotherDuck if enabled
                 gap_fill_hourly = None
                 if ENABLE_MOTHERDUCK and not hourly_air_temps.empty and not forecast_3hourly.empty:
                     hist_end = hourly_air_temps["datetime"].max()
@@ -589,7 +554,6 @@ def main():
                     hourly_air_temps, forecast_hourly, gap_fill_hourly
                 )
 
-                # Also load daily for temperatures DataFrame
                 forecast = cached_load_forecast_air_temps(days=5)
                 forecast["source"] = "AIR_ONLY"
                 temperatures = pd.concat([temperatures, forecast], ignore_index=True)
@@ -598,7 +562,6 @@ def main():
             except DataLoadError:
                 temperatures_deduped = temperatures.copy()
 
-            # Load solar/cloud (Open-Meteo) and merge into hourly weather
             solar_hist = None
             solar_fore = None
             try:
@@ -612,13 +575,11 @@ def main():
 
             hourly_weather = build_hourly_weather(combined_hourly, solar_hist, solar_fore)
 
-            # Train and predict
             forecaster = WaterTempForecaster()
             forecaster.set_hourly_weather(hourly_weather)
             forecaster.fit(temperatures_deduped[temperatures_deduped["source"] == "MEASURED"])
             temperatures_deduped = forecaster.fill_predictions(temperatures_deduped)
 
-            # Show only the chart
             chart = create_temperature_chart(temperatures_deduped)
             st.plotly_chart(chart, width='stretch')
             st.stop()
@@ -627,7 +588,6 @@ def main():
             st.error(f"Cannot load required data: {e}")
             st.stop()
 
-    # Full view continues below (no conditionals needed)
     st.title("West Reservoir Temperature Tracker + Forecaster")
     st.markdown("Tracking and forecasting water temperature at West Reservoir, London.")
 
@@ -649,8 +609,6 @@ def main():
             st.info("No quotes yet - check back soon!")
 
     with tab_temp:
-
-        # Header with info and image
         col_info, col_image = st.columns([1, 1])
         with col_info:
             st.info(
@@ -666,27 +624,20 @@ def main():
             st.image("image.png",)
 
         try:
-            # Step 1: Load water temperature measurements
             water_temps = cached_load_water_temps()
 
-            # Step 2: Load historical air temperatures (daily for chart)
             # Normalize dates to day-level for consistent caching
             start_date = pd.Timestamp(water_temps["date"].min()).normalize()
             end_date = pd.Timestamp.now().normalize()
             air_temps_hist = cached_load_historical_air_temps(start_date, end_date)
 
-            # Step 3: Load hourly air temperatures (for model)
             hourly_air_temps = cached_load_hourly_air_temps(start_date, end_date)
 
-            # Steps 4 and 5: Merge into the main temperatures DataFrame and
-            # mark each row MEASURED or AIR_ONLY
             temperatures = build_temperatures_frame(water_temps, air_temps_hist)
 
-            # Step 6: Load 3-hourly forecast and combine with historical hourly
             forecast_3hourly = None
             gap_fill_hourly = None
             try:
-                # Load raw 3-hourly forecast
                 forecast_3hourly = cached_load_forecast_air_temps_3hourly(days=5)
 
                 # Store 3-hourly in MotherDuck (only once per day)
@@ -705,21 +656,17 @@ def main():
                         except Exception as e:
                             st.warning(f"Forecast storage error: {e}")
 
-                # Interpolate 3-hourly to hourly
                 forecast_hourly = interpolate_to_hourly(forecast_3hourly)
 
-                # Step 6b: Retrieve stored forecasts from MotherDuck to fill the gap
                 # Gap is between: last archive timestamp -> first OWM timestamp
                 if ENABLE_MOTHERDUCK and not hourly_air_temps.empty and not forecast_3hourly.empty:
                     hist_end = hourly_air_temps["datetime"].max()
                     fore_start = forecast_3hourly["datetime"].min()
 
-                    # Only try to fill if there's actually a gap (more than 1 hour)
                     gap_hours = (fore_start - hist_end).total_seconds() / 3600
                     if gap_hours > 1:
                         gap_fill_hourly = retrieve_gap_fill_forecasts(hist_end, fore_start)
 
-                # Combine historical hourly + gap fill + forecast hourly
                 combined_hourly = combine_hourly_temps(
                     hourly_air_temps, forecast_hourly, gap_fill_hourly
                 )
@@ -739,7 +686,6 @@ def main():
                 combined_hourly = hourly_air_temps
                 temperatures_deduped = temperatures.copy()  # No duplicates without forecast
 
-            # Step 6c: Load solar/cloud from Open-Meteo and merge into hourly weather
             solar_hist = None
             solar_fore = None
             try:
@@ -753,12 +699,10 @@ def main():
 
             hourly_weather = build_hourly_weather(combined_hourly, solar_hist, solar_fore)
 
-            # Step 7: Train forecaster with combined hourly weather data
             forecaster = WaterTempForecaster()
             forecaster.set_hourly_weather(hourly_weather)
             forecaster.fit(temperatures_deduped[temperatures_deduped["source"] == "MEASURED"])
 
-            # Step 8: Generate predictions (use deduped for proper chaining)
             temperatures_deduped = forecaster.fill_predictions(temperatures_deduped)
 
             # Store water predictions in MotherDuck (only once per day)
@@ -793,19 +737,16 @@ def main():
                         st.warning(f"Prediction storage error: {e}")
 
             with col_info:
-                # Display: Current temperature with clear date labeling
                 today = datetime.now().date()
                 yesterday = today - timedelta(days=1)
                 tomorrow = today + timedelta(days=1)
 
                 st.header("Current Temperature")
 
-                # Get measured data (use deduped for display)
                 measured_data = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
                 today_data = temperatures_deduped[temperatures_deduped["date"].dt.date == today]
                 has_today_measurement = any(today_data["source"] == "MEASURED")
 
-                # Show measured temperature status
                 if has_today_measurement:
                     today_measured = today_data[today_data["source"] == "MEASURED"].iloc[0]
                     st.metric("Today's Measured", f"{today_measured['water_temp']:.1f}C")
@@ -821,13 +762,11 @@ def main():
                 # Compute forecasts independently (always from yesterday's measurement)
                 st.subheader("Forecasts")
 
-                # Find yesterday's measurement for today's forecast
                 yesterday_data = measured_data[measured_data["date"].dt.date == yesterday]
                 today_forecast_temp = None
                 tomorrow_forecast_temp = None
 
                 if not yesterday_data.empty:
-                    # Compute today's forecast from yesterday's measurement
                     yesterday_temp = yesterday_data.iloc[-1]["water_temp"]
                     yesterday_dt = pd.Timestamp(yesterday).replace(hour=forecaster.MEASUREMENT_HOUR)
                     today_dt = pd.Timestamp(today).replace(hour=forecaster.MEASUREMENT_HOUR)
@@ -837,12 +776,10 @@ def main():
                             yesterday_temp, weather_slice
                         )
 
-                # Get tomorrow's forecast from the predictions DataFrame
                 tomorrow_data = temperatures_deduped[temperatures_deduped["date"].dt.date == tomorrow]
                 if not tomorrow_data.empty and tomorrow_data.iloc[0]["source"] == "PREDICTED":
                     tomorrow_forecast_temp = tomorrow_data.iloc[0]["water_temp"]
 
-                # Display forecasts
                 col_today_fc, col_tomorrow_fc, col_hottest, col_coldest = st.columns(4)
                 with col_today_fc:
                     if today_forecast_temp is not None and pd.notna(today_forecast_temp):
@@ -875,12 +812,10 @@ def main():
                     else:
                         st.metric("Coldest This Week", "N/A")
 
-                # Refresh button to clear cache
                 if st.button("Data looks old? Press to refresh weather forecast and water temperature data", icon = '🔄' ):
                     st.cache_data.clear()
                     st.rerun()
 
-            # Display: Temperature chart
             st.header("Temperature History and Forecast")
             st.text("""The chart shows the temperature history and forecast for the last 5 days, and next 5 days.
             Red bar shows the air temp range each day, with the black line being the average. The blue line is the water tempterature. It is dotted for forecast days.""")
@@ -888,7 +823,6 @@ def main():
             chart = create_temperature_chart(temperatures_deduped)
             st.plotly_chart(chart, width='stretch')
 
-            # Display: Summary statistics
             st.header("Summary Statistics")
             measured = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
             col1, col2, col3 = st.columns(3)
@@ -899,10 +833,8 @@ def main():
             with col3:
                 st.metric("Total Readings Taken", len(measured))
 
-            # Display: Debug panel (always visible)
             display_debug_panel(temperatures_deduped, forecaster, hourly_air_temps, forecast_3hourly, gap_fill_hourly)
 
-            # About section
             st.divider()
             st.subheader("About the Project")
             st.markdown(

@@ -29,7 +29,6 @@ class ForecastStorage:
                 conn = duckdb.connect(f"md:?motherduck_token={token}")
                 conn.execute(f"CREATE DATABASE IF NOT EXISTS {self.database}")
                 conn.close()
-                # Now connect to the database
                 connection_string = f"md:{self.database}?motherduck_token={token}"
                 self._conn = duckdb.connect(connection_string)
             except ConfigError as e:
@@ -42,7 +41,6 @@ class ForecastStorage:
         """Create tables if they don't exist. Idempotent."""
         conn = self._get_connection()
 
-        # Create air_temp_forecasts table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS air_temp_forecasts (
                 forecast_created_date DATE NOT NULL,
@@ -61,7 +59,6 @@ class ForecastStorage:
             ON air_temp_forecasts(target_date, forecast_created_date)
         """)
 
-        # Create water_temp_predictions table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS water_temp_predictions (
                 forecast_created_date DATE NOT NULL,
@@ -81,7 +78,6 @@ class ForecastStorage:
             ON water_temp_predictions(target_date, forecast_created_date)
         """)
 
-        # Create air_temp_forecasts_3hourly table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS air_temp_forecasts_3hourly (
                 forecast_created_timestamp TIMESTAMP NOT NULL,
@@ -265,7 +261,6 @@ class ForecastStorage:
         if result.empty:
             return None
 
-        # Ensure datetime column is timezone-naive
         result["datetime"] = pd.to_datetime(result["datetime"]).dt.tz_localize(None)
 
         return result
@@ -315,7 +310,6 @@ class ForecastStorage:
         if result.empty:
             return None
 
-        # Ensure datetime column is proper datetime type and timezone-naive
         # MotherDuck returns timezone-aware timestamps, but our local data is naive
         result["datetime"] = pd.to_datetime(result["datetime"]).dt.tz_localize(None)
 

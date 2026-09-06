@@ -22,17 +22,14 @@ def _read_secrets_file(key: str) -> str | None:
     return None
 
 
-# Google Sheets configuration
 GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1HNnucep6pv2jCFg2bYR_gV78XbYvWYyjx9y9tTNVapw/export?format=csv&gid=0"
 
 # West Reservoir location (London, UK)
 RESERVOIR_LAT = 51.566938
 RESERVOIR_LON = -0.090492
 
-# Request timeout for API calls
 REQUEST_TIMEOUT = 30
 
-# Feature flags
 ENABLE_MOTHERDUCK = True  # Enable MotherDuck storage for forecast history
 
 
@@ -46,15 +43,12 @@ def get_openweather_api_key() -> str:
     Raises:
         ConfigError: If API key is not found
     """
-    # Try environment variable first
     api_key = os.getenv("OPENWEATHER_API_KEY")
 
-    # Try Streamlit secrets if environment variable not set
     if not api_key:
         try:
             api_key = st.secrets["OPENWEATHER_API_KEY"]
         except Exception:
-            # Fallback: read directly from secrets file
             api_key = _read_secrets_file("OPENWEATHER_API_KEY")
 
     if not api_key:
@@ -76,15 +70,12 @@ def get_motherduck_token() -> str:
     Raises:
         ConfigError: If token is not found
     """
-    # Try environment variable first
     token = os.getenv("MOTHERDUCK_TOKEN")
 
-    # Try Streamlit secrets if environment variable not set
     if not token:
         try:
             token = st.secrets["MOTHERDUCK_TOKEN"]
         except Exception:
-            # Fallback: read directly from secrets file
             token = _read_secrets_file("MOTHERDUCK_TOKEN")
 
     if not token:
