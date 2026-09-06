@@ -52,7 +52,8 @@ python3 -c "import config; import data; import forecaster; print('OK')"
 python3 -c "from data import load_water_temps; print(f'{len(load_water_temps())} readings loaded')"
 
 # Test forecaster
-python3 -c "from forecaster import WaterTempForecaster; f = WaterTempForecaster(); print(f.explain_prediction(12.0, 10.0))"
+# Test forecaster (run the whole suite; it needs no network)
+python3 -m pytest test_forecaster.py -v
 ```
 
 ## Weather API Setup (Optional)
@@ -131,10 +132,15 @@ temperatures = pd.DataFrame({
 - Measurements are taken at 7am, so every training and prediction period runs
   7am to 7am (24 hours)
 - `fit()` - Optimise `k_air`, `k_solar` and `k_cool` together against measured data
-- `predict()` - Generate predictions iteratively
+- `predict_forward(anchor, temp, days_ahead=n | target_dates=[...])` - Forecast
+  forward from a known temperature on a known date. One call returns every
+  horizon asked for. This is the API to use for new work.
+- `fill_predictions()` - Fill `AIR_ONLY` rows in a `temperatures` frame, built
+  on `predict_forward`. Used by the dashboard's single-DataFrame flow.
 - `explain_prediction()` - Return calculation breakdown for transparency
-- When solar/cloud data is unavailable the model degrades gracefully to the
-  original single-term physics (zero solar, fully overcast)
+- Weather is supplied via `set_hourly_weather`, which requires air temp,
+  shortwave radiation and cloud cover. Callers fill missing solar/cloud with
+  zero solar and 100% cloud, which collapses the model to air conduction alone
 - **No temperature constraints** - predicts physical values without artificial floors/ceilings
 
 #### `forecast_storage.py`
@@ -246,7 +252,7 @@ When making changes, test:
 
 1. **Module imports**: `python3 -c "import app"`
 2. **Data loading**: Run each `load_*` function manually
-3. **Forecaster**: Test `fit()`, `predict()`, and `explain_prediction()`
+3. **Forecaster**: Test `fit()`, `predict_forward()`, `fill_predictions()`, and `explain_prediction()`
 4. **Streamlit app**: `streamlit run app.py` and check browser
 5. **Error cases**: Test with missing API key, unreachable URLs, etc.
 

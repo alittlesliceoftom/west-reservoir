@@ -25,10 +25,10 @@ class WaterTempForecaster:
     Water temperature measurements are at 7am, so each training/prediction
     period spans 7am-to-7am (24 hours).
 
-    When solar/cloud data is unavailable (e.g. via the legacy
-    `set_hourly_air_temps` path), shortwave_radiation defaults to 0 and
-    cloud_cover defaults to 100% (fully overcast → no radiative cooling).
-    In that case the model collapses to the original single-term physics.
+    Weather is supplied via `set_hourly_weather`, which requires all three
+    columns. Where solar/cloud data is unavailable upstream, callers fill
+    shortwave_radiation with 0 and cloud_cover with 100% (fully overcast, so
+    no radiative cooling), which collapses the model to air conduction alone.
     """
 
     MEASUREMENT_HOUR = 7  # Water temp is measured at 7am
@@ -77,18 +77,6 @@ class WaterTempForecaster:
         df = df.ffill(limit=3)
         self.hourly_weather = df
 
-    def set_hourly_air_temps(self, hourly_air_temps: pd.DataFrame) -> None:
-        """
-        Legacy entry point: accept air temps only and assume zero solar / full cloud.
-
-        Args:
-            hourly_air_temps: DataFrame with 'datetime' and 'air_temp' columns
-        """
-        df = hourly_air_temps[["datetime", "air_temp"]].copy()
-        df["shortwave_radiation"] = 0.0
-        df["cloud_cover"] = 100.0  # fully overcast → no radiative cooling term
-        self.set_hourly_weather(df)
-
     def _get_weather_for_period(
         self, start_dt: datetime, end_dt: datetime
     ) -> pd.DataFrame:
@@ -100,12 +88,6 @@ class WaterTempForecaster:
             self.hourly_weather.index < end_dt
         )
         return self.hourly_weather.loc[mask].copy()
-
-    def _get_hourly_temps_for_period(
-        self, start_dt: datetime, end_dt: datetime
-    ) -> List[float]:
-        """Back-compat helper: return just hourly air temps for a period."""
-        return self._get_weather_for_period(start_dt, end_dt)["air_temp"].tolist()
 
     @staticmethod
     def _step(
@@ -144,20 +126,6 @@ class WaterTempForecaster:
         for i in range(len(airs)):
             water = self._step(
                 water, airs[i], sols[i], clouds[i],
-                self.k_air, self.k_solar, self.k_cool,
-            )
-        return water
-
-    def _simulate_24h(
-        self, start_water_temp: float, hourly_air_temps: Sequence[float]
-    ) -> float:
-        """
-        Back-compat: simulate using only an air-temp list (zero solar, full cloud).
-        """
-        water = start_water_temp
-        for air_temp in hourly_air_temps:
-            water = self._step(
-                water, air_temp, 0.0, 100.0,
                 self.k_air, self.k_solar, self.k_cool,
             )
         return water
@@ -229,27 +197,6 @@ class WaterTempForecaster:
         if result.success:
             self.k_air, self.k_solar, self.k_cool = (float(x) for x in result.x)
 
-    def predict_next_day(
-        self,
-        current_water_temp: float,
-        hourly_air_temps_or_weather,
-    ) -> float:
-        """
-        Predict tomorrow's water temperature (7am to 7am).
-
-        Args:
-            current_water_temp: Today's water temperature at 7am
-            hourly_air_temps_or_weather: Either a list of 24 hourly air temps
-                (legacy path, assumes zero solar / full cloud) or a DataFrame
-                with columns air_temp, shortwave_radiation, cloud_cover.
-
-        Returns:
-            Predicted water temperature 24h later.
-        """
-        if isinstance(hourly_air_temps_or_weather, pd.DataFrame):
-            return self._simulate_period(current_water_temp, hourly_air_temps_or_weather)
-        return self._simulate_24h(current_water_temp, hourly_air_temps_or_weather)
-
     def predict_forward(
         self,
         start_datetime,
@@ -288,6 +235,13 @@ class WaterTempForecaster:
                 horizon_days    (int, days from the anchor)
                 water_temp      (float, NaN where weather coverage is missing)
                 has_weather     (bool, whether that leg had any weather data)
+
+            A leg with no weather yields NaN, and because each leg starts from
+            the previous one, every later leg is NaN too. That is deliberate:
+            once the chain breaks there is no honest value to continue from.
+            Note a zero-length leg (a duplicate target date) counts as "no
+            weather" and so breaks the chain the same way - unreachable in the
+            dashboard flow, which deduplicates dates before predicting.
 
         Raises:
             ValueError: If both or neither of days_ahead / target_dates given.
@@ -348,31 +302,18 @@ class WaterTempForecaster:
     def explain_prediction(
         self,
         current_water_temp: float,
-        weather_slice=None,
-        hourly_air_temps: Optional[Sequence[float]] = None,
+        weather_slice: Optional[pd.DataFrame] = None,
     ) -> Dict:
         """
         Returns a per-hour breakdown of the simulation including the
         contribution of each physics term.
 
-        Pass either `weather_slice` (preferred, full 3-term model) or
-        `hourly_air_temps` (legacy, assumes zero solar / full cloud).
-        For back-compat, a list passed positionally as `weather_slice`
-        is treated as `hourly_air_temps`.
+        Args:
+            current_water_temp: Water temperature at the start of the period.
+            weather_slice: DataFrame with air_temp, shortwave_radiation and
+                           cloud_cover. None or empty returns a zero-hour
+                           breakdown with the temperature unchanged.
         """
-        # Back-compat: positional list goes to legacy path
-        if weather_slice is not None and not isinstance(weather_slice, pd.DataFrame):
-            hourly_air_temps = weather_slice
-            weather_slice = None
-
-        if weather_slice is None and hourly_air_temps is not None:
-            n = len(hourly_air_temps)
-            weather_slice = pd.DataFrame({
-                "air_temp": list(hourly_air_temps),
-                "shortwave_radiation": [0.0] * n,
-                "cloud_cover": [100.0] * n,
-            })
-
         if weather_slice is None or weather_slice.empty:
             return {
                 "current_water_temp": current_water_temp,
