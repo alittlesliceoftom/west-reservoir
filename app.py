@@ -717,7 +717,7 @@ def filter_to_period(df: pd.DataFrame, date_column: str, days) -> pd.DataFrame:
     cutoff = dates.max() - pd.Timedelta(days=days)
     return df[dates >= cutoff]
 
-def _shade_meteostat_outage(fig: go.Figure, last_date) -> None:
+def _shade_meteostat_outage(fig: go.Figure, first_date, last_date) -> None:
     """
     Shade the window in which historical air temperature was interpolated.
 
@@ -725,10 +725,16 @@ def _shade_meteostat_outage(fig: go.Figure, last_date) -> None:
     was dead. The replay reads the repaired archive, so its errors in this
     window are not caused by the outage and shading them would mislead.
 
+    The band starts at the later of the outage date and the first plotted
+    date. Plotly widens an axis to fit its shapes, so a band anchored at
+    2026-03-20 stretched the x-axis back five months and undid the chart
+    period filter - the data was windowed correctly, the shape was not.
+
     Args:
         fig: Figure to shade.
-        last_date: Right edge of the shaded band - the last date on the chart,
-                   which may extend past the last scored forecast.
+        first_date: First date plotted, used to clamp the band's left edge.
+        last_date: Right edge of the band - the last date on the chart, which
+                   may extend past the last scored forecast.
     """
     if last_date is None or pd.isna(last_date):
         return
@@ -737,8 +743,12 @@ def _shade_meteostat_outage(fig: go.Figure, last_date) -> None:
     if last_date < METEOSTAT_OUTAGE_START:
         return
 
+    start = METEOSTAT_OUTAGE_START
+    if first_date is not None and not pd.isna(first_date):
+        start = max(start, pd.Timestamp(first_date))
+
     fig.add_vrect(
-        x0=METEOSTAT_OUTAGE_START,
+        x0=start,
         x1=last_date,
         fillcolor="#d62728",
         opacity=0.10,
@@ -802,7 +812,11 @@ def create_forecast_vs_actual_chart(
         ))
 
     if mark_outage:
-        _shade_meteostat_outage(fig, max(measured_x.max(), scored["target_date"].max()))
+        _shade_meteostat_outage(
+            fig,
+            min(measured_x.min(), scored["target_date"].min()),
+            max(measured_x.max(), scored["target_date"].max()),
+        )
 
     fig.update_layout(
         xaxis_title="Date", yaxis_title="Water temperature (C)",
@@ -835,7 +849,9 @@ def create_error_over_time_chart(
     fig.add_hline(y=0, line_dash="dash", line_color="grey")
 
     if mark_outage:
-        _shade_meteostat_outage(fig, scored["target_date"].max())
+        _shade_meteostat_outage(
+            fig, scored["target_date"].min(), scored["target_date"].max()
+        )
 
     fig.update_layout(
         xaxis_title="Date", yaxis_title="Forecast - actual (C)",
