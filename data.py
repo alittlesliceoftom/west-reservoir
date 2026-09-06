@@ -37,26 +37,20 @@ def load_water_temps() -> pd.DataFrame:
         response = requests.get(GOOGLE_SHEETS_URL, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
 
-        # Parse CSV
         df = pd.read_csv(StringIO(response.text))
 
-        # Check we have at least 2 columns
         if len(df.columns) < 2:
             raise DataLoadError(
                 f"Google Sheets data must have at least 2 columns (Date, Temperature), found {len(df.columns)}"
             )
 
-        # Standardize column names
         df.columns = ["date", "water_temp"] + list(df.columns[2:])
         df = df[["date", "water_temp"]]
 
-        # Convert date column (format: DD/MM/YYYY)
         df["date"] = pd.to_datetime(df["date"], format="%d/%m/%Y", errors="coerce")
 
-        # Convert temperature to numeric
         df["water_temp"] = pd.to_numeric(df["water_temp"], errors="coerce")
 
-        # Remove rows with invalid data
         initial_count = len(df)
         df = df.dropna()
 
@@ -65,7 +59,6 @@ def load_water_temps() -> pd.DataFrame:
                 "No valid water temperature data found in Google Sheets after cleaning"
             )
 
-        # Sort by date
         df = df.sort_values("date").reset_index(drop=True)
 
         return df
@@ -206,14 +199,12 @@ def load_forecast_air_temps(days: int = 5) -> pd.DataFrame:
         DataLoadError: If forecast cannot be loaded or API key is missing
     """
     try:
-        # Get API key (will raise ConfigError if not found)
         from config import ConfigError
         try:
             api_key = get_openweather_api_key()
         except ConfigError as e:
             raise DataLoadError(str(e))
 
-        # OpenWeatherMap 5-day forecast endpoint
         url = "https://api.openweathermap.org/data/2.5/forecast"
         params = {
             "lat": RESERVOIR_LAT,
@@ -228,29 +219,24 @@ def load_forecast_air_temps(days: int = 5) -> pd.DataFrame:
 
         data = response.json()
 
-        # Check for API errors
         if "list" not in data:
             raise DataLoadError(
                 f"Invalid response from OpenWeatherMap API: {data.get('message', 'Unknown error')}"
             )
 
-        # Process forecast data - aggregate by date
         daily_data = {}
 
         for item in data["list"]:
-            # Convert timestamp to date
             dt = datetime.fromtimestamp(item["dt"])
             date_key = dt.date()
 
             temp = item["main"]["temp"]
 
-            # Group by date
             if date_key not in daily_data:
                 daily_data[date_key] = []
 
             daily_data[date_key].append(temp)
 
-        # Create daily aggregated data with min/max
         forecast_data = []
         for date_key, temps in daily_data.items():
             forecast_data.append(
@@ -322,7 +308,6 @@ def load_forecast_air_temps_3hourly(days: int = 5) -> pd.DataFrame:
                 f"Invalid response from OpenWeatherMap API: {data.get('message', 'Unknown error')}"
             )
 
-        # Extract 3-hourly data without aggregation
         forecast_data = []
         for item in data["list"]:
             dt = datetime.fromtimestamp(item["dt"])
@@ -493,13 +478,10 @@ def interpolate_to_hourly(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
 
-    # Set datetime as index for resampling
     df_indexed = df.set_index("datetime").sort_index()
 
-    # Resample to hourly and interpolate
     hourly = df_indexed.resample("h").interpolate(method="linear")
 
-    # Reset index to get datetime as column
     hourly = hourly.reset_index()
 
     return hourly
@@ -617,30 +599,24 @@ def combine_hourly_temps(
             dt = dt.dt.tz_convert("UTC").dt.tz_localize(None)
         return dt.astype("datetime64[s]")
 
-    # Normalize column names and ensure timezone-naive datetimes
     hist = historical[["datetime", "air_temp"]].copy()
     fore = forecast[["datetime", "air_temp"]].copy()
     hist["datetime"] = normalize_datetime_col(hist["datetime"])
     fore["datetime"] = normalize_datetime_col(fore["datetime"])
 
-    # Find where historical ends and forecast begins
     hist_end = hist["datetime"].max()
     fore_start = fore["datetime"].min()
 
-    # Only use forecast data after historical ends
     fore_future = fore[fore["datetime"] > hist_end].copy()
 
-    # Process gap-fill data if available
     gap_data = None
     if gap_fill is not None and not gap_fill.empty:
         gap = gap_fill[["datetime", "air_temp"]].copy()
         gap["datetime"] = normalize_datetime_col(gap["datetime"])
-        # Only use gap data that's after historical and before forecast
         filtered = gap[(gap["datetime"] > hist_end) & (gap["datetime"] < fore_start)]
         if not filtered.empty:
             gap_data = filtered.copy()
 
-    # Combine all sources: historical + gap_fill + forecast (only non-empty)
     to_concat = [hist, fore_future]
     if gap_data is not None:
         to_concat.insert(1, gap_data)  # Insert between hist and fore
