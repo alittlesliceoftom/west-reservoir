@@ -8,6 +8,14 @@ from datetime import datetime, timedelta
 from forecaster import WaterTempForecaster, WEATHER_COLUMNS
 
 
+# What predict_forward hands its callers. Asserted as a set: order is not part
+# of the contract here, and a spurious order failure sends people looking in
+# the wrong place.
+PREDICT_FORWARD_COLUMNS = {
+    "target_datetime", "horizon_days", "water_temp", "has_weather"
+}
+
+
 def _make_hourly_weather(
     start: datetime,
     n_hours: int,
@@ -277,9 +285,7 @@ class TestPredictForward:
         start = datetime(2026, 3, 1, 7)
         result = f.predict_forward(start, 10.0, days_ahead=1)
 
-        assert list(result.columns) == [
-            "target_datetime", "horizon_days", "water_temp", "has_weather"
-        ]
+        assert set(result.columns) == PREDICT_FORWARD_COLUMNS
         assert len(result) == 1
         assert result.loc[0, "horizon_days"] == 1
         assert result.loc[0, "target_datetime"] == pd.Timestamp(2026, 3, 2, 7)
@@ -395,9 +401,7 @@ class TestPredictForward:
         f = self._fitted()
         result = f.predict_forward(datetime(2026, 3, 1, 7), 10.0, days_ahead=0)
         assert result.empty
-        assert list(result.columns) == [
-            "target_datetime", "horizon_days", "water_temp", "has_weather"
-        ]
+        assert set(result.columns) == PREDICT_FORWARD_COLUMNS
 
     # Argument validation: exactly one of days_ahead / target_dates.
 

@@ -6,6 +6,14 @@ import pandas as pd
 import pytest
 from datetime import datetime
 
+from conftest import (
+    AIR_FORECAST_3HOURLY_COLUMNS,
+    WATER_PREDICTIONS_COLUMNS,
+    hourly_frame,
+    raw_table,
+    tz_aware,
+    weather_frame,
+)
 from accuracy import (
     BIAS_NOTE,
     compute_metrics,
@@ -34,28 +42,17 @@ WEATHER_READ_COLUMNS = {
 
 def _local_predictions_db(rows):
     """In-memory DuckDB with the water_temp_predictions schema and given rows."""
-    conn = duckdb.connect(":memory:")
-    conn.execute("""
-        CREATE TABLE water_temp_predictions (
-            forecast_created_date DATE NOT NULL,
-            forecast_created_timestamp TIMESTAMP NOT NULL,
-            target_date DATE NOT NULL,
-            water_temp DOUBLE NOT NULL,
-            heat_transfer_coeff DOUBLE NOT NULL,
-            start_water_temp DOUBLE NOT NULL,
-            simulation_hours INTEGER NOT NULL,
-            source_air_forecast_timestamp TIMESTAMP NOT NULL
-        )
-    """)
-    for r in rows:
-        conn.execute(
-            "INSERT INTO water_temp_predictions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            [
+    return raw_table(
+        "water_temp_predictions",
+        WATER_PREDICTIONS_COLUMNS,
+        [
+            (
                 r["created_date"], r["created_ts"], r["target_date"], r["water_temp"],
                 0.02, 10.0, 24, r["created_ts"],
-            ],
-        )
-    return conn
+            )
+            for r in rows
+        ],
+    )
 
 
 def _row(created_date, created_hour, target_date, water_temp):
@@ -140,21 +137,12 @@ class TestLastWaterRunPerDay:
 
 def _local_air_db(rows):
     """In-memory DuckDB with the air_temp_forecasts_3hourly schema."""
-    conn = duckdb.connect(":memory:")
-    conn.execute("""
-        CREATE TABLE air_temp_forecasts_3hourly (
-            forecast_created_timestamp TIMESTAMP NOT NULL,
-            target_datetime TIMESTAMP NOT NULL,
-            air_temp DOUBLE NOT NULL,
-            source VARCHAR DEFAULT 'OpenWeatherMap'
-        )
-    """)
-    for created_ts, target_dt, air_temp in rows:
-        conn.execute(
-            "INSERT INTO air_temp_forecasts_3hourly VALUES (?, ?, ?, 'OpenWeatherMap')",
-            [created_ts, target_dt, air_temp],
-        )
-    return conn
+    return raw_table(
+        "air_temp_forecasts_3hourly",
+        AIR_FORECAST_3HOURLY_COLUMNS,
+        [(created_ts, target_dt, air_temp, "OpenWeatherMap")
+         for created_ts, target_dt, air_temp in rows],
+    )
 
 
 class TestLastAirRunPerDay:
@@ -258,9 +246,9 @@ class TestMetricsByHorizon:
         result = metrics_by_horizon(df)
 
         assert list(result["horizon_days"]) == [1, 2]
-        assert list(result.columns) == [
+        assert set(result.columns) == {
             "horizon_days", "mae", "bias", "rmse", "hit_rate_0_5", "n"
-        ]
+        }
 
     def test_metrics_computed_within_horizon(self):
         df = _scored([(11.0, 10.0), (12.0, 10.0)], horizons=[1, 2])
@@ -276,13 +264,6 @@ class TestMetricsByHorizon:
 
         assert result.loc[1, "n"] == 0
         assert np.isnan(result.loc[1, "mae"])
-
-    def test_empty_frame_returns_empty_with_columns(self):
-        result = metrics_by_horizon(_scored([], horizons=[]))
-        assert result.empty
-        assert list(result.columns) == [
-            "horizon_days", "mae", "bias", "rmse", "hit_rate_0_5", "n"
-        ]
 
 
 class TestJoinActuals:
@@ -372,16 +353,11 @@ class TestJoinActuals:
         result = join_actuals(forecasts, measurements)
         assert result.empty
 
-    def test_empty_forecasts_returns_empty_with_schema(self):
-        result = join_actuals(self._forecasts([]), self._measurements([]))
-        assert result.empty
-        assert list(result.columns) == [
-            "target_date", "horizon_days", "forecast_temp",
-            "actual_temp", "error", "air_source",
-        ]
-
 
 def _air_frame(start, n_hours, air_temp, step_hours=1):
+    """Hourly by default; step_hours=3 gives the 3-hourly stored-forecast shape."""
+    if step_hours == 1:
+        return hourly_frame(start, n_hours, air_temp=air_temp)
     return pd.DataFrame({
         "datetime": [
             pd.Timestamp(start) + pd.Timedelta(hours=i * step_hours)
@@ -466,23 +442,9 @@ class TestSpliceAirHistory:
         assert set(result["air_temp"]) == {20.0}
         assert len(result) == 24
 
-    def test_both_empty_returns_empty_with_schema(self):
-        anchor = pd.Timestamp(2026, 5, 1, 7)
-        empty = pd.DataFrame(columns=["datetime", "air_temp"])
 
-        result = splice_air_history(empty, empty, anchor)
-
-        assert result.empty
-        assert list(result.columns) == ["datetime", "air_temp"]
-
-
-def _weather_frame(start, n_hours, air_temp=15.0):
-    return pd.DataFrame({
-        "datetime": [pd.Timestamp(start) + pd.Timedelta(hours=i) for i in range(n_hours)],
-        "air_temp": [air_temp] * n_hours,
-        "shortwave_radiation": [0.0] * n_hours,
-        "cloud_cover": [100.0] * n_hours,
-    })
+# The shared builder already produces exactly this shape.
+_weather_frame = weather_frame
 
 
 class TestReplayCurrentModel:
@@ -634,16 +596,6 @@ class TestReplayCurrentModel:
         assert len(calls) == 2
         pd.testing.assert_frame_equal(forecaster.hourly_weather, before)
 
-    def test_empty_measurements_returns_empty_with_schema(self):
-        forecaster = WaterTempForecaster()
-        result = replay_current_model(
-            forecaster, self._measurements([]), self._provider(), max_horizon=2
-        )
-        assert result.empty
-        assert list(result.columns) == [
-            "target_date", "horizon_days", "forecast_temp", "air_source"
-        ]
-
 
 class TestWeatherForecastStorage:
     """
@@ -663,13 +615,12 @@ class TestWeatherForecastStorage:
         return storage
 
     def _forecast(self, start, hours):
-        return pd.DataFrame({
-            "datetime": [
-                pd.Timestamp(start) + pd.Timedelta(hours=i) for i in range(hours)
-            ],
-            "shortwave_radiation": [float(100 * i) for i in range(hours)],
-            "cloud_cover": [float(i) for i in range(hours)],
-        })
+        """A ramp, not a constant: test_round_trip asserts on its maximum."""
+        return hourly_frame(
+            start, hours,
+            shortwave_radiation=[float(100 * i) for i in range(hours)],
+            cloud_cover=[float(i) for i in range(hours)],
+        )
 
     def test_stored_rows_come_back(self):
         storage = self._storage()
@@ -1078,46 +1029,33 @@ class TestStorageReadsCoerceTimezones:
 
     def _water_db(self):
         """water_temp_predictions with tz-aware timestamps, as MotherDuck returns."""
-        conn = duckdb.connect(":memory:")
-        conn.execute("SET TimeZone='UTC'")
-        # No PRIMARY KEY: DuckDB refuses to type a key column TIMESTAMPTZ, and
-        # the key is not what is under test here.
-        conn.execute("""
-            CREATE TABLE water_temp_predictions (
-                forecast_created_date DATE NOT NULL,
-                forecast_created_timestamp TIMESTAMPTZ NOT NULL,
-                target_date DATE NOT NULL,
-                water_temp DOUBLE NOT NULL,
-                heat_transfer_coeff DOUBLE NOT NULL,
-                start_water_temp DOUBLE NOT NULL,
-                simulation_hours INTEGER NOT NULL,
-                source_air_forecast_timestamp TIMESTAMPTZ NOT NULL
-            )
-        """)
-        conn.execute("""
-            INSERT INTO water_temp_predictions VALUES
-            ('2026-09-06', '2026-09-06 21:00:00+00', '2026-09-07',
-             12.0, 0.02, 11.0, 24, '2026-09-06 21:00:00+00')
-        """)
-        return conn
+        created = pd.Timestamp("2026-09-06 21:00:00", tz="UTC")
+        return raw_table(
+            "water_temp_predictions",
+            tz_aware(
+                WATER_PREDICTIONS_COLUMNS,
+                "forecast_created_timestamp", "source_air_forecast_timestamp",
+            ),
+            [(
+                datetime(2026, 9, 6).date(), created, datetime(2026, 9, 7).date(),
+                12.0, 0.02, 11.0, 24, created,
+            )],
+        )
 
     def _air_db(self):
         """air_temp_forecasts_3hourly with tz-aware timestamps."""
-        conn = duckdb.connect(":memory:")
-        conn.execute("SET TimeZone='UTC'")
-        conn.execute("""
-            CREATE TABLE air_temp_forecasts_3hourly (
-                forecast_created_timestamp TIMESTAMPTZ NOT NULL,
-                target_datetime TIMESTAMPTZ NOT NULL,
-                air_temp DOUBLE NOT NULL,
-                source VARCHAR DEFAULT 'OpenWeatherMap'
-            )
-        """)
-        conn.execute("""
-            INSERT INTO air_temp_forecasts_3hourly VALUES
-            ('2026-09-06 21:00:00+00', '2026-09-07 00:00:00+00', 14.0, 'OpenWeatherMap')
-        """)
-        return conn
+        return raw_table(
+            "air_temp_forecasts_3hourly",
+            tz_aware(
+                AIR_FORECAST_3HOURLY_COLUMNS,
+                "forecast_created_timestamp", "target_datetime",
+            ),
+            [(
+                pd.Timestamp("2026-09-06 21:00:00", tz="UTC"),
+                pd.Timestamp("2026-09-07 00:00:00", tz="UTC"),
+                14.0, "OpenWeatherMap",
+            )],
+        )
 
     def test_water_predictions_timestamps_come_back_naive(self):
         result = self._storage_on(
@@ -1174,3 +1112,120 @@ class TestStorageReadsCoerceTimezones:
 
         local = pd.Series([pd.Timestamp("2026-09-07 00:00")])
         assert (result["target_datetime"] == local).iloc[0]
+
+
+    def test_column_order_is_stable_for_downstream_positional_reads_water(self):
+        """One deliberate order assertion for the water-predictions read."""
+        result = self._storage_on(
+            self._water_db()
+        ).get_water_predictions_last_run_per_day()
+
+        assert list(result.columns) == [
+            "forecast_created_date", "forecast_created_timestamp",
+            "target_date", "forecast_temp", "horizon_days",
+        ]
+
+    def test_column_order_is_stable_for_downstream_positional_reads_air(self):
+        """One deliberate order assertion for the 3-hourly air read."""
+        result = self._storage_on(
+            self._air_db()
+        ).get_air_forecasts_3hourly_last_run_per_day()
+
+        assert list(result.columns) == [
+            "forecast_created_date", "target_datetime", "air_temp"
+        ]
+
+
+def _empty_scored():
+    return _scored([], horizons=[])
+
+
+def _empty_hourly():
+    return pd.DataFrame(columns=["datetime", "air_temp"])
+
+
+def _empty_measurements():
+    return pd.DataFrame(columns=["date", "water_temp"])
+
+
+def _replay_on_empty():
+    forecaster = WaterTempForecaster()
+    return replay_current_model(
+        forecaster,
+        _empty_measurements(),
+        lambda anchor: (weather_frame(anchor, 200), "FORECAST"),
+        max_horizon=2,
+    )
+
+
+class TestEmptyInputContract:
+    """
+    Every reporting function must return an EMPTY FRAME WITH ITS SCHEMA on
+    empty input, never a bare DataFrame() and never a raise.
+
+    Consolidated from four near-identical tests scattered across the classes
+    above. The contract is one rule, so it reads better as one table - and a
+    new function is added by adding a row, which is the point.
+
+    Callers index these frames by name immediately (the dashboard builds a
+    chart from them before checking whether anything was scored), so a
+    column-less empty frame is a KeyError at render time, not a quiet no-op.
+    Asserting only `.empty` would not catch that, so each case pins its
+    columns as a set - order is pinned once per storage read, above.
+    """
+
+    @pytest.mark.parametrize(
+        "call, expected_columns",
+        [
+            pytest.param(
+                lambda: metrics_by_horizon(_empty_scored()),
+                {"horizon_days", "mae", "bias", "rmse", "hit_rate_0_5", "n"},
+                id="metrics_by_horizon",
+            ),
+            pytest.param(
+                lambda: join_actuals(
+                    pd.DataFrame(columns=[
+                        "target_date", "horizon_days", "forecast_temp"
+                    ]),
+                    _empty_measurements(),
+                ),
+                {
+                    "target_date", "horizon_days", "forecast_temp",
+                    "actual_temp", "error", "air_source",
+                },
+                id="join_actuals",
+            ),
+            pytest.param(
+                lambda: splice_air_history(
+                    _empty_hourly(), _empty_hourly(), pd.Timestamp(2026, 5, 1, 7)
+                ),
+                {"datetime", "air_temp"},
+                id="splice_air_history",
+            ),
+            pytest.param(
+                _replay_on_empty,
+                {"target_date", "horizon_days", "forecast_temp", "air_source"},
+                id="replay_current_model",
+            ),
+        ],
+    )
+    def test_empty_input_returns_an_empty_frame_carrying_its_schema(
+        self, call, expected_columns
+    ):
+        result = call()
+
+        assert result.empty
+        assert set(result.columns) == expected_columns
+
+    def test_compute_metrics_is_the_exception_and_returns_a_dict(self):
+        """
+        Not part of the table above: compute_metrics returns a metrics dict,
+        not a frame. On empty input every metric is NaN and n is 0 - zero, not
+        NaN, because "nothing was scored" is a count, and the dashboard prints
+        it.
+        """
+        m = compute_metrics(_empty_scored())
+
+        assert m["n"] == 0
+        assert np.isnan(m["mae"])
+        assert np.isnan(m["bias"])
