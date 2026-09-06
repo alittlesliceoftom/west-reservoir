@@ -682,59 +682,40 @@ def create_horizon_accuracy_chart(
     return fig
 
 
-DEFAULT_VIEW_DAYS = 30
+# Chart windows offered above the time-series charts. A plotly range slider
+# looks like the obvious control here, but plotly does not rescale the y-axis
+# when the slider moves, so scrubbing back to a colder month leaves the trace
+# pinned off-screen. Filtering the data in Streamlit instead means the window
+# IS the data, so the y-axis always fits what is on screen.
+CHART_PERIODS = {
+    "Last 30 days": 30,
+    "Last 90 days": 90,
+    "Last year": 365,
+    "All": None,
+}
 
 
-def _add_range_slider(
-    fig: go.Figure, series: list, include_zero: bool = False
-) -> None:
+def filter_to_period(df: pd.DataFrame, date_column: str, days) -> pd.DataFrame:
     """
-    Add a range slider and open the chart on the last month of data.
+    Keep the last `days` of a frame, measured back from its own last date.
 
-    The full series stays loaded - the slider scrubs back through it - so the
-    outage band and the year of history before it remain reachable without a
-    reload.
-
-    The y-axis is fitted to the opening window rather than the whole series:
-    water temperature spans about 0.8 to 27.3 C across the record, so a
-    full-range y-axis would squash a month of summer readings into the top
-    third of the chart. Plotly does not rescale y when the slider moves, so
-    dragging back to a colder period may need a double-click to reset the axes.
+    Measured back from the data, not from today: a source that stops updating
+    should show its final weeks rather than an empty chart.
 
     Args:
-        fig: Figure to modify.
-        series: List of (x, y) pairs to consider when sizing the axes.
-        include_zero: Keep zero inside the y range. Required for bars, which
-                      grow from zero and would otherwise be clipped whenever
-                      every value in the opening window sits on one side of it.
+        df: Frame to filter.
+        date_column: Column holding the dates.
+        days: Window length, or None for everything.
+
+    Returns:
+        The filtered frame. Unchanged when days is None or the frame is empty.
     """
-    all_x = pd.concat([pd.Series(x) for x, _ in series]).dropna()
-    if all_x.empty:
-        return
+    if days is None or df.empty:
+        return df
 
-    last = pd.Timestamp(all_x.max())
-    window_start = last - pd.Timedelta(days=DEFAULT_VIEW_DAYS)
-
-    fig.update_xaxes(
-        rangeslider=dict(visible=True, thickness=0.08),
-        range=[window_start, last],
-    )
-
-    visible = []
-    for x, y in series:
-        x, y = pd.Series(list(x)), pd.Series(list(y))
-        visible.append(y[(pd.to_datetime(x) >= window_start) & y.notna()])
-
-    values = pd.concat(visible).dropna() if visible else pd.Series(dtype=float)
-    if values.empty:
-        return
-
-    low, high = float(values.min()), float(values.max())
-    if include_zero:
-        low, high = min(low, 0.0), max(high, 0.0)
-    pad = max((high - low) * 0.1, 0.5)
-    fig.update_yaxes(range=[low - pad, high + pad])
-
+    dates = pd.to_datetime(df[date_column])
+    cutoff = dates.max() - pd.Timedelta(days=days)
+    return df[dates >= cutoff]
 
 def _shade_meteostat_outage(fig: go.Figure, last_date) -> None:
     """
@@ -827,11 +808,13 @@ def create_forecast_vs_actual_chart(
         xaxis_title="Date", yaxis_title="Water temperature (C)",
         height=440, hovermode="x unified", margin=dict(t=30),
     )
-    _add_range_slider(fig, [
-        (measured_x, measured_y),
-        (scored["target_date"], scored["forecast_temp"]),
-    ])
     return fig
+
+
+def _one_sided(values) -> bool:
+    """True when every value sits on the same side of zero."""
+    v = pd.Series(values).dropna()
+    return not v.empty and (bool((v >= 0).all()) or bool((v <= 0).all()))
 
 
 def create_error_over_time_chart(
@@ -858,9 +841,9 @@ def create_error_over_time_chart(
         xaxis_title="Date", yaxis_title="Forecast - actual (C)",
         height=360, showlegend=False, margin=dict(t=30),
     )
-    _add_range_slider(
-        fig, [(scored["target_date"], scored["error"])], include_zero=True
-    )
+    # Bars grow from zero, so zero must stay in frame even when every error
+    # in the window falls on one side of it.
+    fig.update_yaxes(rangemode="tozero" if _one_sided(scored["error"]) else "normal")
     return fig
 
 
@@ -1065,14 +1048,29 @@ def main():
                     )
 
                     if not at_horizon.empty:
+                        period_label = st.radio(
+                            "Chart period",
+                            list(CHART_PERIODS),
+                            horizontal=True,
+                            help=(
+                                "Applies to the two charts below. The metrics "
+                                "above cover the whole record."
+                            ),
+                        )
+                        days = CHART_PERIODS[period_label]
+                        windowed = filter_to_period(at_horizon, "target_date", days)
+                        measured_window = filter_to_period(
+                            water_temps, "date", days
+                        )
+
                         st.subheader(
                             f"Forecast vs measured ({_horizon_label(selected_horizon)})"
                         )
                         st.plotly_chart(
                             create_forecast_vs_actual_chart(
-                                at_horizon, selected_horizon,
+                                windowed, selected_horizon,
                                 mark_outage=not is_replay,
-                                water_temps=water_temps,
+                                water_temps=measured_window,
                             ),
                             width='stretch',
                         )
@@ -1082,7 +1080,7 @@ def main():
                         )
                         st.plotly_chart(
                             create_error_over_time_chart(
-                                at_horizon, mark_outage=not is_replay
+                                windowed, mark_outage=not is_replay
                             ),
                             width='stretch',
                         )
