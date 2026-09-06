@@ -781,7 +781,9 @@ def main():
     st.title("West Reservoir Temperature Tracker + Forecaster")
     st.markdown("Tracking and forecasting water temperature at West Reservoir, London.")
 
-    tab_temp, tab_quotes = st.tabs(["Temperature", "Heard at the Res"])
+    tab_temp, tab_accuracy, tab_quotes = st.tabs(
+        ["Temperature", "Forecast Accuracy", "Heard at the Res"]
+    )
 
     with tab_quotes:
         st.header("Heard at the Res")
@@ -797,6 +799,136 @@ def main():
                 st.divider()
         else:
             st.info("No quotes yet - check back soon!")
+
+    with tab_accuracy:
+        st.header("Forecast Accuracy")
+
+        if not ENABLE_MOTHERDUCK:
+            st.warning(
+                "Forecast accuracy requires MotherDuck, which is not configured. "
+                "Set MOTHERDUCK_TOKEN to enable this tab."
+            )
+        else:
+            source_label = st.radio(
+                "Comparison",
+                ["Stored forecasts", "Model replay (current model)"],
+                horizontal=True,
+                help=(
+                    "Stored forecasts: the forecasts we actually published, scored "
+                    "against later measurements. Model replay: today's model re-run "
+                    "over history, for comparing model versions."
+                ),
+            )
+            is_replay = source_label.startswith("Model replay")
+
+            if is_replay:
+                st.caption(
+                    "Today's model re-run over history, using the air temperature "
+                    "each forecast actually had available: measured up to the time "
+                    "the forecast was made, forecast after. Optimistic, because "
+                    "solar and cloud forecasts were never stored, so actual solar "
+                    "and cloud are used throughout. Points marked with a cross had "
+                    "no stored air forecast either and used measured air for the "
+                    "whole window."
+                )
+                horizon_options = [1, 2, 3, 4, 5]
+            else:
+                st.caption(
+                    "The honest record: what we published, scored against what was "
+                    "then measured."
+                )
+                horizon_options = [0, 1, 2, 3, 4, 5]
+
+            selected_horizon = st.selectbox(
+                "Days ahead",
+                horizon_options,
+                index=horizon_options.index(1),
+                help="0 is a same-day nowcast, available for stored forecasts only.",
+            )
+
+            try:
+                water_temps = cached_load_water_temps()
+
+                if is_replay:
+                    coefficients = cached_fitted_model_coefficients(
+                        water_temps,
+                        pd.Timestamp(water_temps["date"].min()).normalize(),
+                        pd.Timestamp.now().normalize(),
+                    )
+                    raw = cached_replay(water_temps, coefficients, 5)
+                else:
+                    raw = cached_load_stored_forecasts(max_horizon=5)
+
+                scored = join_actuals(raw, water_temps)
+
+                if scored.empty:
+                    st.warning(
+                        "No forecasts could be matched to measurements yet. "
+                        "Accuracy needs stored forecasts whose target dates have "
+                        "since been measured."
+                    )
+                else:
+                    at_horizon = scored[
+                        scored["horizon_days"] == selected_horizon
+                    ].sort_values("target_date")
+                    metrics = compute_metrics(at_horizon)
+
+                    st.subheader(f"{selected_horizon}-day-ahead accuracy")
+                    if metrics["n"] == 0:
+                        st.warning(
+                            f"No scored forecasts at {selected_horizon} days ahead."
+                        )
+                    else:
+                        c1, c2, c3, c4, c5 = st.columns(5)
+                        c1.metric("Mean absolute error", f"{metrics['mae']:.2f} C")
+                        c2.metric("Bias", f"{metrics['bias']:+.2f} C")
+                        c3.metric("RMSE", f"{metrics['rmse']:.2f} C")
+                        c4.metric("Within 0.5 C", f"{metrics['hit_rate_0_5']:.0f}%")
+                        c5.metric("Forecasts scored", f"{metrics['n']}")
+                        st.caption(BIAS_NOTE)
+                        st.caption(
+                            f"Covering {at_horizon['target_date'].min().date()} "
+                            f"to {at_horizon['target_date'].max().date()}"
+                        )
+
+                    st.subheader("Accuracy by forecast horizon")
+                    st.caption(
+                        "All horizons, unfiltered. Shows how forecasts degrade "
+                        "further ahead."
+                    )
+                    st.plotly_chart(
+                        create_horizon_accuracy_chart(
+                            metrics_by_horizon(scored), selected_horizon
+                        ),
+                        width='stretch',
+                    )
+
+                    if not at_horizon.empty:
+                        st.subheader(
+                            f"Forecast vs measured ({selected_horizon} days ahead)"
+                        )
+                        st.plotly_chart(
+                            create_forecast_vs_actual_chart(
+                                at_horizon, selected_horizon
+                            ),
+                            width='stretch',
+                        )
+
+                        st.subheader(
+                            f"Error over time ({selected_horizon} days ahead)"
+                        )
+                        st.plotly_chart(
+                            create_error_over_time_chart(at_horizon),
+                            width='stretch',
+                        )
+
+                        with st.expander("Scored forecasts"):
+                            st.dataframe(at_horizon, width='stretch')
+
+            except ForecastStorageError as e:
+                st.error(f"Could not load stored forecasts: {e}")
+            except DataLoadError as e:
+                st.error(f"Could not load measurements: {e}")
 
     with tab_temp:
         col_info, col_image = st.columns([1, 1])
