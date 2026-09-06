@@ -171,9 +171,10 @@ temperatures = pd.DataFrame({
   `source` dimension and one nullable column per measure, so a new model input
   is a new column rather than a new table. A source publishes only what it
   publishes, and `source` is in the primary key so two sources can forecast the
-  same hour. **A source must write all of its measures in one frame** - a
-  second write for the same (source, hour) hits the primary key and is
-  swallowed as a duplicate. Air temperature joins this table with issue #39
+  same hour. Writes merge (`ON CONFLICT DO UPDATE` with `COALESCE` per column),
+  so a source can write solar and cloud now and air temperature later without
+  either being lost: a value overwrites, a NULL leaves what is stored. Air
+  temperature joins this table with issue #39
 - Retrieves stored forecasts to fill any gap between historical data and the
   live OpenWeatherMap forecast
 - Gated by `ENABLE_MOTHERDUCK` in `config.py`; the app works without it
