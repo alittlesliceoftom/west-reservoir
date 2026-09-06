@@ -800,7 +800,7 @@ class TestWeatherForecastStorage:
 
         assert pd.Timestamp(stored.iloc[0, 0]) == pd.Timestamp("2026-09-06 21:00")
 
-    def test_storing_twice_in_the_same_hour_is_silently_ignored(self):
+    def test_storing_the_same_forecast_twice_is_idempotent(self):
         storage = self._storage()
         forecast = self._forecast("2026-09-07 00:00", 5)
 
@@ -963,13 +963,13 @@ class TestWeatherForecastStorage:
         assert len(result[result["source"] == "Open-Meteo"]) == 2
         assert len(result[result["source"] == "OpenWeatherMap"]) == 1
 
-    def test_a_second_write_for_the_same_source_and_hour_is_lost(self):
+    def test_a_second_write_merges_instead_of_being_swallowed(self):
         """
-        Pins the footgun rather than fixing it: the PK is (created_ts, target,
-        source), so writing solar and then air for one source and hour silently
-        drops the second. A source must write all its measures in one frame.
-        When air moves here (#39) it arrives in the same frame, or this becomes
-        ON CONFLICT DO UPDATE with COALESCE per column.
+        Writing solar and then air for one source and hour must keep both.
+
+        A plain insert collides with the primary key, and swallowing that as a
+        duplicate would discard the incoming measures silently - which is how
+        air temperature would vanish when it moves to this table (#39).
         """
         storage = self._storage()
         target = [pd.Timestamp("2026-09-07 00:00")]
@@ -993,9 +993,66 @@ class TestWeatherForecastStorage:
         result = storage.get_weather_forecasts_last_run_per_day()
 
         assert len(result) == 1
+        assert result["air_temp"].iloc[0] == pytest.approx(12.0)
         assert result["shortwave_radiation"].iloc[0] == pytest.approx(400.0)
-        # The air temperature did not land, and nothing raised.
-        assert pd.isna(result["air_temp"].iloc[0])
+        assert result["cloud_cover"].iloc[0] == pytest.approx(20.0)
+
+    def test_a_later_write_refreshes_values_it_carries(self):
+        """A real value overwrites; NULL means 'not published', not 'clear it'."""
+        storage = self._storage()
+        target = [pd.Timestamp("2026-09-07 00:00")]
+        created = datetime(2026, 9, 6, 21, 0)
+
+        storage.store_weather_forecast(
+            pd.DataFrame({
+                "datetime": target,
+                "shortwave_radiation": [400.0],
+                "cloud_cover": [20.0],
+            }),
+            created,
+            source="Open-Meteo",
+        )
+        storage.store_weather_forecast(
+            pd.DataFrame({
+                "datetime": target,
+                "shortwave_radiation": [111.0],
+                "cloud_cover": [88.0],
+            }),
+            created,
+            source="Open-Meteo",
+        )
+
+        result = storage.get_weather_forecasts_last_run_per_day()
+
+        assert result["shortwave_radiation"].iloc[0] == pytest.approx(111.0)
+        assert result["cloud_cover"].iloc[0] == pytest.approx(88.0)
+
+    def test_merging_does_not_reach_across_sources(self):
+        """Each source owns its own row; a merge must not touch another's."""
+        storage = self._storage()
+        target = [pd.Timestamp("2026-09-07 00:00")]
+        created = datetime(2026, 9, 6, 21, 0)
+
+        storage.store_weather_forecast(
+            pd.DataFrame({"datetime": target, "air_temp": [12.0]}),
+            created,
+            source="OpenWeatherMap",
+        )
+        storage.store_weather_forecast(
+            pd.DataFrame({
+                "datetime": target,
+                "shortwave_radiation": [400.0],
+                "cloud_cover": [20.0],
+            }),
+            created,
+            source="Open-Meteo",
+        )
+
+        result = storage.get_weather_forecasts_last_run_per_day().set_index("source")
+
+        assert result.loc["OpenWeatherMap", "air_temp"] == pytest.approx(12.0)
+        assert pd.isna(result.loc["OpenWeatherMap", "shortwave_radiation"])
+        assert pd.isna(result.loc["Open-Meteo", "air_temp"])
 
     def test_one_frame_carrying_every_measure_stores_them_all(self):
         """The shape #39 must use: one write per source per run."""

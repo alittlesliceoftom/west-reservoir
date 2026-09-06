@@ -300,14 +300,11 @@ class ForecastStorage:
         Whichever of the measure columns the frame carries are stored; the rest
         are left NULL, because a source publishes only what it publishes.
 
-        **A source must write all of its measures in one frame.** The primary
-        key is (created_timestamp, target_datetime, source), so a second call
-        for the same source and hour - solar first, then air - collides and is
-        swallowed as a duplicate, losing the second set of measures without an
-        error. When air temperature moves here (issue #39) it must arrive in
-        the same frame as solar and cloud, not as a separate write. If that
-        ever becomes inconvenient, switch this to ON CONFLICT DO UPDATE with
-        COALESCE per column so partial writes merge instead.
+        Writes merge. Calling this twice for the same source and hour - solar
+        and cloud first, then air temperature - fills in the second set of
+        measures rather than colliding on the primary key. A value overwrites;
+        a NULL means "this source does not publish that", and leaves whatever
+        is already stored.
 
         Stored so backtests can feed the model the forecast it actually had
         rather than what actually happened. Until this has been accumulating,
@@ -350,17 +347,32 @@ class ForecastStorage:
             'source',
         ] + WEATHER_MEASURES]
 
+        # Merge rather than insert-or-swallow. A row for this (run, hour,
+        # source) may already exist carrying different measures, and a plain
+        # insert would collide with the primary key; swallowing that as a
+        # duplicate would discard the incoming measures silently.
+        #
+        # COALESCE(excluded.x, x) means a NULL says "this source does not
+        # publish x", leaving whatever is already stored, while a real value
+        # overwrites - so re-running within the same hour refreshes the numbers
+        # and a second source's write fills in the columns it owns.
         try:
             conn.execute("""
                 INSERT INTO weather_forecasts_hourly
                 SELECT * FROM forecast_to_store
+                ON CONFLICT (forecast_created_timestamp, target_datetime, source)
+                DO UPDATE SET
+                    air_temp = COALESCE(excluded.air_temp, weather_forecasts_hourly.air_temp),
+                    shortwave_radiation = COALESCE(
+                        excluded.shortwave_radiation,
+                        weather_forecasts_hourly.shortwave_radiation
+                    ),
+                    cloud_cover = COALESCE(
+                        excluded.cloud_cover, weather_forecasts_hourly.cloud_cover
+                    )
             """)
         except Exception as e:
-            err_msg = str(e).lower()
-            if "primary key" in err_msg or "unique" in err_msg or "duplicate" in err_msg:
-                pass  # Likely duplicate key - not a critical error
-            else:
-                raise ForecastStorageError(f"Failed to store weather forecast: {e}")
+            raise ForecastStorageError(f"Failed to store weather forecast: {e}")
 
     def get_weather_forecasts_last_run_per_day(self) -> pd.DataFrame:
         """
