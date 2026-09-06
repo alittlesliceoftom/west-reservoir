@@ -523,6 +523,82 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
     return fig
 
 
+def create_horizon_accuracy_chart(
+    horizon_metrics: pd.DataFrame, selected_horizon: int
+) -> go.Figure:
+    """MAE by forecast horizon, with the selected horizon highlighted."""
+    colors = [
+        "#1f77b4" if h == selected_horizon else "#c6dbef"
+        for h in horizon_metrics["horizon_days"]
+    ]
+
+    fig = go.Figure(go.Bar(
+        x=horizon_metrics["horizon_days"],
+        y=horizon_metrics["mae"],
+        marker_color=colors,
+        # A horizon with n == 0 has NaN MAE; label it blank, not "nan".
+        text=[
+            "" if pd.isna(v) else f"{v:.2f}" for v in horizon_metrics["mae"]
+        ],
+        textposition="outside",
+        customdata=horizon_metrics["n"],
+        hovertemplate="MAE %{y:.2f} C<br>%{customdata} forecasts scored<extra></extra>",
+    ))
+    fig.update_layout(
+        xaxis_title="Days ahead",
+        yaxis_title="Mean absolute error (C)",
+        height=340,
+        showlegend=False,
+        margin=dict(t=30),
+    )
+    fig.update_xaxes(dtick=1)
+    return fig
+
+
+def create_forecast_vs_actual_chart(scored: pd.DataFrame, horizon: int) -> go.Figure:
+    """Forecast and measured water temp over time at one horizon."""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=scored["target_date"], y=scored["actual_temp"],
+        name="Measured", mode="lines+markers",
+        line=dict(color="#2ca02c", width=2), marker=dict(size=5),
+    ))
+    fig.add_trace(go.Scatter(
+        x=scored["target_date"], y=scored["forecast_temp"],
+        name=f"Forecast ({horizon} day ahead)", mode="lines+markers",
+        line=dict(color="#1f77b4", width=2, dash="dot"), marker=dict(size=5),
+    ))
+
+    leaky = scored[scored["air_source"] == "ACTUAL"]
+    if not leaky.empty:
+        fig.add_trace(go.Scatter(
+            x=leaky["target_date"], y=leaky["forecast_temp"],
+            name="Used actual air temp (optimistic)", mode="markers",
+            marker=dict(size=9, color="#d62728", symbol="x"),
+        ))
+
+    fig.update_layout(
+        xaxis_title="Date", yaxis_title="Water temperature (C)",
+        height=400, hovermode="x unified", margin=dict(t=30),
+    )
+    return fig
+
+
+def create_error_over_time_chart(scored: pd.DataFrame) -> go.Figure:
+    """Signed forecast error over time, with a zero reference line."""
+    fig = go.Figure(go.Scatter(
+        x=scored["target_date"], y=scored["error"],
+        mode="lines+markers", name="Error",
+        line=dict(color="#ff7f0e", width=1.5), marker=dict(size=4),
+    ))
+    fig.add_hline(y=0, line_dash="dash", line_color="grey")
+    fig.update_layout(
+        xaxis_title="Date", yaxis_title="Forecast - actual (C)",
+        height=320, showlegend=False, margin=dict(t=30),
+    )
+    return fig
+
+
 def main():
     """Main application."""
     view = st.query_params.get("view")
