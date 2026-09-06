@@ -1,52 +1,62 @@
-"""Test MotherDuck connection"""
+"""
+Connectivity check for the real MotherDuck database.
+
+This replaces a test that ran `CREATE DATABASE IF NOT EXISTS west_reservoir`
+against production on a bare `pytest`, unmarked and unskippable. Reading is
+enough to answer the only question worth asking here - are the credentials
+good and is the schema where we left it - so nothing in this file writes.
+
+Marked `integration`: it needs a token and the network.
+Skip it with `pytest -m "not integration"`.
+"""
 
 import os
 import re
 from pathlib import Path
 
+import pytest
 
-def get_token_from_secrets():
-    """Read token directly from secrets.toml"""
-    secrets_path = Path(__file__).parent / ".streamlit" / "secrets.toml"
-    if secrets_path.exists():
-        content = secrets_path.read_text()
-        # Simple TOML parsing for key = "value"
-        match = re.search(r'MOTHERDUCK_TOKEN\s*=\s*"([^"]+)"', content)
+pytestmark = pytest.mark.integration
+
+
+# Tables the app reads and writes. Missing one is a real failure, not a skip.
+EXPECTED_TABLES = {
+    "water_temp_predictions",
+    "air_temp_forecasts_3hourly",
+    "weather_forecasts_hourly",
+}
+
+
+def _token():
+    """Token from the environment, else from .streamlit/secrets.toml."""
+    env = os.getenv("MOTHERDUCK_TOKEN")
+    if env:
+        return env
+
+    secrets = Path(__file__).parent / ".streamlit" / "secrets.toml"
+    if secrets.exists():
+        match = re.search(r'MOTHERDUCK_TOKEN\s*=\s*"([^"]+)"', secrets.read_text())
         if match:
             return match.group(1)
     return None
 
 
-def test_motherduck_connection():
-    """Test that we can connect to MotherDuck and run a query"""
+def test_motherduck_credentials_and_schema_are_reachable():
+    """Connect read-only to the existing database and confirm the tables exist."""
     import duckdb
 
-    # Try env var first, then secrets file
-    token = os.getenv("MOTHERDUCK_TOKEN") or get_token_from_secrets()
+    token = _token()
+    if not token:
+        pytest.skip("MOTHERDUCK_TOKEN not set in env or .streamlit/secrets.toml")
 
-    assert token is not None, "MOTHERDUCK_TOKEN not found in env or secrets.toml"
-    print(f"Token found: {token[:20]}...")
+    # Connect straight into the database. No CREATE DATABASE: a test must not
+    # be the thing that provisions production.
+    conn = duckdb.connect(f"md:west_reservoir?motherduck_token={token}")
+    try:
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
 
-    # Connect to MotherDuck (no database specified initially)
-    conn = duckdb.connect(f"md:?motherduck_token={token}")
-
-    # Create database if it doesn't exist
-    conn.execute("CREATE DATABASE IF NOT EXISTS west_reservoir")
-    conn.execute("USE west_reservoir")
-    print("Connected to west_reservoir database")
-
-    # Test query
-    result = conn.execute("SELECT 1 as test").fetchone()
-    assert result[0] == 1, "Basic query failed"
-    print("Basic query OK")
-
-    # List tables
-    tables = conn.execute("SHOW TABLES").fetchall()
-    print(f"Tables in database: {[t[0] for t in tables]}")
-
-    conn.close()
-    print("MotherDuck connection test PASSED")
-
-
-if __name__ == "__main__":
-    test_motherduck_connection()
+        tables = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
+        missing = EXPECTED_TABLES - tables
+        assert not missing, f"Expected tables missing from west_reservoir: {missing}"
+    finally:
+        conn.close()
