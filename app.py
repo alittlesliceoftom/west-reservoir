@@ -42,6 +42,14 @@ if ENABLE_MOTHERDUCK:
 
 CACHE_TTL = timedelta(hours=6)
 
+# Meteostat stopped rebuilding its bulk endpoint on this date and served a frozen
+# snapshot for five months (issue #33). Forecasts published in that window were
+# simulated from interpolated air temperature, and trained on it too, so their
+# error is an artefact of the dead feed rather than a property of the model.
+# Open-Meteo replaced it in the code on 2026-09-06; the window closes for real
+# once that ships to the deployed app.
+METEOSTAT_OUTAGE_START = pd.Timestamp("2026-03-20")
+
 
 @st.cache_data(ttl=CACHE_TTL)
 def cached_load_water_temps():
@@ -674,11 +682,68 @@ def create_horizon_accuracy_chart(
     return fig
 
 
-def create_forecast_vs_actual_chart(scored: pd.DataFrame, horizon: int) -> go.Figure:
-    """Forecast and measured water temp over time at one horizon."""
+def _shade_meteostat_outage(fig: go.Figure, last_date) -> None:
+    """
+    Shade the window in which historical air temperature was interpolated.
+
+    Only meaningful for stored forecasts: those were published while the feed
+    was dead. The replay reads the repaired archive, so its errors in this
+    window are not caused by the outage and shading them would mislead.
+
+    Args:
+        fig: Figure to shade.
+        last_date: Right edge of the shaded band - the last date on the chart,
+                   which may extend past the last scored forecast.
+    """
+    if last_date is None or pd.isna(last_date):
+        return
+
+    last_date = pd.Timestamp(last_date)
+    if last_date < METEOSTAT_OUTAGE_START:
+        return
+
+    fig.add_vrect(
+        x0=METEOSTAT_OUTAGE_START,
+        x1=last_date,
+        fillcolor="#d62728",
+        opacity=0.10,
+        line_width=0,
+        layer="below",
+        annotation_text="Meteostat outage: air temp interpolated (#33)",
+        annotation_position="top left",
+        annotation=dict(font_size=11, font_color="#d62728"),
+    )
+
+
+def create_forecast_vs_actual_chart(
+    scored: pd.DataFrame,
+    horizon: int,
+    mark_outage: bool = False,
+    water_temps: pd.DataFrame = None,
+) -> go.Figure:
+    """
+    Forecast and measured water temp over time at one horizon.
+
+    Args:
+        scored: Scored forecasts at one horizon.
+        horizon: Days ahead, for the legend.
+        mark_outage: Shade the Meteostat outage window.
+        water_temps: Full measurement record. When given, the measured line
+                     spans all of it rather than only the dates a forecast
+                     exists for - stored forecasts start 2026-02-16, so
+                     without this the chart is a narrow window with no
+                     context either side of the outage.
+    """
     fig = go.Figure()
+
+    if water_temps is not None and not water_temps.empty:
+        measured = water_temps.dropna(subset=["water_temp"]).sort_values("date")
+        measured_x, measured_y = measured["date"], measured["water_temp"]
+    else:
+        measured_x, measured_y = scored["target_date"], scored["actual_temp"]
+
     fig.add_trace(go.Scatter(
-        x=scored["target_date"], y=scored["actual_temp"],
+        x=measured_x, y=measured_y,
         name="Measured", mode="lines+markers",
         line=dict(color="#2ca02c", width=2), marker=dict(size=5),
     ))
@@ -696,6 +761,9 @@ def create_forecast_vs_actual_chart(scored: pd.DataFrame, horizon: int) -> go.Fi
             marker=dict(size=9, color="#d62728", symbol="x"),
         ))
 
+    if mark_outage:
+        _shade_meteostat_outage(fig, max(measured_x.max(), scored["target_date"].max()))
+
     fig.update_layout(
         xaxis_title="Date", yaxis_title="Water temperature (C)",
         height=400, hovermode="x unified", margin=dict(t=30),
@@ -703,7 +771,9 @@ def create_forecast_vs_actual_chart(scored: pd.DataFrame, horizon: int) -> go.Fi
     return fig
 
 
-def create_error_over_time_chart(scored: pd.DataFrame) -> go.Figure:
+def create_error_over_time_chart(
+    scored: pd.DataFrame, mark_outage: bool = False
+) -> go.Figure:
     """Signed forecast error over time, with a zero reference line."""
     fig = go.Figure(go.Scatter(
         x=scored["target_date"], y=scored["error"],
@@ -711,6 +781,10 @@ def create_error_over_time_chart(scored: pd.DataFrame) -> go.Figure:
         line=dict(color="#ff7f0e", width=1.5), marker=dict(size=4),
     ))
     fig.add_hline(y=0, line_dash="dash", line_color="grey")
+
+    if mark_outage:
+        _shade_meteostat_outage(fig, scored["target_date"].max())
+
     fig.update_layout(
         xaxis_title="Date", yaxis_title="Forecast - actual (C)",
         height=320, showlegend=False, margin=dict(t=30),
@@ -840,7 +914,14 @@ def main():
             else:
                 st.caption(
                     "The honest record: what we published, scored against what was "
-                    "then measured."
+                    "then measured. The shaded window is the Meteostat outage "
+                    "(issue #33): from 2026-03-20 the historical air feed was "
+                    "frozen and the gap was filled by interpolation, so forecasts "
+                    "published then were both trained and simulated on a straight "
+                    "line. One-day-ahead error runs about 0.21 C before that date "
+                    "and 0.61 C after, and it widens month by month as the "
+                    "interpolated gap grows. Read that window as a broken feed, "
+                    "not a broken model."
                 )
                 horizon_options = [0, 1, 2, 3, 4, 5]
 
@@ -914,7 +995,9 @@ def main():
                         )
                         st.plotly_chart(
                             create_forecast_vs_actual_chart(
-                                at_horizon, selected_horizon
+                                at_horizon, selected_horizon,
+                                mark_outage=not is_replay,
+                                water_temps=water_temps,
                             ),
                             width='stretch',
                         )
@@ -923,7 +1006,9 @@ def main():
                             f"Error over time ({_horizon_label(selected_horizon)})"
                         )
                         st.plotly_chart(
-                            create_error_over_time_chart(at_horizon),
+                            create_error_over_time_chart(
+                                at_horizon, mark_outage=not is_replay
+                            ),
                             width='stretch',
                         )
 
