@@ -254,22 +254,33 @@ class WaterTempForecaster:
         self,
         start_datetime,
         start_water_temp: float,
-        targets=1,
+        days_ahead: Optional[int] = None,
+        target_dates: Optional[Sequence] = None,
     ) -> pd.DataFrame:
         """
         Forecast water temperature forward from a known starting point.
 
-        Runs ONE continuous simulation, checkpointed at each target, rather
-        than re-simulating per target.
+        Runs ONE continuous simulation, checkpointed at each target date, so a
+        single call returns every horizon you asked for. (This is the same
+        total work as simulating day by day - it is a clearer API, not a
+        faster one.)
+
+        Give exactly one of days_ahead or target_dates:
+
+            predict_forward(anchor, 12.0, days_ahead=5)
+            predict_forward(anchor, 12.0, target_dates=[d1, d2, d5])
 
         Args:
-            start_datetime: Anchor time. Normalised to MEASUREMENT_HOUR (7am),
-                            since water temps are measured at 7am.
+            start_datetime: Anchor time. Any time-of-day is discarded - the
+                            anchor is always 07:00 on that calendar date,
+                            since water temps are measured at 7am. Note this
+                            rewinds a late-evening timestamp to that morning.
             start_water_temp: Known water temperature at the anchor.
-            targets: Either an int n (forecast 1..n days ahead), or a sequence
-                     of dates/datetimes. Duplicates are kept as zero-length
-                     legs rather than de-duplicated, so callers get exactly one
-                     row per target they asked for.
+            days_ahead: Forecast 1..n days ahead of the anchor.
+            target_dates: Explicit dates to forecast, which may be irregular.
+                          Duplicates are kept as zero-length legs rather than
+                          de-duplicated, so callers get exactly one row per
+                          date they asked for.
 
         Returns:
             DataFrame with columns:
@@ -277,21 +288,30 @@ class WaterTempForecaster:
                 horizon_days    (int, days from the anchor)
                 water_temp      (float, NaN where weather coverage is missing)
                 has_weather     (bool, whether that leg had any weather data)
+
+        Raises:
+            ValueError: If both or neither of days_ahead / target_dates given.
         """
+        if (days_ahead is None) == (target_dates is None):
+            raise ValueError(
+                "Pass exactly one of days_ahead or target_dates "
+                "(e.g. days_ahead=5, or target_dates=[...])"
+            )
+
         columns = ["target_datetime", "horizon_days", "water_temp", "has_weather"]
 
         start_dt = pd.Timestamp(start_datetime).normalize() + pd.Timedelta(
             hours=self.MEASUREMENT_HOUR
         )
 
-        if isinstance(targets, (int, np.integer)):
+        if days_ahead is not None:
             target_dts = [
-                start_dt + pd.Timedelta(days=i) for i in range(1, int(targets) + 1)
+                start_dt + pd.Timedelta(days=i) for i in range(1, int(days_ahead) + 1)
             ]
         else:
             target_dts = sorted(
                 pd.Timestamp(t).normalize() + pd.Timedelta(hours=self.MEASUREMENT_HOUR)
-                for t in targets
+                for t in target_dates
             )
 
         target_dts = [t for t in target_dts if t >= start_dt]
@@ -435,7 +455,7 @@ class WaterTempForecaster:
             predictions = self.predict_forward(
                 start_datetime=anchor["date"],
                 start_water_temp=anchor["water_temp"],
-                targets=list(result.loc[run_start:run_end - 1, "date"]),
+                target_dates=list(result.loc[run_start:run_end - 1, "date"]),
             )
 
             for offset, row_idx in enumerate(range(run_start, run_end)):
