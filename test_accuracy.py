@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from datetime import datetime
 
-from forecast_storage import LAST_WATER_RUN_PER_DAY_SQL
+from forecast_storage import LAST_AIR_RUN_PER_DAY_SQL, LAST_WATER_RUN_PER_DAY_SQL
 
 
 def _local_predictions_db(rows):
@@ -112,3 +112,59 @@ class TestLastWaterRunPerDay:
         result = conn.execute(LAST_WATER_RUN_PER_DAY_SQL, [5]).fetchdf()
 
         assert len(result) == 2
+
+
+def _local_air_db(rows):
+    """In-memory DuckDB with the air_temp_forecasts_3hourly schema."""
+    conn = duckdb.connect(":memory:")
+    conn.execute("""
+        CREATE TABLE air_temp_forecasts_3hourly (
+            forecast_created_timestamp TIMESTAMP NOT NULL,
+            target_datetime TIMESTAMP NOT NULL,
+            air_temp DOUBLE NOT NULL,
+            source VARCHAR DEFAULT 'OpenWeatherMap'
+        )
+    """)
+    for created_ts, target_dt, air_temp in rows:
+        conn.execute(
+            "INSERT INTO air_temp_forecasts_3hourly VALUES (?, ?, ?, 'OpenWeatherMap')",
+            [created_ts, target_dt, air_temp],
+        )
+    return conn
+
+
+class TestLastAirRunPerDay:
+
+    def test_picks_last_run_and_keeps_all_its_rows(self):
+        rows = [
+            (datetime(2026, 5, 1, 20), datetime(2026, 5, 1, 21), 15.0),
+            (datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 0), 14.0),
+            (datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 3), 13.0),
+            (datetime(2026, 5, 1, 8), datetime(2026, 5, 2, 0), 99.0),
+        ]
+        conn = _local_air_db(rows)
+        result = conn.execute(LAST_AIR_RUN_PER_DAY_SQL).fetchdf()
+
+        assert len(result) == 3
+        assert 99.0 not in list(result["air_temp"])
+
+    def test_groups_by_creation_date_not_timestamp(self):
+        rows = [
+            (datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 0), 14.0),
+            (datetime(2026, 5, 2, 20), datetime(2026, 5, 3, 0), 15.0),
+        ]
+        conn = _local_air_db(rows)
+        result = conn.execute(LAST_AIR_RUN_PER_DAY_SQL).fetchdf()
+
+        assert len(result) == 2
+        assert sorted(pd.to_datetime(result["forecast_created_date"]).dt.day) == [1, 2]
+
+    def test_rows_ordered_by_target_datetime(self):
+        rows = [
+            (datetime(2026, 5, 1, 20), datetime(2026, 5, 3, 0), 13.0),
+            (datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 0), 14.0),
+        ]
+        conn = _local_air_db(rows)
+        result = conn.execute(LAST_AIR_RUN_PER_DAY_SQL).fetchdf()
+
+        assert list(result["air_temp"]) == [14.0, 13.0]
