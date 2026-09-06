@@ -602,7 +602,7 @@ class TestReplayCurrentModel:
         ]
 
 
-def _local_solar_db(rows, source="Open-Meteo"):
+def _local_weather_db(rows, source="Open-Meteo"):
     """In-memory DuckDB with the weather_forecasts_hourly schema."""
     conn = duckdb.connect(":memory:")
     conn.execute("""
@@ -633,7 +633,7 @@ class TestLastWeatherRunPerDay:
             (datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 12), 500.0, 10.0),
             (datetime(2026, 5, 1, 8), datetime(2026, 5, 2, 12), 999.0, 99.0),
         ]
-        conn = _local_solar_db(rows)
+        conn = _local_weather_db(rows)
         result = conn.execute(LAST_WEATHER_RUN_PER_DAY_SQL).fetchdf()
 
         assert len(result) == 2
@@ -641,7 +641,7 @@ class TestLastWeatherRunPerDay:
 
     def test_carries_both_measures(self):
         rows = [(datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 12), 500.0, 10.0)]
-        conn = _local_solar_db(rows)
+        conn = _local_weather_db(rows)
         result = conn.execute(LAST_WEATHER_RUN_PER_DAY_SQL).fetchdf()
 
         assert result.loc[0, "shortwave_radiation"] == pytest.approx(500.0)
@@ -652,7 +652,7 @@ class TestLastWeatherRunPerDay:
             (datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 0), 0.0, 90.0),
             (datetime(2026, 5, 2, 20), datetime(2026, 5, 3, 0), 0.0, 80.0),
         ]
-        conn = _local_solar_db(rows)
+        conn = _local_weather_db(rows)
         result = conn.execute(LAST_WEATHER_RUN_PER_DAY_SQL).fetchdf()
 
         assert len(result) == 2
@@ -665,7 +665,7 @@ class TestLastWeatherRunPerDay:
             (datetime(2026, 5, 1, 20), datetime(2026, 5, 3, 0), 1.0, 50.0),
             (datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 0), 2.0, 60.0),
         ]
-        conn = _local_solar_db(rows)
+        conn = _local_weather_db(rows)
         result = conn.execute(LAST_WEATHER_RUN_PER_DAY_SQL).fetchdf()
 
         assert list(result["shortwave_radiation"]) == [2.0, 1.0]
@@ -962,6 +962,60 @@ class TestWeatherForecastStorage:
         # The later OWM run must not suppress the earlier Open-Meteo one.
         assert len(result[result["source"] == "Open-Meteo"]) == 2
         assert len(result[result["source"] == "OpenWeatherMap"]) == 1
+
+    def test_a_second_write_for_the_same_source_and_hour_is_lost(self):
+        """
+        Pins the footgun rather than fixing it: the PK is (created_ts, target,
+        source), so writing solar and then air for one source and hour silently
+        drops the second. A source must write all its measures in one frame.
+        When air moves here (#39) it arrives in the same frame, or this becomes
+        ON CONFLICT DO UPDATE with COALESCE per column.
+        """
+        storage = self._storage()
+        target = [pd.Timestamp("2026-09-07 00:00")]
+        created = datetime(2026, 9, 6, 21, 0)
+
+        storage.store_weather_forecast(
+            pd.DataFrame({
+                "datetime": target,
+                "shortwave_radiation": [400.0],
+                "cloud_cover": [20.0],
+            }),
+            created,
+            source="Open-Meteo",
+        )
+        storage.store_weather_forecast(
+            pd.DataFrame({"datetime": target, "air_temp": [12.0]}),
+            created,
+            source="Open-Meteo",
+        )
+
+        result = storage.get_weather_forecasts_last_run_per_day()
+
+        assert len(result) == 1
+        assert result["shortwave_radiation"].iloc[0] == pytest.approx(400.0)
+        # The air temperature did not land, and nothing raised.
+        assert pd.isna(result["air_temp"].iloc[0])
+
+    def test_one_frame_carrying_every_measure_stores_them_all(self):
+        """The shape #39 must use: one write per source per run."""
+        storage = self._storage()
+        storage.store_weather_forecast(
+            pd.DataFrame({
+                "datetime": [pd.Timestamp("2026-09-07 00:00")],
+                "air_temp": [12.0],
+                "shortwave_radiation": [400.0],
+                "cloud_cover": [20.0],
+            }),
+            datetime(2026, 9, 6, 21, 0),
+            source="Open-Meteo",
+        )
+
+        result = storage.get_weather_forecasts_last_run_per_day()
+
+        assert result["air_temp"].iloc[0] == pytest.approx(12.0)
+        assert result["shortwave_radiation"].iloc[0] == pytest.approx(400.0)
+        assert result["cloud_cover"].iloc[0] == pytest.approx(20.0)
 
     def test_frame_without_any_measure_column_is_rejected(self):
         storage = self._storage()

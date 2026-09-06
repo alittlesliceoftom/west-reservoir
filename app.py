@@ -206,6 +206,10 @@ def cached_replay(water_temps, coefficients, max_horizon: int = 5):
         # Stored solar/cloud is passed as the forecast argument, so it wins on
         # overlap and the actuals only fill hours it does not cover - the same
         # precedence the live forecast had.
+        # Grouped by creation date alone, which is safe only while the stored
+        # measures are disjoint by source: the dropna below keeps solar rows
+        # and discards air-only ones. When air temperature joins this table
+        # (#39), extract it with its own dropna or group by (date, source).
         run = weather_runs_by_date.get(anchor_date)
         solar_forecast = None
         if run is not None and not run.empty:

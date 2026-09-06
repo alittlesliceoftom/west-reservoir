@@ -165,8 +165,15 @@ temperatures = pd.DataFrame({
 
 #### `forecast_storage.py`
 - `ForecastStorage` class wrapping MotherDuck (DuckDB in the cloud)
-- Stores air-temp forecasts (daily and 3-hourly) and water-temp predictions,
-  so today's forecasts can be scored against tomorrow's measurements
+- Stores 3-hourly air-temp forecasts and water-temp predictions, so today's
+  forecasts can be scored against tomorrow's measurements
+- `weather_forecasts_hourly` is the unified forecast table: wide, with a
+  `source` dimension and one nullable column per measure, so a new model input
+  is a new column rather than a new table. A source publishes only what it
+  publishes, and `source` is in the primary key so two sources can forecast the
+  same hour. **A source must write all of its measures in one frame** - a
+  second write for the same (source, hour) hits the primary key and is
+  swallowed as a duplicate. Air temperature joins this table with issue #39
 - Retrieves stored forecasts to fill any gap between historical data and the
   live OpenWeatherMap forecast
 - Gated by `ENABLE_MOTHERDUCK` in `config.py`; the app works without it
@@ -187,8 +194,9 @@ temperatures = pd.DataFrame({
   simulating from it alone would step through ~10 hours of a 24-hour period
 - `replay_current_model()` - Re-run the current model over history to show what
   accuracy would have been. A model-development tool, not a record of real
-  performance: solar and cloud forecasts were never stored, so actual
-  solar/cloud is used throughout, which biases it optimistically
+  performance. It uses the stored solar/cloud forecast where one exists;
+  before 2026-09-06 none were kept (issue #29), so those dates fall back to
+  actual solar/cloud, which biases them optimistically
 - Weather reaches the replay through an injected provider, so all I/O stays in
   the caller and the replay is testable without MotherDuck
 
