@@ -20,9 +20,16 @@ from forecast_storage import (
     ForecastStorage,
     ForecastStorageError,
     LAST_AIR_RUN_PER_DAY_SQL,
-    LAST_WEATHER_RUN_PER_DAY_SQL,
     LAST_WATER_RUN_PER_DAY_SQL,
 )
+
+
+# Columns get_weather_forecasts_last_run_per_day hands its callers. Asserted
+# as a set almost everywhere; exactly one test below pins the order.
+WEATHER_READ_COLUMNS = {
+    "forecast_created_date", "target_datetime", "source",
+    "air_temp", "shortwave_radiation", "cloud_cover",
+}
 
 
 def _local_predictions_db(rows):
@@ -76,7 +83,7 @@ class TestLastWaterRunPerDay:
         assert len(result) == 1
         assert result.loc[0, "forecast_temp"] == pytest.approx(12.0)
 
-    def test_keeps_all_horizons_of_the_winning_run(self):
+    def test_rank_keeps_every_row_of_the_winning_run(self):
         """Selection is per creation day, not per row - rank(), not row_number()."""
         created = datetime(2026, 5, 10).date()
         rows = [
@@ -602,148 +609,6 @@ class TestReplayCurrentModel:
         ]
 
 
-def _local_weather_db(rows, source="Open-Meteo"):
-    """In-memory DuckDB with the weather_forecasts_hourly schema."""
-    conn = duckdb.connect(":memory:")
-    conn.execute("""
-        CREATE TABLE weather_forecasts_hourly (
-            forecast_created_timestamp TIMESTAMP NOT NULL,
-            target_datetime TIMESTAMP NOT NULL,
-            source VARCHAR NOT NULL,
-            air_temp DOUBLE,
-            shortwave_radiation DOUBLE,
-            cloud_cover DOUBLE,
-            PRIMARY KEY (forecast_created_timestamp, target_datetime, source)
-        )
-    """)
-    for created_ts, target_dt, solar, cloud in rows:
-        conn.execute(
-            "INSERT INTO weather_forecasts_hourly VALUES (?, ?, ?, NULL, ?, ?)",
-            [created_ts, target_dt, source, solar, cloud],
-        )
-    return conn
-
-
-class TestLastWeatherRunPerDay:
-    """The bulk query the replay uses: one run per creation day, all its rows."""
-
-    def test_picks_last_run_and_keeps_all_its_rows(self):
-        rows = [
-            (datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 0), 0.0, 90.0),
-            (datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 12), 500.0, 10.0),
-            (datetime(2026, 5, 1, 8), datetime(2026, 5, 2, 12), 999.0, 99.0),
-        ]
-        conn = _local_weather_db(rows)
-        result = conn.execute(LAST_WEATHER_RUN_PER_DAY_SQL).fetchdf()
-
-        assert len(result) == 2
-        assert 999.0 not in list(result["shortwave_radiation"])
-
-    def test_carries_both_measures(self):
-        rows = [(datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 12), 500.0, 10.0)]
-        conn = _local_weather_db(rows)
-        result = conn.execute(LAST_WEATHER_RUN_PER_DAY_SQL).fetchdf()
-
-        assert result.loc[0, "shortwave_radiation"] == pytest.approx(500.0)
-        assert result.loc[0, "cloud_cover"] == pytest.approx(10.0)
-
-    def test_groups_by_creation_date_not_timestamp(self):
-        rows = [
-            (datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 0), 0.0, 90.0),
-            (datetime(2026, 5, 2, 20), datetime(2026, 5, 3, 0), 0.0, 80.0),
-        ]
-        conn = _local_weather_db(rows)
-        result = conn.execute(LAST_WEATHER_RUN_PER_DAY_SQL).fetchdf()
-
-        assert len(result) == 2
-        assert sorted(
-            pd.to_datetime(result["forecast_created_date"]).dt.day
-        ) == [1, 2]
-
-    def test_rows_ordered_by_target_datetime(self):
-        rows = [
-            (datetime(2026, 5, 1, 20), datetime(2026, 5, 3, 0), 1.0, 50.0),
-            (datetime(2026, 5, 1, 20), datetime(2026, 5, 2, 0), 2.0, 60.0),
-        ]
-        conn = _local_weather_db(rows)
-        result = conn.execute(LAST_WEATHER_RUN_PER_DAY_SQL).fetchdf()
-
-        assert list(result["shortwave_radiation"]) == [2.0, 1.0]
-
-
-class TestStoredSolarCloudFeedsTheModel:
-    """
-    Issue #29's acceptance test: a stored run can be read back and fed straight
-    into build_hourly_weather in place of the actuals.
-    """
-
-    def _air(self, start, hours):
-        return pd.DataFrame({
-            "datetime": [
-                pd.Timestamp(start) + pd.Timedelta(hours=i) for i in range(hours)
-            ],
-            "air_temp": [15.0] * hours,
-        })
-
-    def _solar(self, start, hours, radiation, cloud):
-        return pd.DataFrame({
-            "datetime": [
-                pd.Timestamp(start) + pd.Timedelta(hours=i) for i in range(hours)
-            ],
-            "shortwave_radiation": [radiation] * hours,
-            "cloud_cover": [cloud] * hours,
-        })
-
-    def test_stored_forecast_beats_actuals_on_overlap(self):
-        """The replay must use what the forecast had, not what happened."""
-        air = self._air("2026-05-01 07:00", 12)
-        actual = self._solar("2026-05-01 07:00", 12, radiation=900.0, cloud=0.0)
-        stored = self._solar("2026-05-01 07:00", 12, radiation=100.0, cloud=95.0)
-
-        weather = build_hourly_weather(air, actual, stored)
-
-        assert set(weather["shortwave_radiation"]) == {100.0}
-        assert set(weather["cloud_cover"]) == {95.0}
-
-    def test_actuals_fill_hours_the_stored_run_misses(self):
-        air = self._air("2026-05-01 07:00", 12)
-        actual = self._solar("2026-05-01 07:00", 12, radiation=900.0, cloud=0.0)
-        stored = self._solar("2026-05-01 13:00", 6, radiation=100.0, cloud=95.0)
-
-        weather = build_hourly_weather(air, actual, stored).set_index("datetime")
-
-        assert weather.loc[pd.Timestamp("2026-05-01 08:00"), "cloud_cover"] == 0.0
-        assert weather.loc[pd.Timestamp("2026-05-01 14:00"), "cloud_cover"] == 95.0
-
-    def test_model_output_differs_with_stored_versus_actual_solar(self):
-        """If swapping the source changed nothing, storing it would be pointless."""
-        air = self._air("2026-05-01 07:00", 25)
-        sunny = self._solar("2026-05-01 07:00", 25, radiation=900.0, cloud=0.0)
-        overcast = self._solar("2026-05-01 07:00", 25, radiation=50.0, cloud=100.0)
-
-        forecaster = WaterTempForecaster(k_air=0.01, k_solar=5e-4, k_cool=0.01)
-
-        forecaster.set_hourly_weather(build_hourly_weather(air, sunny, None))
-        with_sun = forecaster.predict_forward(
-            pd.Timestamp("2026-05-01"), 12.0, days_ahead=1
-        ).loc[0, "water_temp"]
-
-        forecaster.set_hourly_weather(build_hourly_weather(air, overcast, None))
-        with_cloud = forecaster.predict_forward(
-            pd.Timestamp("2026-05-01"), 12.0, days_ahead=1
-        ).loc[0, "water_temp"]
-
-        assert with_sun > with_cloud
-
-    def test_no_stored_run_falls_back_to_actuals(self):
-        air = self._air("2026-05-01 07:00", 12)
-        actual = self._solar("2026-05-01 07:00", 12, radiation=900.0, cloud=0.0)
-
-        weather = build_hourly_weather(air, actual, None)
-
-        assert set(weather["shortwave_radiation"]) == {900.0}
-
-
 class TestWeatherForecastStorage:
     """
     Exercises the real ForecastStorage methods against a local DuckDB.
@@ -781,6 +646,24 @@ class TestWeatherForecastStorage:
         result = storage.get_weather_forecasts_last_run_per_day()
 
         assert len(result) == 24
+        assert set(result.columns) == WEATHER_READ_COLUMNS
+
+    def test_column_order_is_stable_for_downstream_positional_reads(self):
+        """
+        One deliberate order assertion for this read.
+
+        Everywhere else asserts the column SET, so a reordering fails here and
+        nowhere else - which is what you want when you go looking for why.
+        """
+        storage = self._storage()
+        storage.store_weather_forecast(
+            self._forecast("2026-09-07 00:00", 2),
+            datetime(2026, 9, 6, 21, 0),
+            source="Open-Meteo",
+        )
+
+        result = storage.get_weather_forecasts_last_run_per_day()
+
         assert list(result.columns) == [
             "forecast_created_date", "target_datetime", "source",
             "air_temp", "shortwave_radiation", "cloud_cover",
@@ -812,6 +695,46 @@ class TestWeatherForecastStorage:
         )
 
         assert len(storage.get_weather_forecasts_last_run_per_day()) == 5
+
+    def test_groups_by_creation_date_not_timestamp(self):
+        """
+        Moved off the raw-SQL fixture: runs on different days must both
+        survive. No other test here spans two creation days.
+        """
+        storage = self._storage()
+        storage.store_weather_forecast(
+            self._forecast("2026-09-07 00:00", 2),
+            datetime(2026, 9, 6, 20, 0),
+            source="Open-Meteo",
+        )
+        storage.store_weather_forecast(
+            self._forecast("2026-09-08 00:00", 2),
+            datetime(2026, 9, 7, 20, 0),
+            source="Open-Meteo",
+        )
+
+        result = storage.get_weather_forecasts_last_run_per_day()
+
+        assert len(result) == 4
+        assert sorted(
+            set(pd.to_datetime(result["forecast_created_date"]).dt.day)
+        ) == [6, 7]
+
+    def test_rows_ordered_by_target_datetime(self):
+        """
+        Ordering comes from the SQL, not from insertion order, so the input
+        is deliberately reversed. Nothing else here asserts ordering.
+        """
+        storage = self._storage()
+        reversed_forecast = self._forecast("2026-09-07 00:00", 6).iloc[::-1]
+        storage.store_weather_forecast(
+            reversed_forecast, datetime(2026, 9, 6, 21, 0), source="Open-Meteo"
+        )
+
+        result = storage.get_weather_forecasts_last_run_per_day()
+
+        assert list(result["target_datetime"]) == sorted(result["target_datetime"])
+        assert result["target_datetime"].iloc[0] == pd.Timestamp("2026-09-07 00:00")
 
     def test_a_later_run_supersedes_an_earlier_one_the_same_day(self):
         storage = self._storage()
@@ -849,8 +772,18 @@ class TestWeatherForecastStorage:
 
         assert storage.get_weather_forecasts_last_run_per_day().empty
 
-    def test_empty_table_returns_empty_frame(self):
-        assert self._storage().get_weather_forecasts_last_run_per_day().empty
+    def test_empty_table_returns_empty_frame_with_the_full_schema(self):
+        """
+        Emptiness alone is not the contract.
+
+        The read short-circuits on an empty result, skipping the tz coercions
+        below it, so this is the one path that could hand callers a frame with
+        the wrong columns. Callers index by name straight away.
+        """
+        result = self._storage().get_weather_forecasts_last_run_per_day()
+
+        assert result.empty
+        assert set(result.columns) == WEATHER_READ_COLUMNS
 
     def test_round_trip_output_feeds_build_hourly_weather(self):
         """Issue #29's acceptance criterion, end to end."""

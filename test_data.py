@@ -4,7 +4,13 @@ import pytest
 import pandas as pd
 from datetime import datetime, timedelta
 
-from data import interpolate_to_hourly, combine_hourly_temps, DataLoadError
+from data import (
+    build_hourly_weather,
+    combine_hourly_temps,
+    interpolate_to_hourly,
+    DataLoadError,
+)
+from forecaster import WaterTempForecaster
 
 
 class TestInterpolateToHourly:
@@ -438,3 +444,279 @@ class TestInterpolationCap:
 
         assert result.loc[pd.Timestamp("2026-05-01 00:00"), "air_temp"] == pytest.approx(10.0)
         assert result.loc[pd.Timestamp("2026-05-10 00:00"), "air_temp"] == pytest.approx(20.0)
+
+
+class TestCombineHourlyTempsTimezones:
+    """
+    Timezone and dtype normalisation in combine_hourly_temps.
+
+    Disjoint from TestCombineHourlyTemps above, which covers precedence,
+    empties and sort order. This class only asks whether inputs of mixed
+    tz-awareness, resolution and dtype are normalised onto one naive
+    datetime64[s] axis without shifting any instant.
+    """
+
+    def _hours(self, start, n, temp, tz=None):
+        return pd.DataFrame({
+            "datetime": pd.date_range(start, periods=n, freq="h", tz=tz),
+            "air_temp": [float(temp)] * n,
+        })
+
+    def test_all_naive_datetimes(self):
+        result = combine_hourly_temps(
+            self._hours("2024-01-01 00:00", 24, 10.0),
+            self._hours("2024-01-02 00:00", 24, 12.0),
+        )
+
+        assert len(result) == 48
+        assert result["datetime"].dt.tz is None
+
+    def test_historical_tz_aware_forecast_naive(self):
+        result = combine_hourly_temps(
+            self._hours("2024-01-01 00:00", 24, 10.0, tz="UTC"),
+            self._hours("2024-01-02 00:00", 24, 12.0),
+        )
+
+        assert len(result) == 48
+        assert result["datetime"].dt.tz is None
+
+    def test_forecast_tz_aware_historical_naive(self):
+        result = combine_hourly_temps(
+            self._hours("2024-01-01 00:00", 24, 10.0),
+            self._hours("2024-01-02 00:00", 24, 12.0, tz="UTC"),
+        )
+
+        assert len(result) == 48
+        assert result["datetime"].dt.tz is None
+
+    def test_gap_fill_tz_aware(self):
+        """
+        The production bug: a tz-aware gap-fill frame among naive ones.
+
+        Asserting only "not empty and naive" would pass with the gap-fill
+        hours shifted or missing entirely, so assert the hours themselves and
+        the values they carry.
+        """
+        hist = self._hours("2024-01-01 00:00", 12, 10.0)                # 00:00-11:00
+        gap_fill = self._hours("2024-01-01 12:00", 6, 11.0, tz="UTC")   # 12:00-17:00
+        fore = self._hours("2024-01-01 18:00", 12, 12.0)                # 18:00-05:00
+
+        result = combine_hourly_temps(
+            hist, fore, gap_fill=gap_fill
+        ).set_index("datetime")
+
+        assert result.index.tz is None
+        for hour in range(12, 18):
+            stamp = pd.Timestamp(2024, 1, 1, hour)
+            assert stamp in result.index, f"gap hour {stamp} was dropped"
+            assert result.loc[stamp, "air_temp"] == pytest.approx(11.0)
+        # The neighbours either side are untouched, so the block did not slide.
+        assert result.loc[pd.Timestamp("2024-01-01 11:00"), "air_temp"] == pytest.approx(10.0)
+        assert result.loc[pd.Timestamp("2024-01-01 18:00"), "air_temp"] == pytest.approx(12.0)
+
+    def test_all_tz_aware_different_timezones(self):
+        """
+        Three zones must be CONVERTED to UTC, not stripped of their offset.
+
+        tz_localize(None) would also produce a naive column, so a naive-ness
+        assertion cannot tell the two apart. New York is the discriminator:
+        18:00 EST is 23:00 UTC. Under a strip it would land at 18:00 and the
+        frame would end five hours earlier.
+        """
+        hist = self._hours("2024-01-01 00:00", 12, 10.0, tz="UTC")
+        gap_fill = self._hours("2024-01-01 12:00", 6, 11.0, tz="Europe/London")
+        fore = self._hours("2024-01-01 18:00", 12, 12.0, tz="America/New_York")
+
+        result = combine_hourly_temps(
+            hist, fore, gap_fill=gap_fill
+        ).set_index("datetime")
+
+        assert result.index.tz is None
+        # 18:00 New York == 23:00 UTC: the forecast block starts there.
+        assert result.loc[pd.Timestamp("2024-01-01 23:00"), "air_temp"] == pytest.approx(12.0)
+        # ...and runs to 05:00 New York == 10:00 UTC, the last row.
+        assert result.index.max() == pd.Timestamp("2024-01-02 10:00")
+        # London in January is UTC, so its block does not move.
+        assert result.loc[pd.Timestamp("2024-01-01 12:00"), "air_temp"] == pytest.approx(11.0)
+        # 18:00 falls inside the 5-hour hole the conversion opens, so it is
+        # bridged - it must NOT be the forecast's flat 12.0.
+        assert result.loc[pd.Timestamp("2024-01-01 18:00"), "air_temp"] < 12.0
+
+    def test_empty_gap_fill_no_crash(self):
+        result = combine_hourly_temps(
+            self._hours("2024-01-01 00:00", 24, 10.0),
+            self._hours("2024-01-02 00:00", 24, 12.0),
+            gap_fill=pd.DataFrame(columns=["datetime", "air_temp"]),
+        )
+
+        assert len(result) == 48
+
+    def test_none_gap_fill(self):
+        result = combine_hourly_temps(
+            self._hours("2024-01-01 00:00", 24, 10.0),
+            self._hours("2024-01-02 00:00", 24, 12.0),
+            gap_fill=None,
+        )
+
+        assert len(result) == 48
+
+    def test_mixed_resolutions_normalise_to_datetime64_s(self):
+        """
+        datetime64[ns] and datetime64[us] inputs must land on one resolution.
+
+        The datetime64[s] assertion is deliberate, not incidental: the
+        normaliser casts explicitly so concat does not raise on mismatched
+        units. Do not relax it to "is some kind of datetime".
+        """
+        hist = self._hours("2024-01-01 00:00", 12, 10.0)
+        fore = self._hours("2024-01-01 18:00", 12, 12.0)
+        fore["datetime"] = fore["datetime"].astype("datetime64[us]")
+
+        result = combine_hourly_temps(hist, fore)
+
+        assert result["datetime"].dtype == "datetime64[s]"
+        assert len(result) == 30
+        assert result["datetime"].iloc[0] == pd.Timestamp("2024-01-01 00:00")
+
+    def test_object_dtype_datetime(self):
+        """
+        A datetime column arriving as object dtype must still parse and align.
+
+        Asserting only non-emptiness would pass with the forecast block
+        misplaced, so pin the length and the values at both ends.
+        """
+        hist = self._hours("2024-01-01 00:00", 12, 10.0)          # 00:00-11:00
+        fore = self._hours("2024-01-01 18:00", 12, 12.0)          # 18:00-05:00
+        fore["datetime"] = fore["datetime"].astype(object)
+
+        result = combine_hourly_temps(hist, fore)
+
+        assert result["datetime"].dtype == "datetime64[s]"
+        # 12 historical + 6 bridged (exactly at the cap) + 12 forecast.
+        assert len(result) == 30
+        indexed = result.set_index("datetime")
+        assert indexed.loc[pd.Timestamp("2024-01-01 00:00"), "air_temp"] == pytest.approx(10.0)
+        assert indexed.loc[pd.Timestamp("2024-01-01 18:00"), "air_temp"] == pytest.approx(12.0)
+        # Bridged hours sit strictly between the two levels, not at either.
+        bridged = indexed.loc[pd.Timestamp("2024-01-01 14:00"), "air_temp"]
+        assert 10.0 < bridged < 12.0
+
+
+class TestStoredSolarCloudFeedsTheModel:
+    """
+    Issue #29's acceptance test: a stored run can be read back and fed straight
+    into build_hourly_weather in place of the actuals.
+
+    Moved here from test_accuracy.py, which is where it was written but not
+    where it belongs: build_hourly_weather lives in data.py and this class is
+    its only coverage.
+    """
+
+    def _air(self, start, hours):
+        return pd.DataFrame({
+            "datetime": [
+                pd.Timestamp(start) + pd.Timedelta(hours=i) for i in range(hours)
+            ],
+            "air_temp": [15.0] * hours,
+        })
+
+    def _solar(self, start, hours, radiation, cloud):
+        return pd.DataFrame({
+            "datetime": [
+                pd.Timestamp(start) + pd.Timedelta(hours=i) for i in range(hours)
+            ],
+            "shortwave_radiation": [radiation] * hours,
+            "cloud_cover": [cloud] * hours,
+        })
+
+    def test_stored_forecast_beats_actuals_on_overlap(self):
+        """The replay must use what the forecast had, not what happened."""
+        air = self._air("2026-05-01 07:00", 12)
+        actual = self._solar("2026-05-01 07:00", 12, radiation=900.0, cloud=0.0)
+        stored = self._solar("2026-05-01 07:00", 12, radiation=100.0, cloud=95.0)
+
+        weather = build_hourly_weather(air, actual, stored)
+
+        assert set(weather["shortwave_radiation"]) == {100.0}
+        assert set(weather["cloud_cover"]) == {95.0}
+
+    def test_actuals_fill_hours_the_stored_run_misses(self):
+        air = self._air("2026-05-01 07:00", 12)
+        actual = self._solar("2026-05-01 07:00", 12, radiation=900.0, cloud=0.0)
+        stored = self._solar("2026-05-01 13:00", 6, radiation=100.0, cloud=95.0)
+
+        weather = build_hourly_weather(air, actual, stored).set_index("datetime")
+
+        assert weather.loc[pd.Timestamp("2026-05-01 08:00"), "cloud_cover"] == 0.0
+        assert weather.loc[pd.Timestamp("2026-05-01 14:00"), "cloud_cover"] == 95.0
+
+    def test_model_output_differs_with_stored_versus_actual_solar(self):
+        """If swapping the source changed nothing, storing it would be pointless."""
+        air = self._air("2026-05-01 07:00", 25)
+        sunny = self._solar("2026-05-01 07:00", 25, radiation=900.0, cloud=0.0)
+        overcast = self._solar("2026-05-01 07:00", 25, radiation=50.0, cloud=100.0)
+
+        forecaster = WaterTempForecaster(k_air=0.01, k_solar=5e-4, k_cool=0.01)
+
+        forecaster.set_hourly_weather(build_hourly_weather(air, sunny, None))
+        with_sun = forecaster.predict_forward(
+            pd.Timestamp("2026-05-01"), 12.0, days_ahead=1
+        ).loc[0, "water_temp"]
+
+        forecaster.set_hourly_weather(build_hourly_weather(air, overcast, None))
+        with_cloud = forecaster.predict_forward(
+            pd.Timestamp("2026-05-01"), 12.0, days_ahead=1
+        ).loc[0, "water_temp"]
+
+        assert with_sun > with_cloud
+
+    def test_no_stored_run_falls_back_to_actuals(self):
+        air = self._air("2026-05-01 07:00", 12)
+        actual = self._solar("2026-05-01 07:00", 12, radiation=900.0, cloud=0.0)
+
+        weather = build_hourly_weather(air, actual, None)
+
+        assert set(weather["shortwave_radiation"]) == {900.0}
+
+    def test_no_solar_at_all_degrades_to_air_conduction_only(self):
+        """
+        Both solar frames absent: the documented graceful degradation.
+
+        Zero solar and 100% cloud collapse the three-term model to its air
+        term, which is the whole point of the fallback - the alternative is a
+        KeyError inside set_hourly_weather. This branch had no test at all.
+        """
+        air = self._air("2026-05-01 07:00", 12)
+
+        weather = build_hourly_weather(air, None, None)
+
+        assert list(weather.columns) == [
+            "datetime", "air_temp", "shortwave_radiation", "cloud_cover"
+        ]
+        assert len(weather) == 12
+        assert (weather["shortwave_radiation"] == 0.0).all()
+        assert (weather["cloud_cover"] == 100.0).all()
+
+        # The neutral values must actually neutralise the two optional terms:
+        # a forecaster with large k_solar and k_cool must land where one with
+        # zeroed coefficients does.
+        three_term = WaterTempForecaster(k_air=0.02, k_solar=1e-3, k_cool=0.5)
+        air_only = WaterTempForecaster(k_air=0.02, k_solar=0.0, k_cool=0.0)
+        slice_df = weather[["air_temp", "shortwave_radiation", "cloud_cover"]]
+
+        assert three_term._simulate_period(10.0, slice_df) == pytest.approx(
+            air_only._simulate_period(10.0, slice_df)
+        )
+
+    def test_empty_solar_frames_are_treated_as_absent(self):
+        """An empty frame is not a source; it must take the fallback too."""
+        air = self._air("2026-05-01 07:00", 6)
+        empty = pd.DataFrame(
+            columns=["datetime", "shortwave_radiation", "cloud_cover"]
+        )
+
+        weather = build_hourly_weather(air, empty, empty)
+
+        assert len(weather) == 6
+        assert (weather["shortwave_radiation"] == 0.0).all()
+        assert (weather["cloud_cover"] == 100.0).all()
