@@ -6,10 +6,13 @@ import requests
 from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock
 
+from conftest import hourly_frame
 from config import ConfigError
 from data import (
     build_hourly_weather,
+    build_temperatures_frame,
     combine_hourly_temps,
+    deduplicate_temperatures,
     interpolate_to_hourly,
     load_forecast_air_temps,
     load_forecast_solar_cloud,
@@ -17,6 +20,8 @@ from data import (
     load_historical_solar_cloud,
     load_hourly_air_temps,
     load_water_temps,
+    select_storable_predictions,
+    MAX_INTERPOLATION_HOURS,
     _parse_open_meteo_hourly,
     DataLoadError,
 )
@@ -36,12 +41,6 @@ def _response(payload=None, text=None):
 
 class TestInterpolateToHourly:
     """Tests for interpolate_to_hourly function"""
-
-    def test_empty_dataframe(self):
-        """Empty input returns empty output"""
-        df = pd.DataFrame(columns=["datetime", "air_temp"])
-        result = interpolate_to_hourly(df)
-        assert result.empty
 
     def test_single_row(self):
         """Single row returns single row (no interpolation possible)"""
@@ -91,13 +90,6 @@ class TestInterpolateToHourly:
 
 class TestCombineHourlyTemps:
     """Tests for combine_hourly_temps function"""
-
-    def test_empty_both(self):
-        """Both empty returns empty"""
-        hist = pd.DataFrame(columns=["datetime", "air_temp"])
-        fore = pd.DataFrame(columns=["datetime", "air_temp"])
-        result = combine_hourly_temps(hist, fore)
-        assert result.empty
 
     def test_empty_historical(self):
         """Empty historical returns forecast only"""
@@ -181,13 +173,6 @@ class TestCombineHourlyTemps:
         assert result["datetime"].is_monotonic_increasing
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
-from data import select_storable_predictions
-
-
 class TestSelectStorablePredictions:
     """Only genuine forward-looking forecasts should be stored."""
 
@@ -243,16 +228,6 @@ class TestSelectStorablePredictions:
         df = self._frame([(datetime(2026, 5, 10), 12.0, "PREDICTED")])
         result = select_storable_predictions(df, pd.Timestamp(2026, 5, 10, 21, 30))
         assert len(result) == 1
-
-    def test_empty_frame_returns_empty(self):
-        result = select_storable_predictions(self._frame([]), pd.Timestamp(2026, 5, 10))
-        assert result.empty
-
-
-from data import (
-    build_temperatures_frame,
-    deduplicate_temperatures,
-)
 
 
 class TestBuildTemperaturesFrame:
@@ -367,9 +342,6 @@ class TestDeduplicateTemperatures:
         pd.testing.assert_frame_equal(df, before)
 
 
-from data import MAX_INTERPOLATION_HOURS
-
-
 class TestInterpolationCap:
     """
     combine_hourly_temps must not invent weather across long gaps.
@@ -381,10 +353,7 @@ class TestInterpolationCap:
     """
 
     def _series(self, start, n_hours, temp):
-        return pd.DataFrame({
-            "datetime": [pd.Timestamp(start) + pd.Timedelta(hours=i) for i in range(n_hours)],
-            "air_temp": [float(temp)] * n_hours,
-        })
+        return hourly_frame(start, n_hours, air_temp=float(temp))
 
     def test_short_gap_is_bridged(self):
         """A 3-hourly forecast leaves 2-hour holes; those must still be filled."""
@@ -478,10 +447,7 @@ class TestCombineHourlyTempsTimezones:
     """
 
     def _hours(self, start, n, temp, tz=None):
-        return pd.DataFrame({
-            "datetime": pd.date_range(start, periods=n, freq="h", tz=tz),
-            "air_temp": [float(temp)] * n,
-        })
+        return hourly_frame(start, n, tz=tz, air_temp=float(temp))
 
     def test_all_naive_datetimes(self):
         result = combine_hourly_temps(
@@ -634,21 +600,12 @@ class TestStoredSolarCloudFeedsTheModel:
     """
 
     def _air(self, start, hours):
-        return pd.DataFrame({
-            "datetime": [
-                pd.Timestamp(start) + pd.Timedelta(hours=i) for i in range(hours)
-            ],
-            "air_temp": [15.0] * hours,
-        })
+        return hourly_frame(start, hours, air_temp=15.0)
 
     def _solar(self, start, hours, radiation, cloud):
-        return pd.DataFrame({
-            "datetime": [
-                pd.Timestamp(start) + pd.Timedelta(hours=i) for i in range(hours)
-            ],
-            "shortwave_radiation": [radiation] * hours,
-            "cloud_cover": [cloud] * hours,
-        })
+        return hourly_frame(
+            start, hours, shortwave_radiation=radiation, cloud_cover=cloud
+        )
 
     def test_stored_forecast_beats_actuals_on_overlap(self):
         """The replay must use what the forecast had, not what happened."""
@@ -1143,3 +1100,106 @@ class TestLoadForecastSolarCloud:
 
         with pytest.raises(DataLoadError):
             load_forecast_solar_cloud(days=5)
+
+
+
+def _empty_hourly():
+    return pd.DataFrame(columns=["datetime", "air_temp"])
+
+
+def _empty_predictions():
+    return pd.DataFrame(columns=["date", "water_temp", "source"])
+
+
+class TestEmptyInputContract:
+    """
+    Every processing function must return an EMPTY FRAME WITH ITS SCHEMA on
+    empty input, never a bare DataFrame() and never a raise.
+
+    Consolidated from three near-identical tests scattered across the classes
+    above, each of which asserted only `.empty` - which a function returning
+    the wrong columns would also satisfy. The app chains these together
+    (combine -> build_hourly_weather -> the forecaster) before it knows
+    whether any data arrived, so a schema-less empty frame surfaces as a
+    KeyError several steps downstream of the source that was actually missing.
+    """
+
+    @pytest.mark.parametrize(
+        "call, expected_columns",
+        [
+            pytest.param(
+                lambda: interpolate_to_hourly(_empty_hourly()),
+                {"datetime", "air_temp"},
+                id="interpolate_to_hourly",
+            ),
+            pytest.param(
+                lambda: combine_hourly_temps(_empty_hourly(), _empty_hourly()),
+                {"datetime", "air_temp"},
+                id="combine_hourly_temps",
+            ),
+            pytest.param(
+                lambda: select_storable_predictions(
+                    _empty_predictions(), pd.Timestamp(2026, 5, 10)
+                ),
+                {"date", "water_temp", "source"},
+                id="select_storable_predictions",
+            ),
+            pytest.param(
+                lambda: build_hourly_weather(_empty_hourly(), None, None),
+                {"datetime", "air_temp", "shortwave_radiation", "cloud_cover"},
+                id="build_hourly_weather_no_solar",
+            ),
+            pytest.param(
+                lambda: build_hourly_weather(
+                    _empty_hourly(),
+                    hourly_frame(
+                        "2026-05-01", 3,
+                        shortwave_radiation=0.0, cloud_cover=50.0,
+                    ),
+                    None,
+                ),
+                {"datetime", "air_temp", "shortwave_radiation", "cloud_cover"},
+                id="build_hourly_weather_solar_but_no_air",
+            ),
+        ],
+    )
+    def test_empty_input_returns_an_empty_frame_carrying_its_schema(
+        self, call, expected_columns
+    ):
+        result = call()
+
+        assert result.empty
+        assert set(result.columns) == expected_columns
+
+    @pytest.mark.parametrize(
+        "call, expected_columns",
+        [
+            pytest.param(
+                lambda: combine_hourly_temps(
+                    hourly_frame("2026-05-01 00:00", 3, air_temp=10.0),
+                    hourly_frame("2026-05-01 03:00", 3, air_temp=12.0),
+                    gap_fill=None,
+                ),
+                {"datetime", "air_temp"},
+                id="combine_hourly_temps_gap_fill_none",
+            ),
+            pytest.param(
+                lambda: build_hourly_weather(
+                    hourly_frame("2026-05-01 00:00", 3, air_temp=10.0), None, None
+                ),
+                {"datetime", "air_temp", "shortwave_radiation", "cloud_cover"},
+                id="build_hourly_weather_both_solar_none",
+            ),
+        ],
+    )
+    def test_none_is_an_accepted_absence_not_an_error(self, call, expected_columns):
+        """
+        Only where None is genuinely part of the signature. These two take
+        optional frames and callers really do pass None - the app has no
+        stored gap-fill on a cold start, and no solar source before
+        Open-Meteo is reachable.
+        """
+        result = call()
+
+        assert not result.empty
+        assert set(result.columns) == expected_columns
