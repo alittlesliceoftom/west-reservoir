@@ -194,6 +194,16 @@ temperatures = pd.DataFrame({
 
 #### `app.py`
 - Streamlit web interface
+- Three tabs: Temperature, Forecast Accuracy, Heard at the Res
+- The Forecast Accuracy tab is placed **before** the Temperature tab in code.
+  The Temperature block calls `st.stop()` on a data error, and Streamlit runs
+  tab bodies in code order, so anything after it would silently fail to render
+  whenever temperature data is unavailable. It also fits its own model for the
+  same reason, rather than borrowing the Temperature tab's forecaster
+- The accuracy tab shades the Meteostat outage window (2026-03-20 onward) on
+  its time-series charts for stored forecasts. Error in that window measures a
+  dead feed, not the model - see issue #33. The replay reads the repaired
+  archive, so the band is suppressed there
 - Single DataFrame workflow throughout
 - Always-visible debug panel showing:
   - Data overview (measured vs predicted counts)
@@ -337,10 +347,11 @@ This is a complete rebuild of the original system. See `REBUILD_PLAN.md` for:
 ## Future Enhancements
 
 Potential improvements (not currently planned):
-- Automated testing suite
-- Historical forecast accuracy tracking
 - Mobile-responsive layout improvements
 - Data export functionality
 - Multiple reservoir support
+- Scheduled data-freshness alerting (issue #34)
+- Storing solar and cloud forecasts, so the backtest replay stops leaking
+  actual solar/cloud into historical runs (issue #29)
 
 Keep changes aligned with core principle: **Simple, transparent, explicit**.
