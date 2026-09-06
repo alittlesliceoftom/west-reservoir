@@ -896,7 +896,7 @@ def main():
                             f"to {at_horizon['target_date'].max().date()}"
                         )
 
-                    st.subheader("Accuracy by forecast horizon")
+                    st.subheader("Error by forecast horizon")
                     st.caption(
                         "All horizons, unfiltered. Shows how forecasts degrade "
                         "further ahead."
