@@ -13,10 +13,10 @@ reads):
     git commit --no-verify
 
 Only staged Python files are checked, so committing a change to README.md costs
-nothing. Note that ruff reads the files on disk rather than the staged blobs,
-so if a file is only partially staged you are linting the working-tree version.
-That is the usual trade for a hook that finishes in well under a second, and it
-errs toward showing you more problems rather than fewer.
+nothing. Ruff reads the files on disk rather than the staged blobs, so a
+partially staged file is linted as it appears in the working tree - the trade
+for a hook that finishes in well under a second, and it errs toward showing
+more problems rather than fewer.
 """
 
 import shutil
@@ -29,9 +29,9 @@ def search_roots():
     """
     Directories that might hold the virtualenv.
 
-    In a git worktree the checkout has no `env/` of its own - it lives at the
-    main repo root - so look there too, or the hook silently degrades to "ruff
-    not installed" for every worktree.
+    A git worktree has no `env/` of its own; it lives at the main repo root, so
+    that is searched too. Without it the hook degrades to "ruff not installed"
+    in every worktree.
     """
     roots = [Path(".")]
     try:
