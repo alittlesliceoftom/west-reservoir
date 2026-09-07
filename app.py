@@ -175,6 +175,27 @@ def cached_fitted_model_coefficients(water_temps, start_date, end_date):
     return (forecaster.k_air, forecaster.k_solar, forecaster.k_cool)
 
 
+def solar_cloud_runs_by_date(stored_weather):
+    """
+    Group stored weather runs by creation date, keeping only solar/cloud rows.
+
+    The storage reader returns every source's last run, and a source publishes
+    only what it publishes. This provider supplies solar and cloud, so a row
+    carrying neither must not reach it: the model would receive NULL where it
+    expects radiation, and degrade silently rather than fail.
+    """
+    if stored_weather.empty:
+        return {}
+
+    usable = stored_weather.dropna(
+        subset=["shortwave_radiation", "cloud_cover"], how="all"
+    )
+    if usable.empty:
+        return {}
+
+    return {date: group for date, group in usable.groupby("forecast_created_date")}
+
+
 @st.cache_data(ttl=3600)
 def cached_replay(water_temps, coefficients, max_horizon: int = 5):
     """
@@ -200,11 +221,8 @@ def cached_replay(water_temps, coefficients, max_horizon: int = 5):
     # Anchors from before then have none and fall back to actual solar/cloud -
     # the remaining leak, and why replay numbers are an optimistic bound until
     # this table has been accumulating for a while.
-    stored_weather = storage.get_weather_forecasts_last_run_per_day()
-    weather_runs_by_date = (
-        {date: group for date, group in stored_weather.groupby("forecast_created_date")}
-        if not stored_weather.empty
-        else {}
+    weather_runs_by_date = solar_cloud_runs_by_date(
+        storage.get_weather_forecasts_last_run_per_day()
     )
 
     start_date = pd.Timestamp(water_temps["date"].min()).normalize()
@@ -939,6 +957,452 @@ def create_error_over_time_chart(
     return fig
 
 
+def page_temperature():
+    """The dashboard: measurements, forecast and the model debug panel."""
+    col_info, col_image = st.columns([1, 1])
+    with col_info:
+        st.info(
+            "Water temperatures are taken each morning around 7am. "
+            "The water will often be warmer by the time you get in!\n\n "
+            "The forecast simulates hourly heat transfer using air temperature, "
+            "shortwave solar radiation, and cloud cover (clear-sky overnight "
+            "cooling). It does not yet account for wind or evaporation.\n\n"
+            "Additionally, temperature varies throughout the reservoir "
+            "by both position and depth - this is just a snapshot of conditions."
+        )
+    with col_image:
+        st.image("image.png",)
+
+    try:
+        water_temps = cached_load_water_temps()
+
+        # Normalize dates to day-level for consistent caching
+        start_date = pd.Timestamp(water_temps["date"].min()).normalize()
+        end_date = pd.Timestamp.now().normalize()
+        air_temps_hist = cached_load_historical_air_temps(start_date, end_date)
+
+        hourly_air_temps = cached_load_hourly_air_temps(start_date, end_date)
+
+        temperatures = build_temperatures_frame(water_temps, air_temps_hist)
+
+        forecast_weather = None
+        gap_fill_hourly = None
+        try:
+            forecast_weather = cached_load_forecast_weather(days=FORECAST_DAYS)
+
+            # One write, every measure. All three arrive in a single frame,
+            # so the whole run lands as one row per hour (issue #39).
+            if ENABLE_MOTHERDUCK:
+                if 'last_forecast_fetch_date' not in st.session_state or \
+                   st.session_state['last_forecast_fetch_date'] != datetime.now().date():
+                    try:
+                        storage = get_storage()
+                        forecast_timestamp = datetime.now()
+                        storage.store_weather_forecast(
+                            forecast_weather, forecast_timestamp, source="Open-Meteo"
+                        )
+                        st.session_state['last_forecast_fetch_date'] = datetime.now().date()
+                        st.session_state['last_forecast_timestamp'] = forecast_timestamp
+                    except ForecastStorageError as e:
+                        st.warning(f"Could not store forecast: {e}")
+                    except Exception as e:
+                        st.warning(f"Forecast storage error: {e}")
+
+            # Gap is between: last archive timestamp -> first forecast timestamp
+            if ENABLE_MOTHERDUCK and not hourly_air_temps.empty and not forecast_weather.empty:
+                hist_end = hourly_air_temps["datetime"].max()
+                fore_start = forecast_weather["datetime"].min()
+
+                gap_hours = (fore_start - hist_end).total_seconds() / 3600
+                if gap_hours > 1:
+                    gap_fill_hourly = retrieve_gap_fill_forecasts(hist_end, fore_start)
+
+            combined_hourly = combine_hourly_temps(
+                hourly_air_temps,
+                forecast_weather[["datetime", "air_temp"]],
+                gap_fill_hourly,
+            )
+
+            # Daily min/mean/max for the chart, derived from the same hourly
+            # series the model runs on, so the two cannot disagree.
+            forecast = daily_from_hourly_forecast(forecast_weather)
+            forecast["source"] = "AIR_ONLY"
+            temperatures = pd.concat([temperatures, forecast], ignore_index=True)
+            temperatures = temperatures.sort_values("date").reset_index(drop=True)
+
+            # Deduplicated version for the prediction chain (MEASURED > AIR_ONLY)
+            temperatures_deduped = deduplicate_temperatures(temperatures)
+
+        except DataLoadError as e:
+            st.warning(f"Weather forecast unavailable: {e}")
+            st.info("Showing historical data only")
+            combined_hourly = hourly_air_temps
+            temperatures_deduped = temperatures.copy()  # No duplicates without forecast
+
+        solar_hist = None
+        try:
+            solar_hist = cached_load_historical_solar_cloud(start_date, end_date)
+        except DataLoadError as e:
+            st.warning(f"Open-Meteo historical solar/cloud unavailable: {e}")
+
+        hourly_weather = build_hourly_weather(
+            combined_hourly, solar_hist, forecast_weather
+        )
+
+        forecaster = WaterTempForecaster()
+        forecaster.set_hourly_weather(hourly_weather)
+        forecaster.fit(temperatures_deduped[temperatures_deduped["source"] == "MEASURED"])
+
+        temperatures_deduped = forecaster.fill_predictions(temperatures_deduped)
+
+        # Store water predictions in MotherDuck (only once per day)
+        if ENABLE_MOTHERDUCK:
+            if 'last_prediction_store_date' not in st.session_state or \
+               st.session_state['last_prediction_store_date'] != datetime.now().date():
+                try:
+                    storage = get_storage()
+                    # Only forward-looking rows are forecasts. Backfilled
+                    # gap-fills target dates before the run and would land
+                    # in storage at negative horizons.
+                    predictions_df = select_storable_predictions(
+                        temperatures_deduped, pd.Timestamp.now()
+                    )
+                    measured_temps = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
+
+                    if not predictions_df.empty and not measured_temps.empty:
+                        forecast_timestamp = st.session_state.get(
+                            'last_forecast_timestamp',
+                            datetime.now()
+                        )
+                        storage.store_water_predictions(
+                            predictions_df=predictions_df,
+                            forecast_created_timestamp=forecast_timestamp,
+                            heat_transfer_coeff=forecaster.k_air,
+                            start_water_temp=measured_temps.iloc[-1]["water_temp"]
+                        )
+                        st.session_state['last_prediction_store_date'] = datetime.now().date()
+                except ForecastStorageError as e:
+                    st.warning(f"Could not store predictions: {e}")
+                except Exception as e:
+                    st.warning(f"Prediction storage error: {e}")
+
+        with col_info:
+            today = datetime.now().date()
+            yesterday = today - timedelta(days=1)
+            tomorrow = today + timedelta(days=1)
+
+            st.header("Current Temperature")
+
+            measured_data = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
+            today_data = temperatures_deduped[temperatures_deduped["date"].dt.date == today]
+            has_today_measurement = any(today_data["source"] == "MEASURED")
+
+            if has_today_measurement:
+                today_measured = today_data[today_data["source"] == "MEASURED"].iloc[0]
+                st.metric("Today's Measured", f"{today_measured['water_temp']:.1f}C")
+            else:
+                if not measured_data.empty:
+                    latest = measured_data.iloc[-1]
+                    latest_date = latest["date"].strftime("%Y-%m-%d")
+                    st.warning(
+                        f"No measurement for today yet. Last measured: {latest_date}\n\n"
+                        f"Please contribute the temperature to the spreadsheet [here](https://docs.google.com/spreadsheets/d/1HNnucep6pv2jCFg2bYR_gV78XbYvWYyjx9y9tTNVapw/edit?usp=sharing)"
+                    )
+
+            # Compute forecasts independently (always from yesterday's measurement)
+            st.subheader("Forecasts")
+
+            yesterday_data = measured_data[measured_data["date"].dt.date == yesterday]
+            today_forecast_temp = None
+            tomorrow_forecast_temp = None
+
+            if not yesterday_data.empty:
+                yesterday_temp = yesterday_data.iloc[-1]["water_temp"]
+                yesterday_dt = pd.Timestamp(yesterday).replace(hour=forecaster.MEASUREMENT_HOUR)
+                today_dt = pd.Timestamp(today).replace(hour=forecaster.MEASUREMENT_HOUR)
+                weather_slice = forecaster._get_weather_for_period(yesterday_dt, today_dt)
+                if not weather_slice.empty:
+                    today_forecast_temp = forecaster._simulate_period(
+                        yesterday_temp, weather_slice
+                    )
+
+            tomorrow_data = temperatures_deduped[temperatures_deduped["date"].dt.date == tomorrow]
+            if not tomorrow_data.empty and tomorrow_data.iloc[0]["source"] == "PREDICTED":
+                tomorrow_forecast_temp = tomorrow_data.iloc[0]["water_temp"]
+
+            col_today_fc, col_tomorrow_fc, col_hottest, col_coldest = st.columns(4)
+            with col_today_fc:
+                if today_forecast_temp is not None and pd.notna(today_forecast_temp):
+                    st.metric("Today's Forecast (excludes today's measurement)", f"{today_forecast_temp:.1f}C")
+                else:
+                    st.metric("Today's Forecast (excludes today's measurement)", "N/A")
+            with col_tomorrow_fc:
+                if tomorrow_forecast_temp is not None and pd.notna(tomorrow_forecast_temp):
+                    st.metric("Tomorrow's Forecast", f"{tomorrow_forecast_temp:.1f}C")
+                else:
+                    st.metric("Tomorrow's Forecast", "N/A")
+            with col_hottest:
+                week_ahead = today + timedelta(days=7)
+                upcoming = temperatures_deduped[
+                    (temperatures_deduped["date"].dt.date >= today) &
+                    (temperatures_deduped["date"].dt.date <= week_ahead) &
+                    (temperatures_deduped["source"].isin(["PREDICTED", "MEASURED"]))
+                ]
+                if not upcoming.empty:
+                    hottest_temp = upcoming["water_temp"].max()
+                    hottest_date = upcoming.loc[upcoming["water_temp"].idxmax(), "date"].strftime("%a %d %b")
+                    st.metric("Hottest This Week", f"{hottest_temp:.1f}C", delta=hottest_date, delta_color="off")
+                else:
+                    st.metric("Hottest This Week", "N/A")
+            with col_coldest:
+                if not upcoming.empty:
+                    coldest_temp = upcoming["water_temp"].min()
+                    coldest_date = upcoming.loc[upcoming["water_temp"].idxmin(), "date"].strftime("%a %d %b")
+                    st.metric("Coldest This Week", f"{coldest_temp:.1f}C", delta=coldest_date, delta_color="off")
+                else:
+                    st.metric("Coldest This Week", "N/A")
+
+            if st.button("Data looks old? Press to refresh weather forecast and water temperature data", icon = '🔄' ):
+                st.cache_data.clear()
+                st.rerun()
+
+        st.header("Temperature History and Forecast")
+        st.text("""The chart shows the temperature history and forecast for the last 5 days, and next 5 days.
+        Red bar shows the air temp range each day, with the black line being the average. The blue line is the water tempterature. It is dotted for forecast days.""")
+
+        chart = create_temperature_chart(temperatures_deduped)
+        st.plotly_chart(chart, width='stretch')
+
+        st.header("Summary Statistics")
+        measured = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Lowest Recorded at West Reservoir! ❄️", f"{measured['water_temp'].min():.1f}C")
+        with col2:
+            st.metric("Hottest Recorded at West Reservoir! 🥵", f"{measured['water_temp'].max():.1f}C")
+        with col3:
+            st.metric("Total Readings Taken", len(measured))
+
+        display_debug_panel(
+            temperatures_deduped, forecaster, hourly_air_temps,
+            forecast_weather, gap_fill_hourly,
+        )
+
+        st.divider()
+        st.subheader("About the Project")
+        st.markdown(
+            """
+Hi! I'm Tom, a local and regular swimmer at the reservoir for over a year.
+
+I enjoy tracking the temperatures so I decided to make this app. I've recorded
+most of the temperatures since November 2024, and used that data to train a
+simple physics model to predict future temperatures.
+
+The model simulates hour-by-hour heat transfer between air and water. Both
+the forecast and the historic weather come from Open-Meteo, hourly.
+            """
+        )
+
+    except DataLoadError as e:
+        st.error(f"Cannot load required data: {e}")
+        st.info(
+            "Please check:\n"
+            "- Internet connection is working\n"
+            "- Google Sheets is accessible\n"
+            "- Open-Meteo service is available"
+        )
+        # Deliberately no st.stop() here. It halts the entire script, so
+        # every tab defined below this one would silently fail to render
+        # whenever temperature data is unavailable (issue #43).
+
+
+def page_accuracy():
+    """
+    Forecast accuracy against measurements.
+
+    A separate page rather than a tab because it opens a MotherDuck
+    connection, which costs several seconds. st.navigation runs only the
+    selected page, so that cost is paid by whoever opens this page and
+    never by the dashboard.
+    """
+    st.header("Forecast Accuracy")
+
+    if not ENABLE_MOTHERDUCK:
+        st.warning(
+            "Forecast accuracy requires MotherDuck, which is not configured. "
+            "Set MOTHERDUCK_TOKEN to enable this tab."
+        )
+    else:
+        source_label = st.radio(
+            "Comparison",
+            ["Stored forecasts", "Model replay (current model)"],
+            horizontal=True,
+            help=(
+                "Stored forecasts: the forecasts we actually published, scored "
+                "against later measurements. Model replay: today's model re-run "
+                "over history, for comparing model versions."
+            ),
+        )
+        is_replay = source_label.startswith("Model replay")
+
+        if is_replay:
+            st.caption(
+                "Today's model re-run over history, using the air temperature "
+                "each forecast actually had available: measured up to the time "
+                "the forecast was made, forecast after. Solar and cloud use "
+                "the stored forecast where we have one - we only started "
+                "keeping those on 2026-09-06 (issue #29), and dates before "
+                "that fall back to actual solar and cloud, which the forecast "
+                "never had. Read those as an optimistic bound. Points marked "
+                "with a cross had no stored air forecast either and used "
+                "measured air for the whole window."
+            )
+            horizon_options = [1, 2, 3, 4, 5]
+        else:
+            st.caption(
+                "The honest record: what we published, scored against what "
+                "was then measured."
+            )
+            st.caption(
+                "Shaded period: from 2026-03-20 we were missing up-to-date "
+                "weather data, and forecast accuracy was affected. "
+                "One-day-ahead error went from 0.21 C before to 0.61 C after, "
+                "and got worse the longer it went on (April 0.42 C, June "
+                "0.59 C, August 1.35 C). The weather data has since been "
+                "fixed. See "
+                "[issue #33](https://github.com/alittlesliceoftom/"
+                "west-reservoir/issues/33) on GitHub for more information."
+            )
+            horizon_options = [0, 1, 2, 3, 4, 5]
+
+        selected_horizon = st.selectbox(
+            "Days ahead",
+            horizon_options,
+            index=horizon_options.index(1),
+            help="0 is a same-day nowcast, available for stored forecasts only.",
+        )
+
+        try:
+            water_temps = cached_load_water_temps()
+
+            if is_replay:
+                coefficients = cached_fitted_model_coefficients(
+                    water_temps,
+                    pd.Timestamp(water_temps["date"].min()).normalize(),
+                    pd.Timestamp.now().normalize(),
+                )
+                raw = cached_replay(water_temps, coefficients, 5)
+            else:
+                raw = cached_load_stored_forecasts(max_horizon=5)
+
+            scored = join_actuals(raw, water_temps)
+
+            if scored.empty:
+                st.warning(
+                    "No forecasts could be matched to measurements yet. "
+                    "Accuracy needs stored forecasts whose target dates have "
+                    "since been measured."
+                )
+            else:
+                at_horizon = scored[
+                    scored["horizon_days"] == selected_horizon
+                ].sort_values("target_date")
+                metrics = compute_metrics(at_horizon)
+
+                st.subheader(f"{selected_horizon}-day-ahead accuracy")
+                if metrics["n"] == 0:
+                    st.warning(
+                        f"No scored forecasts at {selected_horizon} days ahead."
+                    )
+                else:
+                    c1, c2, c3, c4, c5 = st.columns(5)
+                    c1.metric("Mean absolute error", f"{metrics['mae']:.2f} C")
+                    c2.metric("Bias", f"{metrics['bias']:+.2f} C")
+                    c3.metric("RMSE", f"{metrics['rmse']:.2f} C")
+                    c4.metric("Within 0.5 C", f"{metrics['hit_rate_0_5']:.0f}%")
+                    c5.metric("Forecasts scored", f"{metrics['n']}")
+                    st.caption(BIAS_NOTE)
+                    st.caption(
+                        f"Covering {at_horizon['target_date'].min().date()} "
+                        f"to {at_horizon['target_date'].max().date()}"
+                    )
+
+                st.subheader("Error by forecast horizon")
+                st.caption(
+                    "All horizons, unfiltered. Shows how forecasts degrade "
+                    "further ahead."
+                )
+                st.plotly_chart(
+                    create_horizon_accuracy_chart(
+                        metrics_by_horizon(scored), selected_horizon
+                    ),
+                    width='stretch',
+                )
+
+                if not at_horizon.empty:
+                    period_label = st.radio(
+                        "Chart period",
+                        list(CHART_PERIODS),
+                        horizontal=True,
+                        help=(
+                            "Applies to the two charts below. The metrics "
+                            "above cover the whole record."
+                        ),
+                    )
+                    days = CHART_PERIODS[period_label]
+                    windowed = filter_to_period(at_horizon, "target_date", days)
+                    measured_window = filter_to_period(
+                        water_temps, "date", days
+                    )
+
+                    st.subheader(
+                        f"Forecast vs measured ({_horizon_label(selected_horizon)})"
+                    )
+                    st.plotly_chart(
+                        create_forecast_vs_actual_chart(
+                            windowed, selected_horizon,
+                            mark_outage=not is_replay,
+                            water_temps=measured_window,
+                        ),
+                        width='stretch',
+                    )
+
+                    st.subheader(
+                        f"Error over time ({_horizon_label(selected_horizon)})"
+                    )
+                    st.plotly_chart(
+                        create_error_over_time_chart(
+                            windowed, mark_outage=not is_replay
+                        ),
+                        width='stretch',
+                    )
+
+                    with st.expander("Scored forecasts"):
+                        st.dataframe(at_horizon, width='stretch')
+
+        except ForecastStorageError as e:
+            st.error(f"Could not load stored forecasts: {e}")
+        except DataLoadError as e:
+            st.error(f"Could not load measurements: {e}")
+
+
+def page_quotes():
+    """Static quotes."""
+    st.header("Heard at the Res")
+    st.markdown("Funny snippets overheard at West Reservoir. Got one? Let me know!")
+    if QUOTES:
+        import random
+        shuffled = random.sample(QUOTES, len(QUOTES))
+        for q in shuffled:
+            st.markdown(f"> *\"{q['quote']}\"*")
+            caption_parts = [p for p in [q.get("context"), str(q["year"]) if q.get("year") else None] if p]
+            if caption_parts:
+                st.caption(" | ".join(caption_parts))
+            st.divider()
+    else:
+        st.info("No quotes yet - check back soon!")
+
+
 def main():
     """Main application."""
     view = st.query_params.get("view")
@@ -1006,442 +1470,21 @@ def main():
     st.title("West Reservoir Temperature Tracker + Forecaster")
     st.markdown("Tracking and forecasting water temperature at West Reservoir, London.")
 
-    tab_temp, tab_accuracy, tab_quotes = st.tabs(
-        ["Temperature", "Forecast Accuracy", "Heard at the Res"]
+    # st.navigation runs ONLY the selected page. Tabs did the opposite:
+    # every tab body executed on every rerun, so the accuracy page's
+    # MotherDuck connection was billed to anyone opening the dashboard.
+    page = st.navigation(
+        [
+            st.Page(page_temperature, title="Temperature", default=True),
+            st.Page(page_accuracy, title="Forecast Accuracy"),
+            st.Page(page_quotes, title="Heard at the Res"),
+        ],
+        # Top rather than the sidebar default, so the three views stay
+        # side by side where the tabs were.
+        position="top",
     )
+    page.run()
 
-    with tab_temp:
-        col_info, col_image = st.columns([1, 1])
-        with col_info:
-            st.info(
-                "Water temperatures are taken each morning around 7am. "
-                "The water will often be warmer by the time you get in!\n\n "
-                "The forecast simulates hourly heat transfer using air temperature, "
-                "shortwave solar radiation, and cloud cover (clear-sky overnight "
-                "cooling). It does not yet account for wind or evaporation.\n\n"
-                "Additionally, temperature varies throughout the reservoir "
-                "by both position and depth - this is just a snapshot of conditions."
-            )
-        with col_image:
-            st.image("image.png",)
-
-        try:
-            water_temps = cached_load_water_temps()
-
-            # Normalize dates to day-level for consistent caching
-            start_date = pd.Timestamp(water_temps["date"].min()).normalize()
-            end_date = pd.Timestamp.now().normalize()
-            air_temps_hist = cached_load_historical_air_temps(start_date, end_date)
-
-            hourly_air_temps = cached_load_hourly_air_temps(start_date, end_date)
-
-            temperatures = build_temperatures_frame(water_temps, air_temps_hist)
-
-            forecast_weather = None
-            gap_fill_hourly = None
-            try:
-                forecast_weather = cached_load_forecast_weather(days=FORECAST_DAYS)
-
-                # One write, every measure. All three arrive in a single frame,
-                # so the whole run lands as one row per hour (issue #39).
-                if ENABLE_MOTHERDUCK:
-                    if 'last_forecast_fetch_date' not in st.session_state or \
-                       st.session_state['last_forecast_fetch_date'] != datetime.now().date():
-                        try:
-                            storage = get_storage()
-                            forecast_timestamp = datetime.now()
-                            storage.store_weather_forecast(
-                                forecast_weather, forecast_timestamp, source="Open-Meteo"
-                            )
-                            st.session_state['last_forecast_fetch_date'] = datetime.now().date()
-                            st.session_state['last_forecast_timestamp'] = forecast_timestamp
-                        except ForecastStorageError as e:
-                            st.warning(f"Could not store forecast: {e}")
-                        except Exception as e:
-                            st.warning(f"Forecast storage error: {e}")
-
-                # Gap is between: last archive timestamp -> first forecast timestamp
-                if ENABLE_MOTHERDUCK and not hourly_air_temps.empty and not forecast_weather.empty:
-                    hist_end = hourly_air_temps["datetime"].max()
-                    fore_start = forecast_weather["datetime"].min()
-
-                    gap_hours = (fore_start - hist_end).total_seconds() / 3600
-                    if gap_hours > 1:
-                        gap_fill_hourly = retrieve_gap_fill_forecasts(hist_end, fore_start)
-
-                combined_hourly = combine_hourly_temps(
-                    hourly_air_temps,
-                    forecast_weather[["datetime", "air_temp"]],
-                    gap_fill_hourly,
-                )
-
-                # Daily min/mean/max for the chart, derived from the same hourly
-                # series the model runs on, so the two cannot disagree.
-                forecast = daily_from_hourly_forecast(forecast_weather)
-                forecast["source"] = "AIR_ONLY"
-                temperatures = pd.concat([temperatures, forecast], ignore_index=True)
-                temperatures = temperatures.sort_values("date").reset_index(drop=True)
-
-                # Deduplicated version for the prediction chain (MEASURED > AIR_ONLY)
-                temperatures_deduped = deduplicate_temperatures(temperatures)
-
-            except DataLoadError as e:
-                st.warning(f"Weather forecast unavailable: {e}")
-                st.info("Showing historical data only")
-                combined_hourly = hourly_air_temps
-                temperatures_deduped = temperatures.copy()  # No duplicates without forecast
-
-            solar_hist = None
-            try:
-                solar_hist = cached_load_historical_solar_cloud(start_date, end_date)
-            except DataLoadError as e:
-                st.warning(f"Open-Meteo historical solar/cloud unavailable: {e}")
-
-            hourly_weather = build_hourly_weather(
-                combined_hourly, solar_hist, forecast_weather
-            )
-
-            forecaster = WaterTempForecaster()
-            forecaster.set_hourly_weather(hourly_weather)
-            forecaster.fit(temperatures_deduped[temperatures_deduped["source"] == "MEASURED"])
-
-            temperatures_deduped = forecaster.fill_predictions(temperatures_deduped)
-
-            # Store water predictions in MotherDuck (only once per day)
-            if ENABLE_MOTHERDUCK:
-                if 'last_prediction_store_date' not in st.session_state or \
-                   st.session_state['last_prediction_store_date'] != datetime.now().date():
-                    try:
-                        storage = get_storage()
-                        # Only forward-looking rows are forecasts. Backfilled
-                        # gap-fills target dates before the run and would land
-                        # in storage at negative horizons.
-                        predictions_df = select_storable_predictions(
-                            temperatures_deduped, pd.Timestamp.now()
-                        )
-                        measured_temps = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
-
-                        if not predictions_df.empty and not measured_temps.empty:
-                            forecast_timestamp = st.session_state.get(
-                                'last_forecast_timestamp',
-                                datetime.now()
-                            )
-                            storage.store_water_predictions(
-                                predictions_df=predictions_df,
-                                forecast_created_timestamp=forecast_timestamp,
-                                heat_transfer_coeff=forecaster.k_air,
-                                start_water_temp=measured_temps.iloc[-1]["water_temp"]
-                            )
-                            st.session_state['last_prediction_store_date'] = datetime.now().date()
-                    except ForecastStorageError as e:
-                        st.warning(f"Could not store predictions: {e}")
-                    except Exception as e:
-                        st.warning(f"Prediction storage error: {e}")
-
-            with col_info:
-                today = datetime.now().date()
-                yesterday = today - timedelta(days=1)
-                tomorrow = today + timedelta(days=1)
-
-                st.header("Current Temperature")
-
-                measured_data = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
-                today_data = temperatures_deduped[temperatures_deduped["date"].dt.date == today]
-                has_today_measurement = any(today_data["source"] == "MEASURED")
-
-                if has_today_measurement:
-                    today_measured = today_data[today_data["source"] == "MEASURED"].iloc[0]
-                    st.metric("Today's Measured", f"{today_measured['water_temp']:.1f}C")
-                else:
-                    if not measured_data.empty:
-                        latest = measured_data.iloc[-1]
-                        latest_date = latest["date"].strftime("%Y-%m-%d")
-                        st.warning(
-                            f"No measurement for today yet. Last measured: {latest_date}\n\n"
-                            f"Please contribute the temperature to the spreadsheet [here](https://docs.google.com/spreadsheets/d/1HNnucep6pv2jCFg2bYR_gV78XbYvWYyjx9y9tTNVapw/edit?usp=sharing)"
-                        )
-
-                # Compute forecasts independently (always from yesterday's measurement)
-                st.subheader("Forecasts")
-
-                yesterday_data = measured_data[measured_data["date"].dt.date == yesterday]
-                today_forecast_temp = None
-                tomorrow_forecast_temp = None
-
-                if not yesterday_data.empty:
-                    yesterday_temp = yesterday_data.iloc[-1]["water_temp"]
-                    yesterday_dt = pd.Timestamp(yesterday).replace(hour=forecaster.MEASUREMENT_HOUR)
-                    today_dt = pd.Timestamp(today).replace(hour=forecaster.MEASUREMENT_HOUR)
-                    weather_slice = forecaster._get_weather_for_period(yesterday_dt, today_dt)
-                    if not weather_slice.empty:
-                        today_forecast_temp = forecaster._simulate_period(
-                            yesterday_temp, weather_slice
-                        )
-
-                tomorrow_data = temperatures_deduped[temperatures_deduped["date"].dt.date == tomorrow]
-                if not tomorrow_data.empty and tomorrow_data.iloc[0]["source"] == "PREDICTED":
-                    tomorrow_forecast_temp = tomorrow_data.iloc[0]["water_temp"]
-
-                col_today_fc, col_tomorrow_fc, col_hottest, col_coldest = st.columns(4)
-                with col_today_fc:
-                    if today_forecast_temp is not None and pd.notna(today_forecast_temp):
-                        st.metric("Today's Forecast (excludes today's measurement)", f"{today_forecast_temp:.1f}C")
-                    else:
-                        st.metric("Today's Forecast (excludes today's measurement)", "N/A")
-                with col_tomorrow_fc:
-                    if tomorrow_forecast_temp is not None and pd.notna(tomorrow_forecast_temp):
-                        st.metric("Tomorrow's Forecast", f"{tomorrow_forecast_temp:.1f}C")
-                    else:
-                        st.metric("Tomorrow's Forecast", "N/A")
-                with col_hottest:
-                    week_ahead = today + timedelta(days=7)
-                    upcoming = temperatures_deduped[
-                        (temperatures_deduped["date"].dt.date >= today) &
-                        (temperatures_deduped["date"].dt.date <= week_ahead) &
-                        (temperatures_deduped["source"].isin(["PREDICTED", "MEASURED"]))
-                    ]
-                    if not upcoming.empty:
-                        hottest_temp = upcoming["water_temp"].max()
-                        hottest_date = upcoming.loc[upcoming["water_temp"].idxmax(), "date"].strftime("%a %d %b")
-                        st.metric("Hottest This Week", f"{hottest_temp:.1f}C", delta=hottest_date, delta_color="off")
-                    else:
-                        st.metric("Hottest This Week", "N/A")
-                with col_coldest:
-                    if not upcoming.empty:
-                        coldest_temp = upcoming["water_temp"].min()
-                        coldest_date = upcoming.loc[upcoming["water_temp"].idxmin(), "date"].strftime("%a %d %b")
-                        st.metric("Coldest This Week", f"{coldest_temp:.1f}C", delta=coldest_date, delta_color="off")
-                    else:
-                        st.metric("Coldest This Week", "N/A")
-
-                if st.button("Data looks old? Press to refresh weather forecast and water temperature data", icon = '🔄' ):
-                    st.cache_data.clear()
-                    st.rerun()
-
-            st.header("Temperature History and Forecast")
-            st.text("""The chart shows the temperature history and forecast for the last 5 days, and next 5 days.
-            Red bar shows the air temp range each day, with the black line being the average. The blue line is the water tempterature. It is dotted for forecast days.""")
-
-            chart = create_temperature_chart(temperatures_deduped)
-            st.plotly_chart(chart, width='stretch')
-
-            st.header("Summary Statistics")
-            measured = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Lowest Recorded at West Reservoir! ❄️", f"{measured['water_temp'].min():.1f}C")
-            with col2:
-                st.metric("Hottest Recorded at West Reservoir! 🥵", f"{measured['water_temp'].max():.1f}C")
-            with col3:
-                st.metric("Total Readings Taken", len(measured))
-
-            display_debug_panel(
-                temperatures_deduped, forecaster, hourly_air_temps,
-                forecast_weather, gap_fill_hourly,
-            )
-
-            st.divider()
-            st.subheader("About the Project")
-            st.markdown(
-                """
-    Hi! I'm Tom, a local and regular swimmer at the reservoir for over a year.
-
-    I enjoy tracking the temperatures so I decided to make this app. I've recorded
-    most of the temperatures since November 2024, and used that data to train a
-    simple physics model to predict future temperatures.
-
-    The model simulates hour-by-hour heat transfer between air and water. Both
-    the forecast and the historic weather come from Open-Meteo, hourly.
-                """
-            )
-
-        except DataLoadError as e:
-            st.error(f"Cannot load required data: {e}")
-            st.info(
-                "Please check:\n"
-                "- Internet connection is working\n"
-                "- Google Sheets is accessible\n"
-                "- Open-Meteo service is available"
-            )
-            # Deliberately no st.stop() here. It halts the entire script, so
-            # every tab defined below this one would silently fail to render
-            # whenever temperature data is unavailable (issue #43).
-
-    with tab_accuracy:
-        st.header("Forecast Accuracy")
-
-        if not ENABLE_MOTHERDUCK:
-            st.warning(
-                "Forecast accuracy requires MotherDuck, which is not configured. "
-                "Set MOTHERDUCK_TOKEN to enable this tab."
-            )
-        else:
-            source_label = st.radio(
-                "Comparison",
-                ["Stored forecasts", "Model replay (current model)"],
-                horizontal=True,
-                help=(
-                    "Stored forecasts: the forecasts we actually published, scored "
-                    "against later measurements. Model replay: today's model re-run "
-                    "over history, for comparing model versions."
-                ),
-            )
-            is_replay = source_label.startswith("Model replay")
-
-            if is_replay:
-                st.caption(
-                    "Today's model re-run over history, using the air temperature "
-                    "each forecast actually had available: measured up to the time "
-                    "the forecast was made, forecast after. Solar and cloud use "
-                    "the stored forecast where we have one - we only started "
-                    "keeping those on 2026-09-06 (issue #29), and dates before "
-                    "that fall back to actual solar and cloud, which the forecast "
-                    "never had. Read those as an optimistic bound. Points marked "
-                    "with a cross had no stored air forecast either and used "
-                    "measured air for the whole window."
-                )
-                horizon_options = [1, 2, 3, 4, 5]
-            else:
-                st.caption(
-                    "The honest record: what we published, scored against what "
-                    "was then measured."
-                )
-                st.caption(
-                    "Shaded period: from 2026-03-20 we were missing up-to-date "
-                    "weather data, and forecast accuracy was affected. "
-                    "One-day-ahead error went from 0.21 C before to 0.61 C after, "
-                    "and got worse the longer it went on (April 0.42 C, June "
-                    "0.59 C, August 1.35 C). The weather data has since been "
-                    "fixed. See "
-                    "[issue #33](https://github.com/alittlesliceoftom/"
-                    "west-reservoir/issues/33) on GitHub for more information."
-                )
-                horizon_options = [0, 1, 2, 3, 4, 5]
-
-            selected_horizon = st.selectbox(
-                "Days ahead",
-                horizon_options,
-                index=horizon_options.index(1),
-                help="0 is a same-day nowcast, available for stored forecasts only.",
-            )
-
-            try:
-                water_temps = cached_load_water_temps()
-
-                if is_replay:
-                    coefficients = cached_fitted_model_coefficients(
-                        water_temps,
-                        pd.Timestamp(water_temps["date"].min()).normalize(),
-                        pd.Timestamp.now().normalize(),
-                    )
-                    raw = cached_replay(water_temps, coefficients, 5)
-                else:
-                    raw = cached_load_stored_forecasts(max_horizon=5)
-
-                scored = join_actuals(raw, water_temps)
-
-                if scored.empty:
-                    st.warning(
-                        "No forecasts could be matched to measurements yet. "
-                        "Accuracy needs stored forecasts whose target dates have "
-                        "since been measured."
-                    )
-                else:
-                    at_horizon = scored[
-                        scored["horizon_days"] == selected_horizon
-                    ].sort_values("target_date")
-                    metrics = compute_metrics(at_horizon)
-
-                    st.subheader(f"{selected_horizon}-day-ahead accuracy")
-                    if metrics["n"] == 0:
-                        st.warning(
-                            f"No scored forecasts at {selected_horizon} days ahead."
-                        )
-                    else:
-                        c1, c2, c3, c4, c5 = st.columns(5)
-                        c1.metric("Mean absolute error", f"{metrics['mae']:.2f} C")
-                        c2.metric("Bias", f"{metrics['bias']:+.2f} C")
-                        c3.metric("RMSE", f"{metrics['rmse']:.2f} C")
-                        c4.metric("Within 0.5 C", f"{metrics['hit_rate_0_5']:.0f}%")
-                        c5.metric("Forecasts scored", f"{metrics['n']}")
-                        st.caption(BIAS_NOTE)
-                        st.caption(
-                            f"Covering {at_horizon['target_date'].min().date()} "
-                            f"to {at_horizon['target_date'].max().date()}"
-                        )
-
-                    st.subheader("Error by forecast horizon")
-                    st.caption(
-                        "All horizons, unfiltered. Shows how forecasts degrade "
-                        "further ahead."
-                    )
-                    st.plotly_chart(
-                        create_horizon_accuracy_chart(
-                            metrics_by_horizon(scored), selected_horizon
-                        ),
-                        width='stretch',
-                    )
-
-                    if not at_horizon.empty:
-                        period_label = st.radio(
-                            "Chart period",
-                            list(CHART_PERIODS),
-                            horizontal=True,
-                            help=(
-                                "Applies to the two charts below. The metrics "
-                                "above cover the whole record."
-                            ),
-                        )
-                        days = CHART_PERIODS[period_label]
-                        windowed = filter_to_period(at_horizon, "target_date", days)
-                        measured_window = filter_to_period(
-                            water_temps, "date", days
-                        )
-
-                        st.subheader(
-                            f"Forecast vs measured ({_horizon_label(selected_horizon)})"
-                        )
-                        st.plotly_chart(
-                            create_forecast_vs_actual_chart(
-                                windowed, selected_horizon,
-                                mark_outage=not is_replay,
-                                water_temps=measured_window,
-                            ),
-                            width='stretch',
-                        )
-
-                        st.subheader(
-                            f"Error over time ({_horizon_label(selected_horizon)})"
-                        )
-                        st.plotly_chart(
-                            create_error_over_time_chart(
-                                windowed, mark_outage=not is_replay
-                            ),
-                            width='stretch',
-                        )
-
-                        with st.expander("Scored forecasts"):
-                            st.dataframe(at_horizon, width='stretch')
-
-            except ForecastStorageError as e:
-                st.error(f"Could not load stored forecasts: {e}")
-            except DataLoadError as e:
-                st.error(f"Could not load measurements: {e}")
-
-    with tab_quotes:
-        st.header("Heard at the Res")
-        st.markdown("Funny snippets overheard at West Reservoir. Got one? Let me know!")
-        if QUOTES:
-            import random
-            shuffled = random.sample(QUOTES, len(QUOTES))
-            for q in shuffled:
-                st.markdown(f"> *\"{q['quote']}\"*")
-                caption_parts = [p for p in [q.get("context"), str(q["year"]) if q.get("year") else None] if p]
-                if caption_parts:
-                    st.caption(" | ".join(caption_parts))
-                st.divider()
-        else:
-            st.info("No quotes yet - check back soon!")
 
 if __name__ == "__main__":
     main()

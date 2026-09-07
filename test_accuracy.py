@@ -7,7 +7,7 @@ import pytest
 from datetime import datetime
 
 from conftest import (
-    AIR_FORECAST_3HOURLY_COLUMNS,
+    WEATHER_FORECASTS_HOURLY_COLUMNS,
     WATER_PREDICTIONS_COLUMNS,
     hourly_frame,
     raw_table,
@@ -136,11 +136,11 @@ class TestLastWaterRunPerDay:
 
 
 def _local_air_db(rows):
-    """In-memory DuckDB with the air_temp_forecasts_3hourly schema."""
+    """In-memory DuckDB holding air-only rows of weather_forecasts_hourly."""
     return raw_table(
-        "air_temp_forecasts_3hourly",
-        AIR_FORECAST_3HOURLY_COLUMNS,
-        [(created_ts, target_dt, air_temp, "OpenWeatherMap")
+        "weather_forecasts_hourly",
+        WEATHER_FORECASTS_HOURLY_COLUMNS,
+        [(created_ts, target_dt, "OpenWeatherMap", air_temp, None, None)
          for created_ts, target_dt, air_temp in rows],
     )
 
@@ -1043,17 +1043,17 @@ class TestStorageReadsCoerceTimezones:
         )
 
     def _air_db(self):
-        """air_temp_forecasts_3hourly with tz-aware timestamps."""
+        """Air rows of weather_forecasts_hourly with tz-aware timestamps."""
         return raw_table(
-            "air_temp_forecasts_3hourly",
+            "weather_forecasts_hourly",
             tz_aware(
-                AIR_FORECAST_3HOURLY_COLUMNS,
+                WEATHER_FORECASTS_HOURLY_COLUMNS,
                 "forecast_created_timestamp", "target_datetime",
             ),
             [(
                 pd.Timestamp("2026-09-06 21:00:00", tz="UTC"),
                 pd.Timestamp("2026-09-07 00:00:00", tz="UTC"),
-                14.0, "OpenWeatherMap",
+                "OpenWeatherMap", 14.0, None, None,
             )],
         )
 
