@@ -1,8 +1,7 @@
 """
 Tests for app.py's pure functions.
 
-app.py was 1,422 lines with no tests at all, which is why the outage-band bug
-below shipped. Everything here is a plain function or a chart builder: import
+Everything here is a plain function or a chart builder: import
 app headless, call the builder, and assert on fig.layout / fig.data. Nothing
 in this file starts Streamlit or touches the network.
 """
