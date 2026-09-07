@@ -2,7 +2,7 @@
 
 import pandas as pd
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from io import StringIO
 from typing import Optional
 
@@ -54,7 +54,6 @@ def load_water_temps() -> pd.DataFrame:
 
         df["water_temp"] = pd.to_numeric(df["water_temp"], errors="coerce")
 
-        initial_count = len(df)
         df = df.dropna()
 
         if df.empty:

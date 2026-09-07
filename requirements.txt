@@ -5,3 +5,4 @@ requests==2.34.2
 scipy==1.18.1
 duckdb==1.5.5
 pytest==9.1.1
+ruff==0.16.6
