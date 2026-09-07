@@ -251,11 +251,15 @@ def retrieve_gap_fill_forecasts(
 ) -> pd.DataFrame:
     """
     Retrieve stored 3-hourly forecasts from MotherDuck to fill the gap
-    between the Open-Meteo archive and the live OWM forecast.
+    between the Open-Meteo archive and the live forecast.
+
+    The stored rows are the OpenWeatherMap history kept from before the
+    Open-Meteo switch (#39), which is why they are 3-hourly and get
+    interpolated on the way out.
 
     Args:
         hist_end: Last timestamp from the Open-Meteo hourly archive
-        fore_start: First timestamp from OWM 3-hourly forecast
+        fore_start: First timestamp from the live hourly forecast
 
     Returns:
         DataFrame with 'datetime' and 'air_temp' columns (interpolated to hourly),
@@ -292,7 +296,7 @@ def display_debug_panel(
     temperatures: pd.DataFrame,
     forecaster: WaterTempForecaster,
     hourly_air_temps: pd.DataFrame,
-    forecast_3hourly: pd.DataFrame = None,
+    forecast_hourly: pd.DataFrame = None,
     gap_fill_hourly: pd.DataFrame = None,
 ):
     """Display comprehensive debug information."""
@@ -433,31 +437,23 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                         )
                     )
 
-            if forecast_3hourly is not None and not forecast_3hourly.empty:
-                forecast_window = forecast_3hourly[
-                    forecast_3hourly["datetime"] <= cutoff_future
+            if forecast_hourly is not None and not forecast_hourly.empty:
+                forecast_window = forecast_hourly[
+                    forecast_hourly["datetime"] <= cutoff_future
                 ]
 
                 if not forecast_window.empty:
-                    forecast_interpolated = interpolate_to_hourly(forecast_window)
-
-                    fig.add_trace(
-                        go.Scatter(
-                            x=forecast_interpolated["datetime"],
-                            y=forecast_interpolated["air_temp"],
-                            mode="lines",
-                            name="Forecast (OWM interpolated)",
-                            line=dict(color="orange", width=1, dash="dash"),
-                        )
-                    )
-
+                    # One trace, no interpolation: the forecast arrives hourly
+                    # now, so there is nothing to bridge and no separate
+                    # 3-hourly points to mark (#39).
                     fig.add_trace(
                         go.Scatter(
                             x=forecast_window["datetime"],
                             y=forecast_window["air_temp"],
-                            mode="markers",
-                            name="Forecast (OWM 3-hourly)",
-                            marker=dict(color="orange", size=8),
+                            mode="lines+markers",
+                            name="Forecast (Open-Meteo hourly)",
+                            line=dict(color="orange", width=1, dash="dash"),
+                            marker=dict(color="orange", size=5),
                         )
                     )
 
@@ -474,7 +470,11 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                 margin=dict(l=0, r=0, t=20, b=0),
             )
             st.plotly_chart(fig, width='stretch')
-            st.caption("Chart shows raw data points. Non-hourly data (e.g. 3-hourly forecasts) is resampled to hourly before feeding into the prediction model.")
+            st.caption(
+                "Chart shows raw data points. The live forecast is hourly, so "
+                "nothing is resampled; stored 3-hourly forecasts kept from "
+                "before the Open-Meteo switch still are."
+            )
 
         st.subheader("Raw Data (Last 10 Rows)")
         display_df = temperatures.tail(10)[
@@ -1381,7 +1381,10 @@ def main():
             with col3:
                 st.metric("Total Readings Taken", len(measured))
 
-            display_debug_panel(temperatures_deduped, forecaster, hourly_air_temps, forecast_3hourly, gap_fill_hourly)
+            display_debug_panel(
+                temperatures_deduped, forecaster, hourly_air_temps,
+                forecast_weather, gap_fill_hourly,
+            )
 
             st.divider()
             st.subheader("About the Project")
@@ -1393,9 +1396,8 @@ def main():
     most of the temperatures since November 2024, and used that data to train a
     simple physics model to predict future temperatures.
 
-    The model simulates hour-by-hour heat transfer between air and water. Forecast
-    weather data from OpenWeatherMap and historic data from Open-Meteo inform the
-    predictions.
+    The model simulates hour-by-hour heat transfer between air and water. Both
+    the forecast and the historic weather come from Open-Meteo, hourly.
                 """
             )
 
