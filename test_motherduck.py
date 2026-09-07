@@ -1,10 +1,9 @@
 """
-Connectivity check for the real MotherDuck database.
+Connectivity check for the real MotherDuck database: are the credentials good
+and is the schema where we expect it.
 
-This replaces a test that ran `CREATE DATABASE IF NOT EXISTS west_reservoir`
-against production on a bare `pytest`, unmarked and unskippable. Reading is
-enough to answer the only question worth asking here - are the credentials
-good and is the schema where we left it - so nothing in this file writes.
+Nothing here writes. A test must never be the thing that provisions or alters
+production, so this connects into the existing database and reads only.
 
 Marked `integration`: it needs a token and the network.
 Skip it with `pytest -m "not integration"`.

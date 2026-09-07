@@ -346,10 +346,10 @@ class TestInterpolationCap:
     """
     combine_hourly_temps must not invent weather across long gaps.
 
-    This is the direct test of the guarantee. When Meteostat silently died
-    (issue #33), the uncapped version drew a straight line across 161 days and
-    the model trained on it. The gap is bridged by OUR code, so assert on our
-    code rather than inferring it from how flat the resulting data looks.
+    Without a cap, interpolation draws a straight line across an arbitrarily
+    long outage and the model trains on it. The gap is bridged by our code, so
+    these assert on our code rather than inferring the behaviour from how flat
+    the resulting data looks.
     """
 
     def _series(self, start, n_hours, temp):
@@ -406,11 +406,11 @@ class TestInterpolationCap:
 
     def test_no_fabricated_values_across_a_months_long_outage(self):
         """
-        Regression test for issue #33, at the real scale.
+        The cap must hold at the scale of a real outage, not just a short hole.
 
         Historical stops in March, forecast starts in September. Every hour in
-        between must be absent - previously they were filled with a smooth ramp
-        and 106 of 383 training pairs were fitted against it.
+        between must be absent rather than filled with a smooth ramp the model
+        would then train against.
         """
         hist = self._series("2026-03-29 00:00", 24, 8.0)
         fore = self._series("2026-09-06 00:00", 24, 23.0)
@@ -703,12 +703,11 @@ class TestStoredSolarCloudFeedsTheModel:
 # ---------------------------------------------------------------------------
 # Loaders, mocked at the HTTP boundary.
 #
-# These four functions are what issue #33 came through: Meteostat moved
-# hosting, left the old endpoint serving a five-month-old snapshot, and the
-# dashboard rendered it without complaint for five months. test_data_freshness
-# asks the live sources whether they are current; nothing asked whether these
-# functions parse a response correctly or turn a failed request into a
-# DataLoadError, because they had no offline coverage at all.
+# These are the seams every external feed enters through, so they are where a
+# silently changed or stalled source becomes wrong data on the dashboard.
+# test_data_freshness asks the live sources whether they are current; these
+# ask whether the loaders parse a response correctly and turn a failed request
+# into a DataLoadError.
 # ---------------------------------------------------------------------------
 
 
@@ -1116,12 +1115,14 @@ class TestEmptyInputContract:
     Every processing function must return an EMPTY FRAME WITH ITS SCHEMA on
     empty input, never a bare DataFrame() and never a raise.
 
-    Consolidated from three near-identical tests scattered across the classes
-    above, each of which asserted only `.empty` - which a function returning
-    the wrong columns would also satisfy. The app chains these together
-    (combine -> build_hourly_weather -> the forecaster) before it knows
-    whether any data arrived, so a schema-less empty frame surfaces as a
-    KeyError several steps downstream of the source that was actually missing.
+    The contract is one rule, so it reads as one table and a new function is
+    covered by adding a row.
+
+    Each case pins the columns rather than asserting only `.empty`, which a
+    function returning the wrong columns would also satisfy. The app chains
+    these together (combine -> build_hourly_weather -> the forecaster) before
+    it knows whether any data arrived, so a schema-less empty frame surfaces
+    as a KeyError several steps downstream of the source that was missing.
     """
 
     @pytest.mark.parametrize(

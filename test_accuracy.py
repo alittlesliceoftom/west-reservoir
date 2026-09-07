@@ -303,7 +303,7 @@ class TestJoinActuals:
         assert result.loc[0, "error"] == pytest.approx(1.5)
 
     def test_duplicate_measurement_dates_do_not_multiply_rows(self):
-        """Duplicate dates have broken this codebase before - keep the last."""
+        """Duplicate dates keep the last value, not the first."""
         forecasts = self._forecasts([(datetime(2026, 5, 1), 1, 11.0)])
         measurements = self._measurements([
             (datetime(2026, 5, 1), 10.0),
@@ -1163,9 +1163,8 @@ class TestEmptyInputContract:
     Every reporting function must return an EMPTY FRAME WITH ITS SCHEMA on
     empty input, never a bare DataFrame() and never a raise.
 
-    Consolidated from four near-identical tests scattered across the classes
-    above. The contract is one rule, so it reads better as one table - and a
-    new function is added by adding a row, which is the point.
+    The contract is one rule, so it reads as one table and a new function is
+    covered by adding a row.
 
     Callers index these frames by name immediately (the dashboard builds a
     chart from them before checking whether anything was scored), so a

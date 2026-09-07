@@ -1,9 +1,12 @@
 """
-Tests for app.py's pure functions.
+Tests for app.py's pure functions and chart builders.
 
-Everything here is a plain function or a chart builder: import
-app headless, call the builder, and assert on fig.layout / fig.data. Nothing
-in this file starts Streamlit or touches the network.
+The chart builders return a plotly Figure, which is an ordinary data
+structure, so a test imports app headless, calls the builder and asserts on
+fig.layout / fig.data. Nothing here starts Streamlit or touches the network.
+
+This covers only what can be called directly; main() is the script and is out
+of reach.
 """
 
 import numpy as np
@@ -50,12 +53,9 @@ class TestShadeMeteostatOutage:
 
     def test_outage_band_left_edge_never_precedes_first_plotted_date(self):
         """
-        This bug already shipped once.
-
-        The band was anchored at METEOSTAT_OUTAGE_START (2026-03-20). Plotly
-        stretches the x-axis to contain every shape, so on a last-30-days view
-        the axis snapped back five months and the period filter was undone -
-        the data was windowed correctly, the shape was not.
+        Plotly stretches an axis to contain every shape, so a band anchored
+        earlier than the plotted range silently widens the chart and undoes
+        the period filter: the data is windowed, the shape is not.
 
         Deleting the max() clamp in _shade_meteostat_outage must fail this.
         """
