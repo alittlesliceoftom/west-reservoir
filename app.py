@@ -119,8 +119,19 @@ def get_storage():
     Kept in session_state rather than st.cache_resource because a DuckDB
     connection is not safe for concurrent use and cache_resource is shared by
     every session; within one session, reruns are sequential.
+
+    A cached connection can die between reruns (idle timeout, network blip), so
+    it is pinged before being handed out. The ping is a local round trip at
+    about 1ms against the 4 seconds a reconnect costs, and without it a dropped
+    connection would fail every later call until the user reloaded the page.
     """
     storage = st.session_state.get("_forecast_storage")
+    if storage is not None:
+        try:
+            storage._get_connection().execute("SELECT 1")
+        except Exception:
+            storage = None
+
     if storage is None:
         storage = ForecastStorage()
         storage.initialize_schema()
