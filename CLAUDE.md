@@ -30,9 +30,8 @@ and tell you nothing you cannot get from `wc -l`.
 
 ### Python Version
 
-**Python 3.14** (verified on 3.14.7). The project ran on 3.10 until September
-2026; the whole dependency stack was upgraded together and verified to produce
-byte-identical forecasts on both interpreters before switching.
+**Python 3.14** (3.14.7), with the whole dependency stack pinned in
+`requirements.txt`.
 
 Recreate the environment from scratch:
 
@@ -42,9 +41,22 @@ source env/bin/activate
 pip install -r requirements.txt
 ```
 
-Dependencies are pinned deliberately. Upgrade them together, and re-run both
-the suite and the real-data equivalence check before changing a pin — pandas in
-particular has changed prediction-relevant defaults across major versions.
+Dependencies are pinned deliberately. Upgrade them together, and before
+changing a pin re-run both the suite and the equivalence check:
+
+```bash
+env-old/bin/python debug/forecast_equivalence.py capture   # freeze the inputs
+env-new/bin/python debug/forecast_equivalence.py run
+python debug/forecast_equivalence.py compare
+```
+
+**Forecasts are not bitwise reproducible across a scipy change, and should not
+be expected to be.** Given identical coefficients the simulation is exact to
+the bit, but `fit()` runs an optimiser, and a different scipy converges to a
+marginally different point in the same basin. Across the 3.10 / scipy 1.11 to
+3.14 / scipy 1.18 move the forecasts agreed to 1e-8 °C. Anything under about
+1e-3 °C is noise against the 0.1 °C measurement resolution; a difference large
+enough to see on the dashboard means something real changed.
 
 ### Running the Application
 
