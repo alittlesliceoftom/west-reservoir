@@ -1,10 +1,9 @@
 """Water temperature forecasting using hourly physics simulation"""
 
 import pandas as pd
-import numpy as np
 from scipy.optimize import minimize
-from typing import Dict, List, Optional, Sequence
-from datetime import datetime, timedelta
+from typing import Dict, Optional, Sequence
+from datetime import datetime
 
 
 WEATHER_COLUMNS = ("air_temp", "shortwave_radiation", "cloud_cover")

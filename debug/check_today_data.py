@@ -1,6 +1,6 @@
 """Debug script to check today's data in the DataFrame"""
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 import sys
 sys.path.insert(0, '/Users/asliceoftom/Documents/projects/claude/project-1-west-res')
 

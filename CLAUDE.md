@@ -87,6 +87,27 @@ python3 -c "from data import load_water_temps; print(f'{len(load_water_temps())}
 python3 -m pytest test_forecaster.py -v
 ```
 
+### Linting
+
+Ruff runs as a pre-commit hook. **Enable it once per clone** - git does not do
+this for you, and without it the hook is an inert file:
+
+```bash
+git config core.hooksPath hooks
+```
+
+It checks only the Python files in the commit, and only for bugs: `F`
+(pyflakes) and `E9`. No style rules, deliberately - a hook that argues about
+line length is a hook that gets `--no-verify`d out of existence.
+
+This exists because unit tests cannot reach `main()`, and that is where our
+`NameError`s have shipped from: a renamed `forecast_3hourly` left in one call,
+and a stale argument to `display_debug_panel`. Both were invisible until
+someone scrolled the running dashboard. Ruff finds them in under a second.
+
+Run it by hand over everything with `ruff check .`. Skip the hook for a
+work-in-progress commit with `git commit --no-verify`.
+
 ## Weather API Setup (Optional)
 
 **No API key is needed for the live app.** Every weather feed is Open-Meteo,

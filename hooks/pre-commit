@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""
+Run ruff over the Python files in a commit, and refuse the commit if it finds
+a bug.
+
+Enable it once per clone:
+
+    git config core.hooksPath hooks
+
+Bypass it when you need to (a work-in-progress commit on a branch nobody else
+reads):
+
+    git commit --no-verify
+
+Only staged Python files are checked, so committing a change to README.md costs
+nothing. Note that ruff reads the files on disk rather than the staged blobs,
+so if a file is only partially staged you are linting the working-tree version.
+That is the usual trade for a hook that finishes in well under a second, and it
+errs toward showing you more problems rather than fewer.
+"""
+
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+def search_roots():
+    """
+    Directories that might hold the virtualenv.
+
+    In a git worktree the checkout has no `env/` of its own - it lives at the
+    main repo root - so look there too, or the hook silently degrades to "ruff
+    not installed" for every worktree.
+    """
+    roots = [Path(".")]
+    try:
+        common = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        if common:
+            roots.append(Path(common).parent)
+    except subprocess.CalledProcessError:
+        pass
+    return roots
+
+
+def find_ruff():
+    """
+    Locate ruff: on PATH, in the project virtualenv, or as a module.
+
+    Returns the command as a list, or None if ruff is not installed anywhere we
+    know to look.
+    """
+    on_path = shutil.which("ruff")
+    if on_path:
+        return [on_path]
+
+    for root in search_roots():
+        for venv in ("env", ".venv"):
+            candidate = root / venv / "bin" / "ruff"
+            if candidate.exists():
+                return [str(candidate)]
+
+            python = root / venv / "bin" / "python"
+            if python.exists():
+                probe = subprocess.run(
+                    [str(python), "-c", "import ruff"],
+                    capture_output=True,
+                )
+                if probe.returncode == 0:
+                    return [str(python), "-m", "ruff"]
+
+    return None
+
+
+def staged_python_files():
+    """Python files added, copied or modified in this commit."""
+    result = subprocess.run(
+        [
+            "git", "diff", "--cached", "--name-only",
+            "--diff-filter=ACM", "-z", "--", "*.py",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    names = [name for name in result.stdout.split("\0") if name]
+    # A staged deletion of a file that still exists on disk is filtered out
+    # above, but a file staged and then deleted from the working tree is not.
+    return [name for name in names if Path(name).exists()]
+
+
+def main():
+    files = staged_python_files()
+    if not files:
+        return 0
+
+    ruff = find_ruff()
+    if ruff is None:
+        sys.stderr.write(
+            "pre-commit: ruff is not installed, so this commit was not checked.\n"
+            "\n"
+            "    pip install -r requirements.txt\n"
+            "\n"
+            "Refusing rather than passing silently: a hook that quietly does\n"
+            "nothing is worse than no hook, because you stop expecting it to\n"
+            "catch anything. Use 'git commit --no-verify' to skip deliberately.\n"
+        )
+        return 1
+
+    result = subprocess.run(ruff + ["check", "--force-exclude", "--"] + files)
+    if result.returncode != 0:
+        sys.stderr.write(
+            "\npre-commit: ruff found problems in the files above.\n"
+            "Fix them, or run 'git commit --no-verify' to commit anyway.\n"
+        )
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
