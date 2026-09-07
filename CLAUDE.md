@@ -100,10 +100,9 @@ It checks only the Python files in the commit, and only for bugs: `F`
 (pyflakes) and `E9`. No style rules, deliberately - a hook that argues about
 line length is a hook that gets `--no-verify`d out of existence.
 
-This exists because unit tests cannot reach `main()`, and that is where our
-`NameError`s have shipped from: a renamed `forecast_3hourly` left in one call,
-and a stale argument to `display_debug_panel`. Both were invisible until
-someone scrolled the running dashboard. Ruff finds them in under a second.
+This covers the gap the tests cannot: `main()` is the script, no unit test can
+call it, and an undefined name there surfaces only when someone scrolls the
+running dashboard. Ruff finds those statically in under a second.
 
 Run it by hand over everything with `ruff check .`. Skip the hook for a
 work-in-progress commit with `git commit --no-verify`.

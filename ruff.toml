@@ -1,18 +1,14 @@
-# Ruff is here to catch bugs, not to have opinions about style.
-#
-# Two bugs have shipped to the dashboard that this would have caught before the
-# commit: a `forecast_3hourly` that was renamed everywhere except one call, and
-# a stale argument left in a `display_debug_panel` call. Both were NameErrors
-# below the fold, invisible until the page was scrolled. Neither is reachable
-# by a unit test, because both lived in `main()`.
+# Ruff runs as a pre-commit hook to catch bugs, not to have opinions about
+# style. Undefined names are the target: they live in main(), which no unit
+# test can reach, and they surface only when someone scrolls the running page.
 
 [lint]
 # F  - pyflakes: undefined names, unused imports, f-strings missing placeholders
 # E9 - syntax and IO errors that stop the file running at all
 #
-# Deliberately no style rules. Line length, quote style and import order are not
-# what goes wrong here, and a hook that argues about them is a hook that gets
-# bypassed with --no-verify.
+# No style rules, deliberately. Line length, quote style and import order are
+# not what goes wrong here, and a hook that argues about them is a hook that
+# gets bypassed with --no-verify.
 select = ["F", "E9"]
 
 [lint.per-file-ignores]
