@@ -26,25 +26,43 @@ WEATHER_MEASURES = ["air_temp", "shortwave_radiation", "cloud_cover"]
 # The horizon filter is load-bearing: water_temp_predictions also holds rows
 # targeting dates BEFORE the run (historical backfill written alongside real
 # forecasts). Those are not forecasts and must never be scored.
+# Written as an aggregate and a join rather than rank() OVER. Both return the
+# same 1,065 rows from the ~880k-row table, verified against production; this
+# form is modestly faster and avoids ranking every row, which matters as the
+# table grows. It is NOT what made the accuracy tab slow - that was connection
+# setup, see _get_connection (issue #43).
+#
+# The join keeps EVERY row sharing the winning timestamp, which is what rank()
+# did and what row_number() would not: one run is many rows, one per target
+# date, and dropping all but one would silently lose the other horizons.
+#
+# The horizon window is expressed as a date range, not date_diff(), so the
+# predicate can use idx_prediction_for_date instead of forcing a full scan.
+# It is applied BEFORE choosing the winning run, exactly as the ranked version
+# did: a run is "last" among the rows that are in window.
 LAST_WATER_RUN_PER_DAY_SQL = """
-    WITH ranked AS (
-        SELECT *,
-            rank() OVER (
-                PARTITION BY forecast_created_date
-                ORDER BY forecast_created_timestamp DESC
-            ) AS run_rank
+    WITH in_window AS (
+        SELECT *
         FROM water_temp_predictions
-        WHERE date_diff('day', forecast_created_date, target_date) BETWEEN 0 AND ?
+        WHERE target_date >= forecast_created_date
+          AND target_date <= forecast_created_date + CAST(? AS INTEGER)
+    ),
+    last_run AS (
+        SELECT forecast_created_date, max(forecast_created_timestamp) AS run_ts
+        FROM in_window
+        GROUP BY forecast_created_date
     )
     SELECT
-        forecast_created_date,
-        forecast_created_timestamp,
-        target_date,
-        water_temp AS forecast_temp,
-        date_diff('day', forecast_created_date, target_date) AS horizon_days
-    FROM ranked
-    WHERE run_rank = 1
-    ORDER BY target_date, horizon_days
+        w.forecast_created_date,
+        w.forecast_created_timestamp,
+        w.target_date,
+        w.water_temp AS forecast_temp,
+        date_diff('day', w.forecast_created_date, w.target_date) AS horizon_days
+    FROM in_window w
+    JOIN last_run r
+      ON w.forecast_created_date = r.forecast_created_date
+     AND w.forecast_created_timestamp = r.run_ts
+    ORDER BY w.target_date, horizon_days
 """
 
 
@@ -112,20 +130,37 @@ class ForecastStorage:
         self._conn = None
 
     def _get_connection(self) -> duckdb.DuckDBPyConnection:
-        """Get or create MotherDuck connection."""
+        """
+        Get or create the MotherDuck connection.
+
+        Connecting is the expensive part by a wide margin - about 4.3 seconds
+        against 0.08 for a query over the largest table we have. This used to
+        connect TWICE, once without a database to run CREATE DATABASE IF NOT
+        EXISTS and again to the database itself, so every instance paid roughly
+        9 seconds before doing any work (issue #43).
+
+        Now it connects straight to the database and only falls back to the
+        bootstrap path if that fails, which happens once in the life of a
+        deployment rather than on every connection.
+        """
         if self._conn is None:
             try:
                 token = get_motherduck_token()
-                # Connect without database first to ensure it exists
-                conn = duckdb.connect(f"md:?motherduck_token={token}")
-                conn.execute(f"CREATE DATABASE IF NOT EXISTS {self.database}")
-                conn.close()
-                connection_string = f"md:{self.database}?motherduck_token={token}"
-                self._conn = duckdb.connect(connection_string)
             except ConfigError as e:
                 raise ForecastStorageError(f"Cannot connect to MotherDuck: {e}")
-            except Exception as e:
-                raise ForecastStorageError(f"MotherDuck connection failed: {e}")
+
+            connection_string = f"md:{self.database}?motherduck_token={token}"
+            try:
+                self._conn = duckdb.connect(connection_string)
+            except Exception:
+                # The database may not exist yet. Create it, then retry.
+                try:
+                    bootstrap = duckdb.connect(f"md:?motherduck_token={token}")
+                    bootstrap.execute(f"CREATE DATABASE IF NOT EXISTS {self.database}")
+                    bootstrap.close()
+                    self._conn = duckdb.connect(connection_string)
+                except Exception as e:
+                    raise ForecastStorageError(f"MotherDuck connection failed: {e}")
         return self._conn
 
     def initialize_schema(self) -> None:

@@ -213,11 +213,19 @@ temperatures = pd.DataFrame({
 #### `app.py`
 - Streamlit web interface
 - Three tabs: Temperature, Forecast Accuracy, Heard at the Res
-- The Forecast Accuracy tab is placed **before** the Temperature tab in code.
-  The Temperature block calls `st.stop()` on a data error, and Streamlit runs
-  tab bodies in code order, so anything after it would silently fail to render
-  whenever temperature data is unavailable. It also fits its own model for the
-  same reason, rather than borrowing the Temperature tab's forecaster
+- **Tab order is load-bearing.** Streamlit runs every tab body in code order
+  and streams output as it is produced, so the tab defined first is the one the
+  user sees first. Temperature comes first because it is the main dashboard;
+  Forecast Accuracy follows because it queries MotherDuck, and connecting costs
+  about 4 seconds (issue #43)
+- **Do not put `st.stop()` in a tab body.** It halts the whole script, so every
+  tab below silently fails to render. The Temperature tab used to end its error
+  handler that way, which is why the accuracy tab was originally forced to come
+  first. The accuracy tab also fits its own model rather than borrowing the
+  Temperature tab's forecaster, so neither tab can block the other
+- `get_storage()` holds one MotherDuck connection per session in
+  `st.session_state`. Do not build `ForecastStorage()` directly in the app:
+  each one costs a fresh ~4 second connection
 - The accuracy tab shades the Meteostat outage window (2026-03-20 onward) on
   its time-series charts for stored forecasts. Error in that window measures a
   dead feed, not the model - see issue #33. The replay reads the repaired
