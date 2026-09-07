@@ -221,7 +221,9 @@ temperatures = pd.DataFrame({
 - **Do not put `st.stop()` in a tab body.** It halts the whole script, so every
   tab below silently fails to render. The Temperature tab used to end its error
   handler that way, which is why the accuracy tab was originally forced to come
-  first. The accuracy tab also fits its own model rather than borrowing the
+  first. The two `st.stop()` calls that remain are in the graph-only view, which
+  runs before `st.tabs()` is created and is meant to stop the script — that is
+  the only place the call belongs. The accuracy tab also fits its own model rather than borrowing the
   Temperature tab's forecaster, so neither tab can block the other
 - `get_storage()` holds one MotherDuck connection per session in
   `st.session_state`. Do not build `ForecastStorage()` directly in the app:

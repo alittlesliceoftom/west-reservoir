@@ -142,6 +142,11 @@ class ForecastStorage:
         Now it connects straight to the database and only falls back to the
         bootstrap path if that fails, which happens once in the life of a
         deployment rather than on every connection.
+
+        The fallback fires on any connection failure, not only a missing
+        database, because duckdb does not distinguish the two here. A genuinely
+        broken connection - bad token, network down - therefore costs two
+        attempts before raising rather than one.
         """
         if self._conn is None:
             try:
