@@ -131,3 +131,6 @@ prompt_stash.txt
 
 # Streamlit secrets 
 .streamlit/secrets.toml
+
+# Equivalence-check artefacts
+debug/equivalence/
