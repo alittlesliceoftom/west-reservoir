@@ -1,19 +1,13 @@
 """
-Shared fixtures.
+Builders for the two shapes the tests need repeatedly: an hourly frame of a
+datetime column plus named measure columns, and an in-memory DuckDB table
+matching one of the storage schemas.
 
-Two things were being rebuilt in every test file: an hourly frame of
-datetime + N columns, and an in-memory DuckDB table matching one of the
-storage schemas. There were five hand-rolled variants of the first and four of
-the second, differing only in which columns they carried - so a change to the
-shape of a weather frame meant finding all five.
-
-These are plain functions, not pytest fixtures, and the test modules import
+These are plain functions rather than pytest fixtures, and test modules import
 them directly (`from conftest import hourly_frame`). That works because the
-tests already import `data` and `accuracy` from the repo root, so the root is
-on sys.path. They are builders with no setup, teardown or scoping, so
-fixture-ness would buy nothing and would stop class-level helpers from
-delegating to them. Do not move them to another module without updating the
-imports.
+repo root is already on sys.path. Fixture-ness would buy nothing - there is no
+setup, teardown or scoping - and would stop class-level helpers from
+delegating to them. Moving them elsewhere means updating those imports.
 """
 
 import duckdb
