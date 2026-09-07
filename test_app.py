@@ -23,6 +23,7 @@ from app import (
     create_forecast_vs_actual_chart,
     create_horizon_accuracy_chart,
     filter_to_period,
+    solar_cloud_runs_by_date,
 )
 
 
@@ -345,3 +346,63 @@ class TestForecastVsActualChart:
 
         assert len(unshaded.layout.shapes) == 0
         assert len(shaded.layout.shapes) == 1
+
+
+class TestSolarCloudRunsByDate:
+    """
+    The solar/cloud provider's input filter.
+
+    weather_forecasts_hourly holds every source's forecast, and only some
+    sources publish radiation. Handing an air-only run to the provider gives
+    the model NULL radiation, which degrades the forecast without raising.
+    """
+
+    def _stored(self, rows):
+        return pd.DataFrame(
+            rows,
+            columns=["forecast_created_date", "target_datetime", "source",
+                     "air_temp", "shortwave_radiation", "cloud_cover"],
+        )
+
+    def test_air_only_runs_are_excluded(self):
+        stored = self._stored([
+            (pd.Timestamp("2026-09-06").date(), pd.Timestamp("2026-09-07 00:00"),
+             "OpenWeatherMap", 12.0, None, None),
+        ])
+
+        assert solar_cloud_runs_by_date(stored) == {}
+
+    def test_runs_carrying_radiation_are_kept(self):
+        date = pd.Timestamp("2026-09-06").date()
+        stored = self._stored([
+            (date, pd.Timestamp("2026-09-07 00:00"), "Open-Meteo", 12.0, 400.0, 20.0),
+        ])
+
+        result = solar_cloud_runs_by_date(stored)
+
+        assert list(result) == [date]
+        assert len(result[date]) == 1
+
+    def test_an_air_only_source_does_not_hide_a_solar_one_on_the_same_day(self):
+        """Both sources publish the same day; only the usable run survives."""
+        date = pd.Timestamp("2026-09-06").date()
+        stored = self._stored([
+            (date, pd.Timestamp("2026-09-07 00:00"), "OpenWeatherMap", 12.0, None, None),
+            (date, pd.Timestamp("2026-09-07 00:00"), "Open-Meteo", 12.5, 400.0, 20.0),
+        ])
+
+        result = solar_cloud_runs_by_date(stored)
+
+        assert set(result[date]["source"]) == {"Open-Meteo"}
+
+    def test_cloud_without_radiation_still_counts(self):
+        """how='all' - a row is dropped only when BOTH measures are missing."""
+        date = pd.Timestamp("2026-09-06").date()
+        stored = self._stored([
+            (date, pd.Timestamp("2026-09-07 00:00"), "Open-Meteo", 12.0, None, 20.0),
+        ])
+
+        assert len(solar_cloud_runs_by_date(stored)[date]) == 1
+
+    def test_empty_input_gives_an_empty_mapping(self):
+        assert solar_cloud_runs_by_date(self._stored([])) == {}

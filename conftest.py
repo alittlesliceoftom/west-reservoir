@@ -75,11 +75,13 @@ WATER_PREDICTIONS_COLUMNS = {
     "source_air_forecast_timestamp": "TIMESTAMP NOT NULL",
 }
 
-AIR_FORECAST_3HOURLY_COLUMNS = {
+WEATHER_FORECASTS_HOURLY_COLUMNS = {
     "forecast_created_timestamp": "TIMESTAMP NOT NULL",
     "target_datetime": "TIMESTAMP NOT NULL",
-    "air_temp": "DOUBLE NOT NULL",
-    "source": "VARCHAR DEFAULT 'OpenWeatherMap'",
+    "source": "VARCHAR NOT NULL",
+    "air_temp": "DOUBLE",
+    "shortwave_radiation": "DOUBLE",
+    "cloud_cover": "DOUBLE",
 }
 
 
@@ -100,8 +102,8 @@ def raw_table(name, columns, rows, timezone="UTC"):
     methods' post-processing, not the constraint. (DuckDB also refuses to type
     a key column TIMESTAMPTZ, which the tz tests need.)
 
-        conn = raw_table("air_temp_forecasts_3hourly",
-                         AIR_FORECAST_3HOURLY_COLUMNS, rows)
+        conn = raw_table("weather_forecasts_hourly",
+                         WEATHER_FORECASTS_HOURLY_COLUMNS, rows)
     """
     conn = duckdb.connect(":memory:")
     conn.execute(f"SET TimeZone='{timezone}'")

@@ -186,18 +186,26 @@ temperatures = pd.DataFrame({
 
 #### `forecast_storage.py`
 - `ForecastStorage` class wrapping MotherDuck (DuckDB in the cloud)
-- Stores 3-hourly air-temp forecasts and water-temp predictions, so today's
-  forecasts can be scored against tomorrow's measurements
-- `weather_forecasts_hourly` is the unified forecast table: wide, with a
-  `source` dimension and one nullable column per measure, so a new model input
-  is a new column rather than a new table. A source publishes only what it
+- Stores third-party weather forecasts and our own water-temp predictions, so
+  today's forecasts can be scored against tomorrow's measurements
+- **`weather_forecasts_hourly` is the only weather forecast table.** Wide, with
+  a `source` dimension and one nullable column per measure, so a new model
+  input is a new column rather than a new table with its own store method,
+  reader and near-identical `rank()` query. A source publishes only what it
   publishes, and `source` is in the primary key so two sources can forecast the
-  same hour. Writes merge (`ON CONFLICT DO UPDATE` with `COALESCE` per column),
-  so a source can write solar and cloud now and air temperature later without
-  either being lost: a value overwrites, a NULL leaves what is stored. Air
-  temperature joins this table with issue #39
+  same hour. Writes merge (`ON CONFLICT DO UPDATE` with `COALESCE` per column):
+  a value overwrites, a NULL leaves what is stored, so a source can write solar
+  and cloud now and air temperature later without either being lost
+- Readers do not filter by source. `LAST_AIR_RUN_PER_DAY_SQL` takes whichever
+  source published the latest run that day, and selects `air_temp IS NOT NULL`
+  to skip rows written for other measures. `LAST_WEATHER_RUN_PER_DAY_SQL`
+  returns every measure including NULLs; a caller needing one measure selects
+  on it, as the solar/cloud provider in `app.py` does. Filtering inside that
+  reader would break the contract that two sources may cover the same hour
+- `water_temp_predictions` stays separate: it is our model's output, not a
+  third-party forecast, and carries columns that do not fit the weather shape
 - Retrieves stored forecasts to fill any gap between historical data and the
-  live OpenWeatherMap forecast
+  live forecast
 - Gated by `ENABLE_MOTHERDUCK` in `config.py`; the app works without it
 - `get_water_predictions_last_run_per_day()` and
   `get_air_forecasts_3hourly_last_run_per_day()` bulk-fetch the final run of
@@ -224,23 +232,22 @@ temperatures = pd.DataFrame({
 
 #### `app.py`
 - Streamlit web interface
-- Three tabs: Temperature, Forecast Accuracy, Heard at the Res
-- **Tab order is load-bearing.** Streamlit runs every tab body in code order
-  and streams output as it is produced, so the tab defined first is the one the
-  user sees first. Temperature comes first because it is the main dashboard;
-  Forecast Accuracy follows because it queries MotherDuck, and connecting costs
-  about 4 seconds (issue #43)
-- **Do not put `st.stop()` in a tab body.** It halts the whole script, so every
-  tab below silently fails to render. The Temperature tab used to end its error
-  handler that way, which is why the accuracy tab was originally forced to come
-  first. The two `st.stop()` calls that remain are in the graph-only view, which
-  runs before `st.tabs()` is created and is meant to stop the script — that is
-  the only place the call belongs. The accuracy tab also fits its own model rather than borrowing the
-  Temperature tab's forecaster, so neither tab can block the other
+- Three pages, via `st.navigation`: Temperature, Forecast Accuracy, Heard at
+  the Res. Each is a `page_*` function
+- **Pages, not tabs, because `st.navigation` runs only the selected page.**
+  `st.tabs` executes every tab body on every rerun, so the accuracy page's
+  MotherDuck connection — several seconds — was charged to anyone opening the
+  dashboard. The page functions must stay independent: each fetches what it
+  needs and shares no state with the others
+- **`st.stop()` belongs only in the graph-only view**, which runs before
+  `st.navigation` and is meant to halt the script. Inside a page function it
+  stops the whole run, not just that page
+- The accuracy page fits its own model rather than borrowing the Temperature
+  page's forecaster, so neither can block the other
 - `get_storage()` holds one MotherDuck connection per session in
   `st.session_state`. Do not build `ForecastStorage()` directly in the app:
   each one costs a fresh ~4 second connection
-- The accuracy tab shades the Meteostat outage window (2026-03-20 onward) on
+- The accuracy page shades the Meteostat outage window (2026-03-20 onward) on
   its time-series charts for stored forecasts. Error in that window measures a
   dead feed, not the model - see issue #33. The replay reads the repaired
   archive, so the band is suppressed there
