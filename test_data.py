@@ -3,7 +3,7 @@
 import pytest
 import pandas as pd
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from unittest.mock import patch, MagicMock
 
 from conftest import hourly_frame
