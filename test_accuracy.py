@@ -147,6 +147,43 @@ def _local_air_db(rows):
 
 class TestLastAirRunPerDay:
 
+    def test_two_sources_publishing_at_the_same_hour_yield_one_run(self):
+        """
+        Callers index the air series by time, so a day must return one run.
+
+        Both sources stamping the same creation hour is ordinary: the writes
+        truncate to the hour. Selecting on timestamp alone would return both
+        runs and duplicate every target_datetime.
+        """
+        created = pd.Timestamp("2026-09-06 23:00")
+        conn = raw_table(
+            "weather_forecasts_hourly",
+            WEATHER_FORECASTS_HOURLY_COLUMNS,
+            [
+                (created, pd.Timestamp("2026-09-07 00:00"), "OpenWeatherMap",
+                 12.0, None, None),
+                (created, pd.Timestamp("2026-09-07 03:00"), "OpenWeatherMap",
+                 11.0, None, None),
+                (created, pd.Timestamp("2026-09-07 00:00"), "Open-Meteo",
+                 12.5, 0.0, 90.0),
+                (created, pd.Timestamp("2026-09-07 01:00"), "Open-Meteo",
+                 12.2, 0.0, 90.0),
+                (created, pd.Timestamp("2026-09-07 02:00"), "Open-Meteo",
+                 11.9, 0.0, 90.0),
+            ],
+        )
+        storage = ForecastStorage()
+        storage._conn = conn
+
+        result = storage.get_air_forecasts_3hourly_last_run_per_day()
+
+        assert not result.duplicated(
+            subset=["forecast_created_date", "target_datetime"]
+        ).any()
+        # The richer run wins the tie, so the series is the denser one.
+        assert len(result) == 3
+        assert result["air_temp"].tolist() == [12.5, 12.2, 11.9]
+
     def test_picks_last_run_and_keeps_all_its_rows(self):
         rows = [
             (datetime(2026, 5, 1, 20), datetime(2026, 5, 1, 21), 15.0),
