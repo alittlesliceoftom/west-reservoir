@@ -44,6 +44,11 @@ if ENABLE_MOTHERDUCK:
 
 CACHE_TTL = timedelta(hours=6)
 
+# Accuracy tab reads stored forecasts and replays history; both change only
+# once a day via the storage cron, so a long cache avoids paying MotherDuck
+# query cost on every rerun. Cleared early via the refresh button if needed.
+ACCURACY_CACHE_TTL = timedelta(hours=72)
+
 # Meteostat stopped rebuilding its bulk endpoint on this date and served a frozen
 # snapshot for five months (issue #33). Forecasts published in that window were
 # simulated from interpolated air temperature, and trained on it too, so their
@@ -139,7 +144,7 @@ def get_storage():
     return storage
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=ACCURACY_CACHE_TTL)
 def cached_load_stored_forecasts(max_horizon: int = 5):
     """Stored water-temp forecasts, one run per creation day."""
     return get_storage().get_water_predictions_last_run_per_day(
@@ -147,7 +152,7 @@ def cached_load_stored_forecasts(max_horizon: int = 5):
     )
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=ACCURACY_CACHE_TTL)
 def cached_fitted_model_coefficients(water_temps, start_date, end_date):
     """
     Fit the model on historical weather and return its coefficients.
@@ -175,7 +180,7 @@ def cached_fitted_model_coefficients(water_temps, start_date, end_date):
     return (forecaster.k_air, forecaster.k_solar, forecaster.k_cool)
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=ACCURACY_CACHE_TTL)
 def cached_replay(water_temps, coefficients, max_horizon: int = 5):
     """
     Backtest replay over history, using the given model coefficients.
