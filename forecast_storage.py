@@ -66,32 +66,49 @@ LAST_WATER_RUN_PER_DAY_SQL = """
 """
 
 
-# Final 3-hourly air forecast run of each creation day, all rows of that run.
+# The air forecast series each creation day ended with: one run, all its rows.
 #
-# The table has no forecast_created_date column, so the partition casts the
-# timestamp. rank() for the same reason as above: a run is many rows sharing
-# one creation timestamp.
+# Two sources may publish at the same hour, so choosing by timestamp alone can
+# select two runs for one day and yield duplicate target_datetime rows, which
+# breaks any caller that indexes by time. The winner is therefore one
+# (timestamp, source) pair: latest run, then the one carrying more hours, then
+# source name so the choice is deterministic.
 #
-# Not filtered by source. Whichever source published the latest run that day is
-# the best air series available for it, and air_temp IS NOT NULL skips rows a
-# source wrote for other measures only.
+# row_number() is correct here where rank() is not, because it ranks RUNS, one
+# row each, rather than the forecast rows within them.
 LAST_AIR_RUN_PER_DAY_SQL = """
-    WITH ranked AS (
+    WITH air AS (
         SELECT
             CAST(forecast_created_timestamp AS DATE) AS forecast_created_date,
+            forecast_created_timestamp,
+            source,
             target_datetime,
-            air_temp,
-            rank() OVER (
-                PARTITION BY CAST(forecast_created_timestamp AS DATE)
-                ORDER BY forecast_created_timestamp DESC
-            ) AS run_rank
+            air_temp
         FROM weather_forecasts_hourly
         WHERE air_temp IS NOT NULL
+    ),
+    runs AS (
+        SELECT forecast_created_date, forecast_created_timestamp, source,
+               count(*) AS hours
+        FROM air
+        GROUP BY 1, 2, 3
+    ),
+    winner AS (
+        SELECT forecast_created_date, forecast_created_timestamp, source,
+               row_number() OVER (
+                   PARTITION BY forecast_created_date
+                   ORDER BY forecast_created_timestamp DESC, hours DESC, source
+               ) AS run_rank
+        FROM runs
     )
-    SELECT forecast_created_date, target_datetime, air_temp
-    FROM ranked
-    WHERE run_rank = 1
-    ORDER BY forecast_created_date, target_datetime
+    SELECT a.forecast_created_date, a.target_datetime, a.air_temp
+    FROM air a
+    JOIN winner w
+      ON a.forecast_created_date = w.forecast_created_date
+     AND a.forecast_created_timestamp = w.forecast_created_timestamp
+     AND a.source = w.source
+    WHERE w.run_rank = 1
+    ORDER BY a.forecast_created_date, a.target_datetime
 """
 
 
