@@ -52,6 +52,10 @@ CACHE_TTL = timedelta(hours=6)
 # once that ships to the deployed app.
 METEOSTAT_OUTAGE_START = pd.Timestamp("2026-03-20")
 
+# Last creation date whose forecast was built on the frozen feed. The archive
+# moved to Open-Meteo the following day, so runs from then on had real weather.
+METEOSTAT_OUTAGE_END = pd.Timestamp("2026-09-06")
+
 # Days of forecast to fetch. Open-Meteo serves 16 free where OpenWeatherMap
 # capped us at 5. Held at 5 for now: water-temp error grows with horizon
 # (0.28 C at one day, 1.31 C at five), so a 16-day water forecast would be
@@ -811,39 +815,52 @@ def filter_to_period(df: pd.DataFrame, date_column: str, days) -> pd.DataFrame:
     cutoff = dates.max() - pd.Timedelta(days=days)
     return df[dates >= cutoff]
 
-def _shade_meteostat_outage(fig: go.Figure, first_date, last_date) -> None:
+def _shade_meteostat_outage(
+    fig: go.Figure, first_date, last_date, horizon: int = 0
+) -> None:
     """
-    Shade the window in which historical air temperature was interpolated.
+    Shade the forecasts that were published while the air feed was frozen.
 
-    Only meaningful for stored forecasts: those were published while the feed
-    was dead. The replay reads the repaired archive, so its errors in this
-    window are not caused by the outage and shading them would mislead.
+    Only meaningful for stored forecasts: those were published in the window.
+    The replay reads the repaired archive, so its errors there are not caused
+    by the outage and shading them would mislead.
 
-    The band starts at the later of the outage date and the first plotted
-    date. Plotly widens an axis to fit its shapes, so a band anchored at
-    2026-03-20 stretched the x-axis back five months and undid the chart
-    period filter - the data was windowed correctly, the shape was not.
+    The window is a range of CREATION dates, but these charts plot target
+    dates, so both edges shift forward by the horizon: a forecast made on the
+    last affected day lands `horizon` days later. Nothing is drawn once the
+    whole window has scrolled out of the plotted range.
+
+    The left edge is also clamped to the first plotted date. Plotly widens an
+    axis to fit its shapes, so a band anchored outside the view drags the
+    x-axis back and undoes the chart's period filter.
 
     Args:
         fig: Figure to shade.
-        first_date: First date plotted, used to clamp the band's left edge.
-        last_date: Right edge of the band - the last date on the chart, which
-                   may extend past the last scored forecast.
+        first_date: First date plotted.
+        last_date: Last date plotted.
+        horizon: Days ahead the chart shows, which offsets the window.
     """
     if last_date is None or pd.isna(last_date):
         return
 
+    offset = pd.Timedelta(days=horizon)
+    window_start = METEOSTAT_OUTAGE_START + offset
+    window_end = METEOSTAT_OUTAGE_END + offset
+
     last_date = pd.Timestamp(last_date)
-    if last_date < METEOSTAT_OUTAGE_START:
+    if last_date < window_start:
         return
 
-    start = METEOSTAT_OUTAGE_START
+    start = window_start
     if first_date is not None and not pd.isna(first_date):
-        start = max(start, pd.Timestamp(first_date))
+        first_date = pd.Timestamp(first_date)
+        if first_date > window_end:
+            return
+        start = max(start, first_date)
 
     fig.add_vrect(
         x0=start,
-        x1=last_date,
+        x1=min(window_end, last_date),
         fillcolor="#d62728",
         opacity=0.10,
         line_width=0,
@@ -851,9 +868,9 @@ def _shade_meteostat_outage(fig: go.Figure, first_date, last_date) -> None:
         annotation_text=(
             "Missing up-to-date weather data - accuracy affected (issue #33)"
         ),
-        # Right edge, not left: the band starts 2026-03-20, which is outside
-        # the default last-30-days view, so a left-anchored label is invisible
-        # until you scrub back.
+        # Right edge, not left: the window starts well before the default
+        # last-30-days view, so a left-anchored label is invisible until you
+        # scrub back.
         annotation_position="top right",
         annotation=dict(font_size=11, font_color="#d62728"),
     )
@@ -910,6 +927,7 @@ def create_forecast_vs_actual_chart(
             fig,
             min(measured_x.min(), scored["target_date"].min()),
             max(measured_x.max(), scored["target_date"].max()),
+            horizon=horizon,
         )
 
     fig.update_layout(
@@ -944,7 +962,10 @@ def create_error_over_time_chart(
 
     if mark_outage:
         _shade_meteostat_outage(
-            fig, scored["target_date"].min(), scored["target_date"].max()
+            fig,
+            scored["target_date"].min(),
+            scored["target_date"].max(),
+            horizon=int(scored["horizon_days"].iloc[0]) if not scored.empty else 0,
         )
 
     fig.update_layout(
