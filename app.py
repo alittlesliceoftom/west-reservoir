@@ -957,6 +957,60 @@ def create_error_over_time_chart(
     return fig
 
 
+def store_forecast_and_predictions(forecast_weather, temperatures_deduped, forecaster):
+    """
+    Write today's forecast and predictions to MotherDuck, once per day.
+
+    Both are guarded by a session_state date so a rerun does not rewrite them.
+    Failures warn rather than raise: storage is a record of what was forecast,
+    and losing a day of it must not take the dashboard down with it.
+    """
+    if forecast_weather is not None:
+        if 'last_forecast_fetch_date' not in st.session_state or \
+           st.session_state['last_forecast_fetch_date'] != datetime.now().date():
+            try:
+                storage = get_storage()
+                forecast_timestamp = datetime.now()
+                storage.store_weather_forecast(
+                    forecast_weather, forecast_timestamp, source="Open-Meteo"
+                )
+                st.session_state['last_forecast_fetch_date'] = datetime.now().date()
+                st.session_state['last_forecast_timestamp'] = forecast_timestamp
+            except ForecastStorageError as e:
+                st.warning(f"Could not store forecast: {e}")
+            except Exception as e:
+                st.warning(f"Forecast storage error: {e}")
+
+    if 'last_prediction_store_date' not in st.session_state or \
+       st.session_state['last_prediction_store_date'] != datetime.now().date():
+        try:
+            storage = get_storage()
+            # Only forward-looking rows are forecasts. Backfilled
+            # gap-fills target dates before the run and would land
+            # in storage at negative horizons.
+            predictions_df = select_storable_predictions(
+                temperatures_deduped, pd.Timestamp.now()
+            )
+            measured_temps = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
+
+            if not predictions_df.empty and not measured_temps.empty:
+                forecast_timestamp = st.session_state.get(
+                    'last_forecast_timestamp',
+                    datetime.now()
+                )
+                storage.store_water_predictions(
+                    predictions_df=predictions_df,
+                    forecast_created_timestamp=forecast_timestamp,
+                    heat_transfer_coeff=forecaster.k_air,
+                    start_water_temp=measured_temps.iloc[-1]["water_temp"]
+                )
+                st.session_state['last_prediction_store_date'] = datetime.now().date()
+        except ForecastStorageError as e:
+            st.warning(f"Could not store predictions: {e}")
+        except Exception as e:
+            st.warning(f"Prediction storage error: {e}")
+
+
 def page_temperature():
     """The dashboard: measurements, forecast and the model debug panel."""
     col_info, col_image = st.columns([1, 1])
@@ -989,24 +1043,6 @@ def page_temperature():
         gap_fill_hourly = None
         try:
             forecast_weather = cached_load_forecast_weather(days=FORECAST_DAYS)
-
-            # One write, every measure. All three arrive in a single frame,
-            # so the whole run lands as one row per hour (issue #39).
-            if ENABLE_MOTHERDUCK:
-                if 'last_forecast_fetch_date' not in st.session_state or \
-                   st.session_state['last_forecast_fetch_date'] != datetime.now().date():
-                    try:
-                        storage = get_storage()
-                        forecast_timestamp = datetime.now()
-                        storage.store_weather_forecast(
-                            forecast_weather, forecast_timestamp, source="Open-Meteo"
-                        )
-                        st.session_state['last_forecast_fetch_date'] = datetime.now().date()
-                        st.session_state['last_forecast_timestamp'] = forecast_timestamp
-                    except ForecastStorageError as e:
-                        st.warning(f"Could not store forecast: {e}")
-                    except Exception as e:
-                        st.warning(f"Forecast storage error: {e}")
 
             # Gap is between: last archive timestamp -> first forecast timestamp
             if ENABLE_MOTHERDUCK and not hourly_air_temps.empty and not forecast_weather.empty:
@@ -1054,37 +1090,6 @@ def page_temperature():
         forecaster.fit(temperatures_deduped[temperatures_deduped["source"] == "MEASURED"])
 
         temperatures_deduped = forecaster.fill_predictions(temperatures_deduped)
-
-        # Store water predictions in MotherDuck (only once per day)
-        if ENABLE_MOTHERDUCK:
-            if 'last_prediction_store_date' not in st.session_state or \
-               st.session_state['last_prediction_store_date'] != datetime.now().date():
-                try:
-                    storage = get_storage()
-                    # Only forward-looking rows are forecasts. Backfilled
-                    # gap-fills target dates before the run and would land
-                    # in storage at negative horizons.
-                    predictions_df = select_storable_predictions(
-                        temperatures_deduped, pd.Timestamp.now()
-                    )
-                    measured_temps = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
-
-                    if not predictions_df.empty and not measured_temps.empty:
-                        forecast_timestamp = st.session_state.get(
-                            'last_forecast_timestamp',
-                            datetime.now()
-                        )
-                        storage.store_water_predictions(
-                            predictions_df=predictions_df,
-                            forecast_created_timestamp=forecast_timestamp,
-                            heat_transfer_coeff=forecaster.k_air,
-                            start_water_temp=measured_temps.iloc[-1]["water_temp"]
-                        )
-                        st.session_state['last_prediction_store_date'] = datetime.now().date()
-                except ForecastStorageError as e:
-                    st.warning(f"Could not store predictions: {e}")
-                except Exception as e:
-                    st.warning(f"Prediction storage error: {e}")
 
         with col_info:
             today = datetime.now().date()
@@ -1172,6 +1177,17 @@ def page_temperature():
 
         chart = create_temperature_chart(temperatures_deduped)
         st.plotly_chart(chart, width='stretch')
+
+        # Storage writes go here, below the chart, not beside the fetch that
+        # produced the data. Streamlit streams output as it is produced, so
+        # anything above the chart delays first paint - and the first write of
+        # a server's life opens the MotherDuck connection, which is slow.
+        # Late enough not to block the dashboard, early enough to still run
+        # before the page finishes.
+        if ENABLE_MOTHERDUCK:
+            store_forecast_and_predictions(
+                forecast_weather, temperatures_deduped, forecaster
+            )
 
         st.header("Summary Statistics")
         measured = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
