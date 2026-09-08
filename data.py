@@ -555,14 +555,31 @@ def interpolate_to_hourly(df: pd.DataFrame) -> pd.DataFrame:
     """
     Interpolate 3-hourly data to hourly using linear interpolation.
 
+    The series must come from a single forecast run: duplicate timestamps
+    raise rather than reaching pandas, which reports them as an opaque reindex
+    failure several frames from the cause.
+
     Args:
         df: DataFrame with 'datetime' and 'air_temp' columns (3-hourly intervals)
 
     Returns:
         pd.DataFrame: DataFrame with hourly 'datetime' and 'air_temp' columns
+
+    Raises:
+        DataLoadError: if 'datetime' contains duplicates
     """
     if df.empty:
         return df.copy()
+
+    duplicates = df["datetime"].duplicated()
+    if duplicates.any():
+        offending = df.loc[duplicates, "datetime"].unique()[:3]
+        raise DataLoadError(
+            f"Cannot interpolate: {duplicates.sum()} duplicate timestamps in the "
+            f"series, e.g. {', '.join(str(d) for d in offending)}. Two forecast "
+            "runs have most likely been merged into one series; a series must "
+            "come from a single run."
+        )
 
     df_indexed = df.set_index("datetime").sort_index()
 

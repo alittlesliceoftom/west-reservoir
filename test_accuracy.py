@@ -14,6 +14,7 @@ from conftest import (
     tz_aware,
     weather_frame,
 )
+from data import interpolate_to_hourly
 from accuracy import (
     BIAS_NOTE,
     compute_metrics,
@@ -1265,3 +1266,54 @@ class TestEmptyInputContract:
         assert m["n"] == 0
         assert np.isnan(m["mae"])
         assert np.isnan(m["bias"])
+
+
+class TestStoredAirRunFeedsInterpolation:
+    """
+    The reader's output must be directly consumable by the replay.
+
+    Each layer passed alone while the composition failed: the reader returned
+    two runs for one day, and interpolation rejected the merged series. This
+    pins the join between them, which is where the contract lives.
+    """
+
+    def _two_sources_at_the_same_hour(self):
+        created = pd.Timestamp("2026-09-06 23:00")
+        return raw_table(
+            "weather_forecasts_hourly",
+            WEATHER_FORECASTS_HOURLY_COLUMNS,
+            [
+                (created, pd.Timestamp("2026-09-07 00:00"), "OpenWeatherMap",
+                 12.0, None, None),
+                (created, pd.Timestamp("2026-09-07 03:00"), "OpenWeatherMap",
+                 11.0, None, None),
+                (created, pd.Timestamp("2026-09-07 00:00"), "Open-Meteo",
+                 12.5, 0.0, 90.0),
+                (created, pd.Timestamp("2026-09-07 01:00"), "Open-Meteo",
+                 12.2, 0.0, 90.0),
+            ],
+        )
+
+    def test_every_days_run_interpolates_without_raising(self):
+        """The exact path the replay's weather provider takes."""
+        storage = ForecastStorage()
+        storage._conn = self._two_sources_at_the_same_hour()
+
+        stored_air = storage.get_air_forecasts_3hourly_last_run_per_day()
+
+        for _, run in stored_air.groupby("forecast_created_date"):
+            series = run[["target_datetime", "air_temp"]].rename(
+                columns={"target_datetime": "datetime"}
+            )
+            hourly = interpolate_to_hourly(series)
+            assert not hourly["datetime"].duplicated().any()
+
+    def test_no_day_returns_more_than_one_row_per_target(self):
+        storage = ForecastStorage()
+        storage._conn = self._two_sources_at_the_same_hour()
+
+        stored_air = storage.get_air_forecasts_3hourly_last_run_per_day()
+
+        assert not stored_air.duplicated(
+            subset=["forecast_created_date", "target_datetime"]
+        ).any()
