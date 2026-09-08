@@ -1204,3 +1204,49 @@ class TestEmptyInputContract:
 
         assert not result.empty
         assert set(result.columns) == expected_columns
+
+
+class TestInterpolateRejectsMergedRuns:
+    """
+    A series handed to interpolation must come from one forecast run.
+
+    Duplicate timestamps reach pandas as "cannot reindex on an axis with
+    duplicate labels", raised several frames below the code that built the
+    series. Failing here names the actual problem.
+    """
+
+    def test_duplicate_timestamps_raise_a_named_error(self):
+        df = pd.DataFrame({
+            "datetime": [
+                pd.Timestamp("2026-09-07 00:00"),
+                pd.Timestamp("2026-09-07 00:00"),
+                pd.Timestamp("2026-09-07 03:00"),
+            ],
+            "air_temp": [12.0, 12.5, 11.0],
+        })
+
+        with pytest.raises(DataLoadError, match="duplicate timestamps"):
+            interpolate_to_hourly(df)
+
+    def test_the_message_names_an_offending_timestamp(self):
+        df = pd.DataFrame({
+            "datetime": [pd.Timestamp("2026-09-07 00:00")] * 2,
+            "air_temp": [12.0, 12.5],
+        })
+
+        with pytest.raises(DataLoadError, match="2026-09-07 00:00"):
+            interpolate_to_hourly(df)
+
+    def test_a_clean_series_still_interpolates(self):
+        df = pd.DataFrame({
+            "datetime": [
+                pd.Timestamp("2026-09-07 00:00"),
+                pd.Timestamp("2026-09-07 03:00"),
+            ],
+            "air_temp": [12.0, 15.0],
+        })
+
+        result = interpolate_to_hourly(df)
+
+        assert len(result) == 4
+        assert result["air_temp"].tolist() == [12.0, 13.0, 14.0, 15.0]
