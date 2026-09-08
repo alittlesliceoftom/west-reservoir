@@ -24,6 +24,7 @@ from app import (
     create_horizon_accuracy_chart,
     filter_to_period,
     solar_cloud_runs_by_date,
+    METEOSTAT_OUTAGE_END,
 )
 
 
@@ -406,3 +407,79 @@ class TestSolarCloudRunsByDate:
 
     def test_empty_input_gives_an_empty_mapping(self):
         assert solar_cloud_runs_by_date(self._stored([])) == {}
+
+
+class TestOutageWindowEnds:
+    """
+    The outage window is bounded and sits on a target-date axis.
+
+    It is a range of CREATION dates, but the charts plot target dates, so a
+    forecast made on the last affected day appears `horizon` days later. An
+    unbounded band shades every forecast to the right edge and reports a fixed
+    feed as still broken.
+    """
+
+    def _fig(self):
+        return go.Figure(go.Scatter(x=[pd.Timestamp("2026-09-01")], y=[1.0]))
+
+    def test_band_ends_a_horizon_after_the_last_affected_run(self):
+        """One day ahead: the last bad run is 09-06, so the band ends 09-07."""
+        fig = self._fig()
+
+        _shade_meteostat_outage(
+            fig, pd.Timestamp("2026-08-09"), pd.Timestamp("2026-09-12"), horizon=1
+        )
+
+        assert pd.Timestamp(fig.layout.shapes[0].x1) == pd.Timestamp("2026-09-07")
+
+    def test_the_end_moves_out_with_the_horizon(self):
+        fig = self._fig()
+
+        _shade_meteostat_outage(
+            fig, pd.Timestamp("2026-08-09"), pd.Timestamp("2026-09-12"), horizon=5
+        )
+
+        assert pd.Timestamp(fig.layout.shapes[0].x1) == (
+            METEOSTAT_OUTAGE_END + pd.Timedelta(days=5)
+        )
+
+    def test_no_band_once_the_window_has_scrolled_out_of_view(self):
+        """A chart showing only repaired forecasts must carry no red at all."""
+        fig = self._fig()
+
+        _shade_meteostat_outage(
+            fig, pd.Timestamp("2026-09-20"), pd.Timestamp("2026-10-01"), horizon=1
+        )
+
+        assert len(fig.layout.shapes) == 0
+
+    def test_right_edge_still_stops_at_the_last_plotted_date(self):
+        """Inside the window the band must not stretch the axis rightwards."""
+        fig = self._fig()
+        last = pd.Timestamp("2026-06-01")
+
+        _shade_meteostat_outage(fig, pd.Timestamp("2026-05-01"), last, horizon=1)
+
+        assert pd.Timestamp(fig.layout.shapes[0].x1) == last
+
+    def test_left_edge_still_clamps_to_the_first_plotted_date(self):
+        fig = self._fig()
+        first = pd.Timestamp("2026-08-09")
+
+        _shade_meteostat_outage(
+            fig, first, pd.Timestamp("2026-09-12"), horizon=1
+        )
+
+        assert pd.Timestamp(fig.layout.shapes[0].x0) == first
+
+    def test_start_also_shifts_with_the_horizon(self):
+        """A run on the first affected day lands `horizon` days later."""
+        fig = self._fig()
+
+        _shade_meteostat_outage(
+            fig, pd.Timestamp("2026-01-01"), pd.Timestamp("2026-09-12"), horizon=2
+        )
+
+        assert pd.Timestamp(fig.layout.shapes[0].x0) == (
+            METEOSTAT_OUTAGE_START + pd.Timedelta(days=2)
+        )
