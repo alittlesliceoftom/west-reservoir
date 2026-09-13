@@ -176,8 +176,8 @@ temperatures = pd.DataFrame({
   This is the live path
 - `daily_from_hourly_forecast()` - Collapse that hourly series into the daily
   min/mean/max the chart wants, so chart and model cannot disagree
-- `load_forecast_air_temps()` / `load_forecast_air_temps_3hourly()` - The
-  OpenWeatherMap forecast loaders. Kept as a fallback, not called by the app
+- `load_forecast_air_temps()` - The OpenWeatherMap daily forecast loader.
+  Kept as a fallback, not called by the app
 - All functions raise explicit errors with helpful messages
 
 #### `forecaster.py`
