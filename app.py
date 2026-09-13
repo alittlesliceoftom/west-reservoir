@@ -179,6 +179,35 @@ def cached_fitted_model_coefficients(water_temps, start_date, end_date):
     return (forecaster.k_air, forecaster.k_solar, forecaster.k_cool)
 
 
+@st.cache_data(ttl=3600)
+def cached_dashboard_coefficients(measured, hourly_weather):
+    """
+    Fit the dashboard's model, returning its coefficients and what happened.
+
+    Coefficients rather than the model itself, because the cache pickles what
+    it stores and a fitted model carries the whole weather frame with it.
+
+    A failed fit is cached like any other result. The key is the inputs and
+    the fit is deterministic, so the same readings and weather always fail the
+    same way, and inputs that recover are a different key.
+    """
+    model = WaterTempForecaster()
+    model.set_hourly_weather(hourly_weather)
+    model.fit(measured)
+    return (model.k_air, model.k_solar, model.k_cool), model.fit_status
+
+
+def dashboard_model(measured, hourly_weather) -> WaterTempForecaster:
+    """The dashboard's fitted model, from cache where possible."""
+    coefficients, fit_status = cached_dashboard_coefficients(measured, hourly_weather)
+    k_air, k_solar, k_cool = coefficients
+
+    model = WaterTempForecaster(k_air=k_air, k_solar=k_solar, k_cool=k_cool)
+    model.fit_status = fit_status
+    model.set_hourly_weather(hourly_weather)
+    return model
+
+
 def solar_cloud_runs_by_date(stored_weather):
     """
     Group stored weather runs by creation date, keeping only solar/cloud rows.
@@ -1112,9 +1141,10 @@ def page_temperature():
             combined_hourly, solar_hist, forecast_weather
         )
 
-        forecaster = WaterTempForecaster()
-        forecaster.set_hourly_weather(hourly_weather)
-        forecaster.fit(temperatures_deduped[temperatures_deduped["source"] == "MEASURED"])
+        forecaster = dashboard_model(
+            temperatures_deduped[temperatures_deduped["source"] == "MEASURED"],
+            hourly_weather,
+        )
 
         temperatures_deduped = forecaster.fill_predictions(temperatures_deduped)
 
@@ -1497,9 +1527,10 @@ def main():
                 combined_hourly, solar_hist, forecast_weather
             )
 
-            forecaster = WaterTempForecaster()
-            forecaster.set_hourly_weather(hourly_weather)
-            forecaster.fit(temperatures_deduped[temperatures_deduped["source"] == "MEASURED"])
+            forecaster = dashboard_model(
+                temperatures_deduped[temperatures_deduped["source"] == "MEASURED"],
+                hourly_weather,
+            )
             temperatures_deduped = forecaster.fill_predictions(temperatures_deduped)
 
             chart = create_temperature_chart(temperatures_deduped)
