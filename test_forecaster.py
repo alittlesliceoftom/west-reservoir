@@ -707,3 +707,54 @@ class TestFitReportsOutcome:
 
         assert failed.fit_status != fitted.fit_status
         assert fitted.fit_status == FIT_OK
+
+
+class TestSimulateHourly:
+    """The hourly trajectory behind the air/water chart."""
+
+    def _fitted(self):
+        f = WaterTempForecaster(k_air=0.1, k_solar=0.0, k_cool=0.0)
+        f.set_hourly_weather(_make_hourly_weather(
+            datetime(2026, 1, 1, 7), n_hours=5,
+            air_temp=20.0, shortwave=0.0, cloud=100.0,
+        ))
+        return f
+
+    def test_anchor_row_then_one_row_per_weather_hour(self):
+        f = self._fitted()
+        result = f.simulate_hourly(
+            datetime(2026, 1, 1, 7), 10.0, datetime(2026, 1, 1, 12)
+        )
+
+        assert len(result) == 6
+        assert result["datetime"].iloc[0] == pd.Timestamp(2026, 1, 1, 7)
+        assert result["water_temp"].iloc[0] == 10.0
+
+    def test_timestamps_come_from_the_weather_index(self):
+        f = self._fitted()
+        result = f.simulate_hourly(
+            datetime(2026, 1, 1, 7), 10.0, datetime(2026, 1, 1, 12)
+        )
+
+        expected = list(f._get_weather_for_period(
+            datetime(2026, 1, 1, 7), datetime(2026, 1, 1, 12)
+        ).index)
+        assert list(result["datetime"].iloc[1:]) == expected
+
+    def test_ends_where_simulate_period_ends(self):
+        f = self._fitted()
+        start, end = datetime(2026, 1, 1, 7), datetime(2026, 1, 1, 12)
+
+        hourly = f.simulate_hourly(start, 10.0, end)
+        period = f._simulate_period(10.0, f._get_weather_for_period(start, end))
+
+        assert hourly["water_temp"].iloc[-1] == pytest.approx(period)
+
+    def test_no_weather_gives_the_anchor_alone(self):
+        f = self._fitted()
+        result = f.simulate_hourly(
+            datetime(2027, 1, 1, 7), 15.0, datetime(2027, 1, 2, 7)
+        )
+
+        assert len(result) == 1
+        assert result["water_temp"].iloc[0] == 15.0

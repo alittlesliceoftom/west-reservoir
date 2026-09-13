@@ -460,7 +460,7 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
             else:
                 st.info("No measured data available")
 
-        st.subheader("Air Temperature: Last 48h + Next 48h")
+        st.subheader("Air and Water Temperature: Last 48h + Next 48h")
         if not hourly_air_temps.empty:
             now = datetime.now()
             cutoff_past = now - timedelta(hours=48)
@@ -516,6 +516,37 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                             marker=dict(color="orange", size=5),
                         )
                     )
+
+            measured = temperatures[temperatures["source"] == "MEASURED"]
+            if not measured.empty:
+                measured_dts = (
+                    pd.to_datetime(measured["date"]).dt.normalize()
+                    + pd.Timedelta(hours=forecaster.MEASUREMENT_HOUR)
+                )
+                water_hourly = forecaster.simulate_hourly(
+                    measured_dts.iloc[-1],
+                    measured["water_temp"].iloc[-1],
+                    cutoff_future,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=water_hourly["datetime"],
+                        y=water_hourly["water_temp"],
+                        mode="lines",
+                        name="Water (simulated hourly)",
+                        line=dict(color="green", width=2),
+                    )
+                )
+                in_window = measured_dts >= cutoff_past
+                fig.add_trace(
+                    go.Scatter(
+                        x=measured_dts[in_window],
+                        y=measured["water_temp"][in_window],
+                        mode="markers",
+                        name="Water (measured)",
+                        marker=dict(color="green", size=9, symbol="circle-open"),
+                    )
+                )
 
             fig.add_vline(
                 x=now.timestamp() * 1000,
