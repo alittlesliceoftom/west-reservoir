@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 from typing import Dict, List, Optional, Sequence
-from datetime import datetime, timedelta
+from datetime import datetime
 
 
 WEATHER_COLUMNS = ("air_temp", "shortwave_radiation", "cloud_cover")
@@ -15,7 +15,23 @@ WEATHER_COLUMNS = ("air_temp", "shortwave_radiation", "cloud_cover")
 # A training leg runs from one measurement to the next. Two separate limits,
 # measuring two different things:
 MIN_TRAINING_LEG_ROWS = 20   # completeness: a 24h leg may be missing a few hours
-MAX_TRAINING_LEG_DAYS = 4    # elapsed time: how far apart the readings may be
+MAX_TRAINING_LEG_DAYS = 4    # longest leg trained on, and so the longest horizon
+
+
+def horizon_weight(horizon_days: int) -> float:
+    """
+    How much a leg of this length counts in the fit.
+
+    Legs are trained at every horizon up to MAX_TRAINING_LEG_DAYS, which is
+    where the trouble starts: forecast error grows with horizon, and squaring
+    it in the objective would let the longest legs dominate a fit whose whole
+    point is tomorrow morning. Weighting by 1/h holds them in proportion.
+
+    This is a starting point, not a settled answer. Inverse-variance would be
+    the textbook choice; 1/h is the cheap approximation of it that needs no
+    prior fit to compute.
+    """
+    return 1.0 / horizon_days
 
 DEFAULTS_PATH = Path(__file__).with_name("model_defaults.json")
 
@@ -189,16 +205,25 @@ class WaterTempForecaster:
 
     def _training_pairs(self, training_data: pd.DataFrame) -> List[Dict]:
         """
-        Build training legs from each reading to the one before it.
+        Build training legs from each reading to every reading within reach.
 
-        Legs are capped at MAX_TRAINING_LEG_DAYS of elapsed time: past that,
-        the transient from the starting temperature has decayed (relaxation
-        time 1/k_air, ~5 days) and a squared-error fit would be dominated by
-        the residuals of legs that no longer test "what is it tomorrow".
+        A leg runs from an anchor to the reading exactly h days later, for
+        every h up to MAX_TRAINING_LEG_DAYS. The model is deployed five days
+        ahead but was only ever shown one-day steps, so nothing in training
+        penalised error that compounds; this shows it the horizons it is
+        actually asked for.
 
-        Elapsed time (from the dates) and row count (weather-hour coverage)
-        measure different things - a long leg with sparse weather can have
-        few rows - so both limits apply independently.
+        Legs stop at MAX_TRAINING_LEG_DAYS because past that the transient
+        from the starting temperature has decayed (relaxation time 1/k_air,
+        ~5 days) and the leg tests equilibrium rather than "what is it
+        tomorrow". Because legs are built by date, an absent reading yields no
+        leg rather than one silently spanning a gap - which is what the
+        elapsed-time cap previously had to catch.
+
+        Longer legs carry more error, so each is weighted by horizon_weight to
+        keep them from dominating a squared-error objective. Every anchor
+        contributes several overlapping legs: more targets than before, but
+        not independent ones.
 
         Returns:
             One dict per usable leg, weather held as NumPy arrays so the
@@ -207,34 +232,54 @@ class WaterTempForecaster:
         if self.hourly_weather is None or len(training_data) < 2:
             return []
 
-        max_elapsed = timedelta(days=MAX_TRAINING_LEG_DAYS)
-        dates = training_data["date"].dt.normalize() + pd.Timedelta(hours=self.MEASUREMENT_HOUR)
-        starts, ends = dates.to_numpy()[:-1], dates.to_numpy()[1:]
+        dates = (
+            training_data["date"].dt.normalize()
+            + pd.Timedelta(hours=self.MEASUREMENT_HOUR)
+        ).to_numpy()
+        waters = training_data["water_temp"].to_numpy()
 
         weather_index = self.hourly_weather.index
-        lo = weather_index.searchsorted(starts, side="left")
-        hi = weather_index.searchsorted(ends, side="left")
-
-        usable = np.flatnonzero(
-            (ends - starts <= np.timedelta64(max_elapsed)) & (hi - lo >= MIN_TRAINING_LEG_ROWS)
-        )
-
-        start_waters = training_data["water_temp"].to_numpy()[:-1]
-        actual_ends = training_data["water_temp"].to_numpy()[1:]
         airs = self.hourly_weather["air_temp"].to_numpy()
         sols = self.hourly_weather["shortwave_radiation"].to_numpy()
         clouds = self.hourly_weather["cloud_cover"].to_numpy()
 
-        return [
-            {
-                "start_water": float(start_waters[i]),
-                "airs": airs[lo[i]:hi[i]],
-                "sols": sols[lo[i]:hi[i]],
-                "clouds": clouds[lo[i]:hi[i]],
-                "actual_end": float(actual_ends[i]),
-            }
-            for i in usable
-        ]
+        pairs = []
+        for horizon in range(1, MAX_TRAINING_LEG_DAYS + 1):
+            targets = dates + np.timedelta64(horizon, "D")
+
+            # A leg exists only where a reading falls exactly `horizon` days on.
+            # Built by date rather than by position, so a leg never silently
+            # spans a gap: an absent reading simply yields no leg.
+            found = np.searchsorted(dates, targets, side="left")
+            found = np.minimum(found, len(dates) - 1)
+            anchors = np.flatnonzero(dates[found] == targets)
+            if anchors.size == 0:
+                continue
+
+            ends = found[anchors]
+            lo = weather_index.searchsorted(dates[anchors], side="left")
+            hi = weather_index.searchsorted(targets[anchors], side="left")
+
+            # The completeness floor scales with the leg: a four-day leg needs
+            # four days of weather to be as complete as a one-day leg.
+            usable = np.flatnonzero(hi - lo >= MIN_TRAINING_LEG_ROWS * horizon)
+            weight = horizon_weight(horizon)
+
+            pairs.extend(
+                {
+                    "anchor": int(anchors[i]),
+                    "horizon_days": horizon,
+                    "weight": weight,
+                    "start_water": float(waters[anchors[i]]),
+                    "airs": airs[lo[i]:hi[i]],
+                    "sols": sols[lo[i]:hi[i]],
+                    "clouds": clouds[lo[i]:hi[i]],
+                    "actual_end": float(waters[ends[i]]),
+                }
+                for i in usable
+            )
+
+        return pairs
 
     def fit(self, temperatures: pd.DataFrame) -> bool:
         """
@@ -269,7 +314,10 @@ class WaterTempForecaster:
 
         training_pairs = self._training_pairs(training_data)
 
-        if len(training_pairs) < MIN_TRAINING_PAIRS:
+        # Counted by anchor, not by leg: one anchor now contributes several
+        # overlapping legs, so a leg count would let two readings look like
+        # enough data.
+        if len({pair["anchor"] for pair in training_pairs}) < MIN_TRAINING_PAIRS:
             self.fit_status = FIT_TOO_FEW_PAIRS
             return False
 
@@ -288,7 +336,7 @@ class WaterTempForecaster:
                         + k_solar * sols[i]
                         - k_cool * clearness
                     )
-                total_error += (water - pair["actual_end"]) ** 2
+                total_error += pair["weight"] * (water - pair["actual_end"]) ** 2
             return total_error
 
         bounds = [
