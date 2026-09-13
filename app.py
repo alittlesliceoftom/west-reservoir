@@ -534,7 +534,7 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                         y=water_hourly["water_temp"],
                         mode="lines",
                         name="Water (simulated hourly)",
-                        line=dict(color="green", width=2),
+                        line=dict(color="#095988", width=2),
                     )
                 )
                 in_window = measured_dts >= cutoff_past
@@ -544,7 +544,7 @@ Tomorrow's predicted temp: {explanation['predicted_water_temp']:.2f} C
                         y=measured["water_temp"][in_window],
                         mode="markers",
                         name="Water (measured)",
-                        marker=dict(color="green", size=9, symbol="circle-open"),
+                        marker=dict(color="#095988", size=9, symbol="circle-open"),
                     )
                 )
 
@@ -696,7 +696,7 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
                     y=all_with_air["air_temp"],
                     mode="markers",
                     name="Air temperature (avg)",
-                    marker=dict(color="black", size=6, symbol="line-ew", line=dict(width=2)),
+                    marker=dict(color="rgb(220, 70, 70)", size=6, symbol="line-ew", line=dict(width=2)),
                     legendgroup="air",
                     showlegend=False,
                     customdata=list(zip(all_with_air["air_temp_min"], all_with_air["air_temp_max"], _fmt_hover_dates(all_with_air["date"]))),
