@@ -179,6 +179,49 @@ def cached_fitted_model_coefficients(water_temps, start_date, end_date):
     return (forecaster.k_air, forecaster.k_solar, forecaster.k_cool)
 
 
+class FitUnavailable(Exception):
+    """The model could not be fitted, with fit_status as the message."""
+
+
+@st.cache_data(ttl=3600)
+def cached_dashboard_coefficients(measured, hourly_weather):
+    """
+    Fit the dashboard's model and return its coefficients.
+
+    Coefficients rather than the model itself, because the cache pickles what
+    it stores and a fitted model carries the whole weather frame with it.
+
+    Raises:
+        FitUnavailable: if the fit failed. The cache stores return values, not
+            exceptions, so raising keeps a bad fit out of it and the next
+            rerun tries again.
+    """
+    model = WaterTempForecaster()
+    model.set_hourly_weather(hourly_weather)
+    if not model.fit(measured):
+        raise FitUnavailable(model.fit_status)
+    return model.k_air, model.k_solar, model.k_cool
+
+
+def dashboard_model(measured, hourly_weather) -> WaterTempForecaster:
+    """The dashboard's fitted model, from cache where possible."""
+    try:
+        k_air, k_solar, k_cool = cached_dashboard_coefficients(
+            measured, hourly_weather
+        )
+    except FitUnavailable as exc:
+        model = WaterTempForecaster()
+        model.fit_status = str(exc)
+        model.set_hourly_weather(hourly_weather)
+        return model
+
+    model = WaterTempForecaster(k_air=k_air, k_solar=k_solar, k_cool=k_cool)
+    # These came from a successful fit, which the model itself cannot tell.
+    model.fit_status = FIT_OK
+    model.set_hourly_weather(hourly_weather)
+    return model
+
+
 def solar_cloud_runs_by_date(stored_weather):
     """
     Group stored weather runs by creation date, keeping only solar/cloud rows.
@@ -1112,9 +1155,10 @@ def page_temperature():
             combined_hourly, solar_hist, forecast_weather
         )
 
-        forecaster = WaterTempForecaster()
-        forecaster.set_hourly_weather(hourly_weather)
-        forecaster.fit(temperatures_deduped[temperatures_deduped["source"] == "MEASURED"])
+        forecaster = dashboard_model(
+            temperatures_deduped[temperatures_deduped["source"] == "MEASURED"],
+            hourly_weather,
+        )
 
         temperatures_deduped = forecaster.fill_predictions(temperatures_deduped)
 
@@ -1497,9 +1541,10 @@ def main():
                 combined_hourly, solar_hist, forecast_weather
             )
 
-            forecaster = WaterTempForecaster()
-            forecaster.set_hourly_weather(hourly_weather)
-            forecaster.fit(temperatures_deduped[temperatures_deduped["source"] == "MEASURED"])
+            forecaster = dashboard_model(
+                temperatures_deduped[temperatures_deduped["source"] == "MEASURED"],
+                hourly_weather,
+            )
             temperatures_deduped = forecaster.fill_predictions(temperatures_deduped)
 
             chart = create_temperature_chart(temperatures_deduped)
