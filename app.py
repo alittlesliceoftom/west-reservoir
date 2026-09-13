@@ -13,10 +13,7 @@ from data import (
     load_water_temps,
     load_historical_air_temps,
     load_hourly_air_temps,
-    load_forecast_air_temps,
-    load_forecast_air_temps_3hourly,
     load_historical_solar_cloud,
-    load_forecast_solar_cloud,
     load_forecast_weather,
     daily_from_hourly_forecast,
     interpolate_to_hourly,
@@ -64,52 +61,15 @@ METEOSTAT_OUTAGE_END = pd.Timestamp("2026-09-06")
 FORECAST_DAYS = 5
 
 
-@st.cache_data(ttl=CACHE_TTL)
-def cached_load_water_temps():
-    """Load water temps with 6-hour cache."""
-    return load_water_temps()
+# Streamlit caching applied here rather than in data.py: the data layer has no
+# Streamlit dependency, so tests and scripts can import it without a runtime.
+_cached = st.cache_data(ttl=CACHE_TTL)
 
-
-@st.cache_data(ttl=CACHE_TTL)
-def cached_load_historical_air_temps(start_date, end_date):
-    """Load historical air temps with 6-hour cache."""
-    return load_historical_air_temps(start_date, end_date)
-
-
-@st.cache_data(ttl=CACHE_TTL)
-def cached_load_hourly_air_temps(start_date, end_date):
-    """Load hourly air temps with 6-hour cache."""
-    return load_hourly_air_temps(start_date, end_date)
-
-
-@st.cache_data(ttl=CACHE_TTL)
-def cached_load_forecast_air_temps(days):
-    """Load forecast air temps with 6-hour cache."""
-    return load_forecast_air_temps(days=days)
-
-
-@st.cache_data(ttl=CACHE_TTL)
-def cached_load_forecast_air_temps_3hourly(days):
-    """Load 3-hourly forecast air temps with 6-hour cache."""
-    return load_forecast_air_temps_3hourly(days=days)
-
-
-@st.cache_data(ttl=CACHE_TTL)
-def cached_load_historical_solar_cloud(start_date, end_date):
-    """Load historical solar/cloud from Open-Meteo with 6-hour cache."""
-    return load_historical_solar_cloud(start_date, end_date)
-
-
-@st.cache_data(ttl=CACHE_TTL)
-def cached_load_forecast_solar_cloud(days):
-    """Load forecast solar/cloud from Open-Meteo with 6-hour cache."""
-    return load_forecast_solar_cloud(days=days)
-
-
-@st.cache_data(ttl=CACHE_TTL)
-def cached_load_forecast_weather(days):
-    """Load the hourly forecast for every model input in one call, 6-hour cache."""
-    return load_forecast_weather(days=days)
+cached_load_water_temps = _cached(load_water_temps)
+cached_load_historical_air_temps = _cached(load_historical_air_temps)
+cached_load_hourly_air_temps = _cached(load_hourly_air_temps)
+cached_load_historical_solar_cloud = _cached(load_historical_solar_cloud)
+cached_load_forecast_weather = _cached(load_forecast_weather)
 
 
 def get_storage():
