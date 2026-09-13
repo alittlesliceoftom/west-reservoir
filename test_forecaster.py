@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 from forecaster import (
     DEFAULT_COEFFICIENTS,
+    MAX_TRAINING_LEG_DAYS,
     FIT_NOT_RUN,
     FIT_NO_WEATHER,
     FIT_OK,
@@ -14,6 +15,7 @@ from forecaster import (
     FIT_TOO_FEW_READINGS,
     WEATHER_COLUMNS,
     WaterTempForecaster,
+    horizon_weight,
     load_default_coefficients,
 )
 
@@ -594,8 +596,11 @@ class TestTrainingPairs:
     def _legs(self, f, days):
         return [len(p["airs"]) for p in f._training_pairs(self._readings(days))]
 
-    def test_consecutive_daily_readings_give_24h_legs(self):
-        assert self._legs(self._forecaster(), [0, 1, 2, 3]) == [24, 24, 24]
+    def test_every_horizon_within_reach_becomes_a_leg(self):
+        """Four daily readings: three 1-day legs, two 2-day, one 3-day."""
+        assert sorted(self._legs(self._forecaster(), [0, 1, 2, 3])) == [
+            24, 24, 24, 48, 48, 72
+        ]
 
     def test_four_day_gap_is_kept(self):
         """The cap is inclusive: four days is the documented limit."""
@@ -635,12 +640,48 @@ class TestTrainingPairs:
         """A reading after a gap still anchors the next day's leg."""
         assert self._legs(self._forecaster(), [0, 1, 20, 21]) == [24, 24]
 
-    def test_pairs_are_consecutive_so_no_reading_is_skipped_over(self):
-        days = [0, 1, 2, 3, 4]
-        f = self._forecaster()
-        pairs = f._training_pairs(self._readings(days))
-        starts = [p["start_water"] for p in pairs]
-        assert starts == [10.0 + 0.1 * d for d in days[:-1]]
+    def test_legs_are_built_by_date_so_a_gap_yields_no_leg(self):
+        """
+        Readings on days 0 and 3 only: the 3-day leg exists, and nothing
+        pretends there were readings on days 1 and 2.
+        """
+        pairs = self._forecaster()._training_pairs(self._readings([0, 3]))
+        assert [(p["horizon_days"], len(p["airs"])) for p in pairs] == [(3, 72)]
+
+    def test_each_leg_carries_its_horizon_and_weight(self):
+        pairs = self._forecaster()._training_pairs(self._readings([0, 1, 2]))
+        by_horizon = {}
+        for pair in pairs:
+            by_horizon.setdefault(pair["horizon_days"], []).append(pair["weight"])
+        assert by_horizon == {1: [1.0, 1.0], 2: [0.5]}
+
+    def test_longer_legs_count_for_less(self):
+        assert horizon_weight(1) == 1.0
+        assert horizon_weight(2) == 0.5
+        assert horizon_weight(4) == 0.25
+        assert all(
+            horizon_weight(h) > horizon_weight(h + 1)
+            for h in range(1, MAX_TRAINING_LEG_DAYS)
+        )
+
+    def test_no_leg_exceeds_the_longest_horizon(self):
+        days = list(range(0, 12))
+        pairs = self._forecaster()._training_pairs(self._readings(days))
+        assert max(p["horizon_days"] for p in pairs) == MAX_TRAINING_LEG_DAYS
+
+    def test_the_completeness_floor_scales_with_the_leg(self):
+        """
+        A 4-day leg missing a day of weather is as incomplete as a 1-day leg
+        missing six hours, and is dropped for the same reason.
+        """
+        missing = pd.date_range("2026-01-02 07:00", periods=24, freq="h")
+        f = self._forecaster(drop=list(missing))
+        assert self._legs(f, [0, 4]) == []
+
+    def test_an_anchor_contributes_several_overlapping_legs(self):
+        pairs = self._forecaster()._training_pairs(self._readings([0, 1, 2, 3]))
+        from_first = [p for p in pairs if p["anchor"] == 0]
+        assert sorted(p["horizon_days"] for p in from_first) == [1, 2, 3]
 
 
 class TestFitReportsOutcome:
