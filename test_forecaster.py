@@ -6,6 +6,7 @@ import pytest
 from datetime import datetime, timedelta
 
 from forecaster import (
+    DEFAULT_COEFFICIENTS,
     FIT_NOT_RUN,
     FIT_NO_WEATHER,
     FIT_OK,
@@ -13,6 +14,7 @@ from forecaster import (
     FIT_TOO_FEW_READINGS,
     WEATHER_COLUMNS,
     WaterTempForecaster,
+    load_default_coefficients,
 )
 
 
@@ -758,3 +760,60 @@ class TestSimulateHourly:
 
         assert len(result) == 1
         assert result["water_temp"].iloc[0] == 15.0
+
+
+class TestDefaultCoefficients:
+    """Starting coefficients come from model_defaults.json."""
+
+    def test_a_bare_model_uses_the_configured_defaults(self):
+        f = WaterTempForecaster()
+        assert (f.k_air, f.k_solar, f.k_cool) == (
+            DEFAULT_COEFFICIENTS["k_air"],
+            DEFAULT_COEFFICIENTS["k_solar"],
+            DEFAULT_COEFFICIENTS["k_cool"],
+        )
+
+    def test_the_shipped_defaults_are_a_plausible_fit_not_round_numbers(self):
+        """
+        The point of the config: an unfitted model should behave like the
+        reservoir. The old defaults implied a 35% daily response against the
+        16% the record shows.
+        """
+        daily_response = 1 - (1 - DEFAULT_COEFFICIENTS["k_air"]) ** 24
+        assert 0.10 < daily_response < 0.25
+
+    def test_explicit_coefficients_still_win(self):
+        f = WaterTempForecaster(k_air=0.05, k_solar=1e-4, k_cool=0.03)
+        assert (f.k_air, f.k_solar, f.k_cool) == (0.05, 1e-4, 0.03)
+
+    def test_coefficients_can_be_set_individually(self):
+        f = WaterTempForecaster(k_air=0.05)
+        assert f.k_air == 0.05
+        assert f.k_solar == DEFAULT_COEFFICIENTS["k_solar"]
+
+    def test_legacy_alias_still_overrides_k_air(self):
+        assert WaterTempForecaster(heat_transfer_coeff=0.04).k_air == 0.04
+
+    def test_defaults_are_not_a_fit(self):
+        """Sane defaults must not be mistaken for a fitted model."""
+        assert WaterTempForecaster().fit_status == FIT_NOT_RUN
+
+    def test_the_shipped_config_file_loads(self):
+        loaded = load_default_coefficients()
+        assert set(loaded) == {"k_air", "k_solar", "k_cool"}
+        assert all(isinstance(v, float) for v in loaded.values())
+
+    def test_a_missing_config_falls_back_rather_than_failing_to_import(self, tmp_path):
+        loaded = load_default_coefficients(tmp_path / "absent.json")
+        assert set(loaded) == {"k_air", "k_solar", "k_cool"}
+
+    def test_a_corrupt_config_falls_back(self, tmp_path):
+        broken = tmp_path / "model_defaults.json"
+        broken.write_text("{not json")
+        assert set(load_default_coefficients(broken)) == {"k_air", "k_solar", "k_cool"}
+
+    def test_a_config_missing_a_coefficient_falls_back(self, tmp_path):
+        partial = tmp_path / "model_defaults.json"
+        partial.write_text('{"coefficients": {"k_air": 0.01}}')
+        loaded = load_default_coefficients(partial)
+        assert set(loaded) == {"k_air", "k_solar", "k_cool"}
