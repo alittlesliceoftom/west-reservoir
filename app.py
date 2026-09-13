@@ -674,7 +674,12 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
                     y=all_with_air["air_temp"],
                     mode="markers",
                     name="Air temperature range",
-                    marker=dict(size=0),  # Hide markers, only show error bars
+                    marker=dict(
+                        color="rgb(220, 70, 70)",
+                        size=6,
+                        symbol="line-ew",
+                        line=dict(color="rgb(220, 70, 70)", width=2),
+                    ),
                     error_y=dict(
                         type="data",
                         symmetric=False,
@@ -685,20 +690,6 @@ def create_temperature_chart(temperatures: pd.DataFrame) -> go.Figure:
                         width=0,
                     ),
                     legendgroup="air",
-                    showlegend=True,
-                    hoverinfo="skip",
-                )
-            )
-
-            fig.add_trace(
-                go.Scatter(
-                    x=all_with_air["date"],
-                    y=all_with_air["air_temp"],
-                    mode="markers",
-                    name="Air temperature (avg)",
-                    marker=dict(color="rgb(220, 70, 70)", size=6, symbol="line-ew", line=dict(width=2)),
-                    legendgroup="air",
-                    showlegend=False,
                     customdata=list(zip(all_with_air["air_temp_min"], all_with_air["air_temp_max"], _fmt_hover_dates(all_with_air["date"]))),
                     hovertemplate="Air: %{y:.1f}C (Low: %{customdata[0]:.1f}, High: %{customdata[1]:.1f})<br>%{customdata[2]}<extra></extra>",
                 )
@@ -1231,7 +1222,7 @@ def page_temperature():
 
         st.header("Temperature History and Forecast")
         st.text("""The chart shows the temperature history and forecast for the last 5 days, and next 5 days.
-        Red bar shows the air temp range each day, with the black line being the average. The blue line is the water tempterature. It is dotted for forecast days.""")
+        Red bar shows the air temp range each day, with the darker red line being the average. The blue line is the water tempterature. It is dotted for forecast days.""")
 
         chart = create_temperature_chart(temperatures_deduped)
         st.plotly_chart(chart, width='stretch')
