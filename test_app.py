@@ -13,9 +13,15 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import pytest
+from unittest.mock import patch
 
+from datetime import datetime, timedelta
+
+from forecaster import FIT_OK, FIT_TOO_FEW_READINGS, WaterTempForecaster
 from app import (
     METEOSTAT_OUTAGE_START,
+    cached_dashboard_coefficients,
+    dashboard_model,
     _horizon_label,
     _one_sided,
     _shade_meteostat_outage,
@@ -452,3 +458,81 @@ class TestOutageWindowEnds:
         _shade_meteostat_outage(fig, pd.Timestamp("2026-05-01"), last, horizon=1)
 
         assert pd.Timestamp(fig.layout.shapes[0].x1) == last
+
+
+class TestDashboardModel:
+    """Fitting the dashboard's model through the cache."""
+
+    def _weather(self, n_days=40):
+        start = datetime(2026, 1, 1, 0)
+        return pd.DataFrame({
+            "datetime": [start + timedelta(hours=i) for i in range(n_days * 24)],
+            "air_temp": [14.0] * (n_days * 24),
+            "shortwave_radiation": [120.0] * (n_days * 24),
+            "cloud_cover": [50.0] * (n_days * 24),
+        })
+
+    def _measured(self, n=30):
+        return pd.DataFrame({
+            "date": [pd.Timestamp("2026-01-01") + timedelta(days=i) for i in range(n)],
+            "water_temp": [10.0 + 0.1 * i for i in range(n)],
+            "source": ["MEASURED"] * n,
+        })
+
+    def setup_method(self):
+        cached_dashboard_coefficients.clear()
+
+    def test_returns_a_fitted_model_with_weather_attached(self):
+        model = dashboard_model(self._measured(), self._weather())
+        assert model.fit_status == FIT_OK
+        assert model.hourly_weather is not None
+
+    def test_coefficients_match_fitting_directly(self):
+        measured, weather = self._measured(), self._weather()
+        direct = WaterTempForecaster()
+        direct.set_hourly_weather(weather)
+        assert direct.fit(measured) is True
+
+        cached = dashboard_model(measured, weather)
+        assert (cached.k_air, cached.k_solar, cached.k_cool) == pytest.approx(
+            (direct.k_air, direct.k_solar, direct.k_cool)
+        )
+
+    def test_second_call_does_not_refit(self):
+        measured, weather = self._measured(), self._weather()
+        dashboard_model(measured, weather)
+        with patch.object(WaterTempForecaster, "fit", autospec=True) as fit:
+            dashboard_model(measured, weather)
+        fit.assert_not_called()
+
+    def test_changed_readings_refit(self):
+        weather = self._weather()
+        first = dashboard_model(self._measured(30), weather)
+        second = dashboard_model(self._measured(29), weather)
+        assert first.k_air != second.k_air or first.k_cool != second.k_cool
+
+    def test_a_failed_fit_reports_why_and_uses_defaults(self):
+        """Too few readings to fit; the page still renders, honestly labelled."""
+        model = dashboard_model(self._measured(3), self._weather())
+        assert model.fit_status == FIT_TOO_FEW_READINGS
+        assert model.k_air == WaterTempForecaster().k_air
+
+    def test_a_failed_fit_is_cached_like_any_other_result(self):
+        """
+        Safe because the key is the inputs and the fit is deterministic: the
+        same readings and weather always fail the same way.
+        """
+        measured, weather = self._measured(3), self._weather()
+        dashboard_model(measured, weather)
+        with patch.object(WaterTempForecaster, "fit", autospec=True) as fit:
+            dashboard_model(measured, weather)
+        fit.assert_not_called()
+
+    def test_recovered_inputs_are_a_different_key_and_refit(self):
+        """A failure cached against bad inputs is never served for good ones."""
+        weather = self._weather()
+        failed = dashboard_model(self._measured(3), weather)
+        assert failed.fit_status == FIT_TOO_FEW_READINGS
+
+        recovered = dashboard_model(self._measured(30), weather)
+        assert recovered.fit_status == FIT_OK
