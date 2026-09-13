@@ -152,6 +152,38 @@ class WaterTempForecaster:
             )
         return water
 
+    def simulate_hourly(
+        self,
+        start_datetime: datetime,
+        start_water_temp: float,
+        end_datetime: datetime,
+    ) -> pd.DataFrame:
+        """
+        Hourly water temperature trajectory from an anchor reading.
+
+        Row 0 is the anchor itself; each later row is the water temperature
+        after that hour of weather. Timestamps come from the weather index,
+        so a gap in the weather is a gap in the line.
+        """
+        weather_slice = self._get_weather_for_period(start_datetime, end_datetime)
+
+        rows = [{
+            "datetime": pd.Timestamp(start_datetime),
+            "water_temp": float(start_water_temp),
+        }]
+        water = float(start_water_temp)
+        for timestamp, hour in weather_slice.iterrows():
+            water = self._step(
+                water,
+                hour["air_temp"],
+                hour["shortwave_radiation"],
+                hour["cloud_cover"],
+                self.k_air, self.k_solar, self.k_cool,
+            )
+            rows.append({"datetime": timestamp, "water_temp": water})
+
+        return pd.DataFrame(rows)
+
     def _training_pairs(self, training_data: pd.DataFrame) -> List[Dict]:
         """
         Build training legs from each reading to the one before it.
