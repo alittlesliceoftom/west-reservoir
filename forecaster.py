@@ -1,5 +1,8 @@
 """Water temperature forecasting using hourly physics simulation"""
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
@@ -13,6 +16,36 @@ WEATHER_COLUMNS = ("air_temp", "shortwave_radiation", "cloud_cover")
 # measuring two different things:
 MIN_TRAINING_LEG_ROWS = 20   # completeness: a 24h leg may be missing a few hours
 MAX_TRAINING_LEG_DAYS = 4    # elapsed time: how far apart the readings may be
+
+DEFAULTS_PATH = Path(__file__).with_name("model_defaults.json")
+
+# Last-resort coefficients, used only if model_defaults.json cannot be read.
+# Importing the model must never fail because a config file is missing.
+_FALLBACK_COEFFICIENTS = {"k_air": 0.00738795, "k_solar": 8.39492e-05, "k_cool": 0.00820885}
+
+
+def load_default_coefficients(path: Path = DEFAULTS_PATH) -> dict:
+    """
+    Read the starting coefficients from model_defaults.json.
+
+    These are what a model has before it fits, and what it keeps if fitting
+    fails. They are a recent fit of the measured record rather than round
+    numbers, so an unfitted model behaves like the reservoir rather than
+    like a guess - the old defaults implied a 35% daily response against the
+    16% the record actually shows.
+
+    They are still not a fit. A model holding them reports FIT_NOT_RUN, and
+    the debug panel says so.
+    """
+    try:
+        with open(path) as handle:
+            coefficients = json.load(handle)["coefficients"]
+        return {name: float(coefficients[name]) for name in _FALLBACK_COEFFICIENTS}
+    except (OSError, ValueError, KeyError, TypeError):
+        return dict(_FALLBACK_COEFFICIENTS)
+
+
+DEFAULT_COEFFICIENTS = load_default_coefficients()
 
 MIN_TRAINING_READINGS = 10
 MIN_TRAINING_PAIRS = 5
@@ -53,9 +86,9 @@ class WaterTempForecaster:
 
     def __init__(
         self,
-        k_air: float = 0.02,
-        k_solar: float = 5e-4,
-        k_cool: float = 0.01,
+        k_air: Optional[float] = None,
+        k_solar: Optional[float] = None,
+        k_cool: Optional[float] = None,
         heat_transfer_coeff: Optional[float] = None,
     ):
         """
@@ -64,12 +97,14 @@ class WaterTempForecaster:
             k_solar: Solar heating coefficient (°C per W/m² per hour)
             k_cool: Clear-sky radiative cooling rate (°C per hour at 100% clearness)
             heat_transfer_coeff: Back-compat alias for k_air (legacy single-term init)
+
+        Any coefficient left out falls back to model_defaults.json.
         """
         if heat_transfer_coeff is not None:
             k_air = heat_transfer_coeff
-        self.k_air = k_air
-        self.k_solar = k_solar
-        self.k_cool = k_cool
+        self.k_air = DEFAULT_COEFFICIENTS["k_air"] if k_air is None else k_air
+        self.k_solar = DEFAULT_COEFFICIENTS["k_solar"] if k_solar is None else k_solar
+        self.k_cool = DEFAULT_COEFFICIENTS["k_cool"] if k_cool is None else k_cool
         self.hourly_weather: Optional[pd.DataFrame] = None
         # Constructing with explicit coefficients is not fitting: a model built
         # from previously fitted values reports FIT_NOT_RUN, because this one
