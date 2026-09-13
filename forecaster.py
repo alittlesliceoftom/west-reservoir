@@ -2,11 +2,16 @@
 
 import pandas as pd
 from scipy.optimize import minimize
-from typing import Dict, Optional, Sequence
-from datetime import datetime
+from typing import Dict, List, Optional, Sequence
+from datetime import datetime, timedelta
 
 
 WEATHER_COLUMNS = ("air_temp", "shortwave_radiation", "cloud_cover")
+
+# A training leg runs from one measurement to the next. Two separate limits,
+# measuring two different things:
+MIN_TRAINING_LEG_ROWS = 20   # completeness: a 24h leg may be missing a few hours
+MAX_TRAINING_LEG_DAYS = 4    # elapsed time: how far apart the readings may be
 
 
 class WaterTempForecaster:
@@ -129,6 +134,63 @@ class WaterTempForecaster:
             )
         return water
 
+    def _training_pairs(self, training_data: pd.DataFrame) -> List[Dict]:
+        """
+        Build training legs from each reading to the one before it.
+
+        Readings are not daily - roughly a fifth of consecutive pairs span a
+        gap where nobody measured. A leg is only useful for fitting while the
+        starting temperature still influences its end: the model relaxes toward
+        air temperature with a time constant of 1/k_air, around 5 days, so a
+        leg of a few days still carries the transient the forecast depends on,
+        while a leg of weeks carries only the equilibrium the model settles to.
+        Those long legs also produce the largest residuals, so under a squared
+        objective they dominate a fit meant to answer "what is it tomorrow".
+
+        Legs are therefore capped at MAX_TRAINING_LEG_DAYS of elapsed time. The
+        cap only ever discards a leg created by a gap in the readings, never
+        measured data: pairs are consecutive, so nothing is skipped over.
+
+        The two limits measure different things and must not be conflated.
+        Missing weather hours are absent rows rather than blanks, so a row
+        count measures how complete a leg is, not how long it lasted - a long
+        leg with sparse weather can have few rows. Elapsed time is taken from
+        the dates, completeness from the row count.
+
+        Args:
+            training_data: Measured readings, sorted by date, index reset.
+
+        Returns:
+            One dict per usable leg, weather held as NumPy arrays so the
+            optimiser's inner loop stays fast.
+        """
+        max_elapsed = timedelta(days=MAX_TRAINING_LEG_DAYS)
+        pairs = []
+
+        for i in range(1, len(training_data)):
+            prev_row = training_data.iloc[i - 1]
+            curr_row = training_data.iloc[i]
+
+            start_dt = pd.Timestamp(prev_row["date"]).replace(hour=self.MEASUREMENT_HOUR)
+            end_dt = pd.Timestamp(curr_row["date"]).replace(hour=self.MEASUREMENT_HOUR)
+
+            if end_dt - start_dt > max_elapsed:
+                continue
+
+            slice_df = self._get_weather_for_period(start_dt, end_dt)
+            if len(slice_df) < MIN_TRAINING_LEG_ROWS:
+                continue
+
+            pairs.append({
+                "start_water": float(prev_row["water_temp"]),
+                "airs": slice_df["air_temp"].to_numpy(),
+                "sols": slice_df["shortwave_radiation"].to_numpy(),
+                "clouds": slice_df["cloud_cover"].to_numpy(),
+                "actual_end": float(curr_row["water_temp"]),
+            })
+
+        return pairs
+
     def fit(self, temperatures: pd.DataFrame) -> None:
         """
         Fit k_air, k_solar, k_cool against measured water temperatures.
@@ -145,24 +207,7 @@ class WaterTempForecaster:
 
         training_data = training_data.sort_values("date").reset_index(drop=True)
 
-        # Build training pairs as plain NumPy arrays for fast inner loop
-        training_pairs = []
-        for i in range(1, len(training_data)):
-            prev_row = training_data.iloc[i - 1]
-            curr_row = training_data.iloc[i]
-
-            start_dt = pd.Timestamp(prev_row["date"]).replace(hour=self.MEASUREMENT_HOUR)
-            end_dt = pd.Timestamp(curr_row["date"]).replace(hour=self.MEASUREMENT_HOUR)
-
-            slice_df = self._get_weather_for_period(start_dt, end_dt)
-            if len(slice_df) >= 20:
-                training_pairs.append({
-                    "start_water": float(prev_row["water_temp"]),
-                    "airs": slice_df["air_temp"].to_numpy(),
-                    "sols": slice_df["shortwave_radiation"].to_numpy(),
-                    "clouds": slice_df["cloud_cover"].to_numpy(),
-                    "actual_end": float(curr_row["water_temp"]),
-                })
+        training_pairs = self._training_pairs(training_data)
 
         if len(training_pairs) < 5:
             return

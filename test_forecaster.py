@@ -560,3 +560,74 @@ class TestFillPredictions:
         f = self._fitted()
         df = self._frame(["MEASURED", "MEASURED", "MEASURED"])
         pd.testing.assert_frame_equal(f.fill_predictions(df), _legacy_fill(f, df))
+
+
+class TestTrainingPairs:
+    """Which legs between consecutive readings are usable for fitting."""
+
+    def _forecaster(self, n_days: int = 40, drop=None) -> WaterTempForecaster:
+        weather = _make_hourly_weather(datetime(2026, 1, 1, 0), n_days * 24, air_temp=14.0)
+        if drop is not None:
+            weather = weather[~weather["datetime"].isin(drop)].reset_index(drop=True)
+        f = WaterTempForecaster()
+        f.set_hourly_weather(weather)
+        return f
+
+    def _readings(self, days) -> pd.DataFrame:
+        """days: offsets from 2026-01-01 on which a reading exists."""
+        return pd.DataFrame({
+            "date": [pd.Timestamp("2026-01-01") + timedelta(days=d) for d in days],
+            "water_temp": [10.0 + 0.1 * d for d in days],
+            "source": ["MEASURED"] * len(days),
+        })
+
+    def _legs(self, f, days):
+        return [len(p["airs"]) for p in f._training_pairs(self._readings(days))]
+
+    def test_consecutive_daily_readings_give_24h_legs(self):
+        assert self._legs(self._forecaster(), [0, 1, 2, 3]) == [24, 24, 24]
+
+    def test_four_day_gap_is_kept(self):
+        """The cap is inclusive: four days is the documented limit."""
+        assert self._legs(self._forecaster(), [0, 4]) == [96]
+
+    def test_five_day_gap_is_dropped(self):
+        assert self._legs(self._forecaster(), [0, 5]) == []
+
+    def test_long_gap_is_dropped(self):
+        """The 71-day gaps in the real record must never become one leg."""
+        assert self._legs(self._forecaster(), [0, 30]) == []
+
+    def test_elapsed_time_is_judged_by_date_not_row_count(self):
+        """
+        Missing weather hours are absent rows, so a sparse long leg can have
+        few rows. It must still be excluded on elapsed time.
+        """
+        five_days = pd.date_range("2026-01-01 07:00", periods=120, freq="h")
+        keep = set(five_days[:90])
+        sparse = self._forecaster(drop=[t for t in five_days if t not in keep])
+        # Only 90 weather rows across the 5-day leg - under a 96-row ceiling.
+        assert len(sparse._get_weather_for_period(
+            pd.Timestamp("2026-01-01 07:00"), pd.Timestamp("2026-01-06 07:00"))) == 90
+        assert self._legs(sparse, [0, 5]) == []
+
+    def test_leg_missing_a_few_hours_is_still_kept(self):
+        missing = pd.date_range("2026-01-01 10:00", periods=3, freq="h")
+        f = self._forecaster(drop=list(missing))
+        assert self._legs(f, [0, 1]) == [21]
+
+    def test_leg_missing_most_hours_is_dropped(self):
+        missing = pd.date_range("2026-01-01 08:00", periods=20, freq="h")
+        f = self._forecaster(drop=list(missing))
+        assert self._legs(f, [0, 1]) == []
+
+    def test_gap_only_drops_that_leg_not_the_readings_around_it(self):
+        """A reading after a gap still anchors the next day's leg."""
+        assert self._legs(self._forecaster(), [0, 1, 20, 21]) == [24, 24]
+
+    def test_pairs_are_consecutive_so_no_reading_is_skipped_over(self):
+        days = [0, 1, 2, 3, 4]
+        f = self._forecaster()
+        pairs = f._training_pairs(self._readings(days))
+        starts = [p["start_water"] for p in pairs]
+        assert starts == [10.0 + 0.1 * d for d in days[:-1]]
