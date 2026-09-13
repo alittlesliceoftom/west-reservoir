@@ -1331,6 +1331,7 @@ def page_accuracy():
         source_label = st.radio(
             "Comparison",
             ["Stored forecasts", "Model replay (current model)"],
+            index=1,
             horizontal=True,
             help=(
                 "Stored forecasts: the forecasts we actually published, scored "
