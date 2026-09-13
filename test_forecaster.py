@@ -5,7 +5,15 @@ import pandas as pd
 import pytest
 from datetime import datetime, timedelta
 
-from forecaster import WaterTempForecaster, WEATHER_COLUMNS
+from forecaster import (
+    FIT_NOT_RUN,
+    FIT_NO_WEATHER,
+    FIT_OK,
+    FIT_TOO_FEW_PAIRS,
+    FIT_TOO_FEW_READINGS,
+    WEATHER_COLUMNS,
+    WaterTempForecaster,
+)
 
 
 # What predict_forward hands its callers. Asserted as a set: order is not part
@@ -631,3 +639,71 @@ class TestTrainingPairs:
         pairs = f._training_pairs(self._readings(days))
         starts = [p["start_water"] for p in pairs]
         assert starts == [10.0 + 0.1 * d for d in days[:-1]]
+
+
+class TestFitReportsOutcome:
+    """A model that never fitted must not look like one that did."""
+
+    def _weather(self, n_days=40):
+        return _make_hourly_weather(datetime(2026, 1, 1, 0), n_days * 24, air_temp=14.0)
+
+    def _readings(self, n, step_days=1):
+        return pd.DataFrame({
+            "date": [pd.Timestamp("2026-01-01") + timedelta(days=i * step_days)
+                     for i in range(n)],
+            "water_temp": [10.0 + 0.1 * i for i in range(n)],
+            "source": ["MEASURED"] * n,
+        })
+
+    def test_a_new_model_reports_not_fitted(self):
+        assert WaterTempForecaster().fit_status == FIT_NOT_RUN
+
+    def test_constructing_with_coefficients_is_not_fitting(self):
+        """Rebuilding from cached coefficients did not run a fit here."""
+        f = WaterTempForecaster(k_air=0.03, k_solar=4e-4, k_cool=0.02)
+        assert f.fit_status == FIT_NOT_RUN
+
+    def test_successful_fit_reports_ok_and_returns_true(self):
+        f = WaterTempForecaster()
+        f.set_hourly_weather(self._weather())
+        assert f.fit(self._readings(30)) is True
+        assert f.fit_status == FIT_OK
+
+    def test_no_weather_is_reported(self):
+        f = WaterTempForecaster()
+        assert f.fit(self._readings(30)) is False
+        assert f.fit_status == FIT_NO_WEATHER
+
+    def test_too_few_readings_is_reported(self):
+        f = WaterTempForecaster()
+        f.set_hourly_weather(self._weather())
+        assert f.fit(self._readings(5)) is False
+        assert f.fit_status == FIT_TOO_FEW_READINGS
+
+    def test_too_few_usable_legs_is_reported(self):
+        """Plenty of readings, but every leg spans more than the cap."""
+        f = WaterTempForecaster()
+        f.set_hourly_weather(self._weather(n_days=400))
+        assert f.fit(self._readings(20, step_days=10)) is False
+        assert f.fit_status == FIT_TOO_FEW_PAIRS
+
+    def test_coefficients_are_untouched_when_fitting_fails(self):
+        f = WaterTempForecaster(k_air=0.03, k_solar=4e-4, k_cool=0.02)
+        before = (f.k_air, f.k_solar, f.k_cool)
+        assert f.fit(self._readings(3)) is False
+        assert (f.k_air, f.k_solar, f.k_cool) == before
+
+    def test_defaults_are_distinguishable_from_a_fit_that_landed_on_them(self):
+        """
+        The failure this guards: a silent bail leaves the constructor defaults
+        in place, which previously could not be told apart from a real fit.
+        """
+        failed = WaterTempForecaster()
+        failed.fit(self._readings(3))
+
+        fitted = WaterTempForecaster()
+        fitted.set_hourly_weather(self._weather())
+        fitted.fit(self._readings(30))
+
+        assert failed.fit_status != fitted.fit_status
+        assert fitted.fit_status == FIT_OK

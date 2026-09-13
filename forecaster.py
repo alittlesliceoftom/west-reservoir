@@ -14,6 +14,19 @@ WEATHER_COLUMNS = ("air_temp", "shortwave_radiation", "cloud_cover")
 MIN_TRAINING_LEG_ROWS = 20   # completeness: a 24h leg may be missing a few hours
 MAX_TRAINING_LEG_DAYS = 4    # elapsed time: how far apart the readings may be
 
+MIN_TRAINING_READINGS = 10
+MIN_TRAINING_PAIRS = 5
+
+# Why fit() did or did not fit. A model that never fitted still holds the
+# coefficients it was constructed with, so the two are indistinguishable from
+# the outside unless it says so.
+FIT_OK = "fitted"
+FIT_NO_WEATHER = "no hourly weather set"
+FIT_TOO_FEW_READINGS = f"fewer than {MIN_TRAINING_READINGS} measured readings"
+FIT_TOO_FEW_PAIRS = f"fewer than {MIN_TRAINING_PAIRS} usable training legs"
+FIT_NOT_CONVERGED = "optimiser did not converge"
+FIT_NOT_RUN = "not fitted"
+
 
 class WaterTempForecaster:
     """
@@ -58,6 +71,10 @@ class WaterTempForecaster:
         self.k_solar = k_solar
         self.k_cool = k_cool
         self.hourly_weather: Optional[pd.DataFrame] = None
+        # Constructing with explicit coefficients is not fitting: a model built
+        # from previously fitted values reports FIT_NOT_RUN, because this one
+        # did not run a fit. Callers that care are asking about this object.
+        self.fit_status: str = FIT_NOT_RUN
 
     @property
     def k(self) -> float:
@@ -184,26 +201,42 @@ class WaterTempForecaster:
             for i in usable
         ]
 
-    def fit(self, temperatures: pd.DataFrame) -> None:
+    def fit(self, temperatures: pd.DataFrame) -> bool:
         """
         Fit k_air, k_solar, k_cool against measured water temperatures.
 
+        Fitting can fail for want of weather, readings or usable training legs,
+        or because the optimiser does not converge. In every such case the
+        coefficients are left exactly as they were, which for a freshly
+        constructed model means the defaults - a model that never fitted looks
+        identical to one that did. So the outcome is returned, and recorded on
+        `fit_status`, and callers that will act on the coefficients should check
+        it. Failure is reported, not raised: a forecast page should be able to
+        call this without wrapping it.
+
         Args:
             temperatures: DataFrame with columns: date, water_temp, source
+
+        Returns:
+            True if the coefficients were updated. On False, `fit_status` says
+            why and the coefficients are unchanged.
         """
         if self.hourly_weather is None:
-            return
+            self.fit_status = FIT_NO_WEATHER
+            return False
 
         training_data = temperatures[temperatures["source"] == "MEASURED"].copy()
-        if len(training_data) < 10:
-            return
+        if len(training_data) < MIN_TRAINING_READINGS:
+            self.fit_status = FIT_TOO_FEW_READINGS
+            return False
 
         training_data = training_data.sort_values("date").reset_index(drop=True)
 
         training_pairs = self._training_pairs(training_data)
 
-        if len(training_pairs) < 5:
-            return
+        if len(training_pairs) < MIN_TRAINING_PAIRS:
+            self.fit_status = FIT_TOO_FEW_PAIRS
+            return False
 
         def objective(params):
             k_air, k_solar, k_cool = params
@@ -231,8 +264,13 @@ class WaterTempForecaster:
         initial_guess = [self.k_air, self.k_solar, self.k_cool]
         result = minimize(objective, initial_guess, bounds=bounds, method="L-BFGS-B")
 
-        if result.success:
-            self.k_air, self.k_solar, self.k_cool = (float(x) for x in result.x)
+        if not result.success:
+            self.fit_status = FIT_NOT_CONVERGED
+            return False
+
+        self.k_air, self.k_solar, self.k_cool = (float(x) for x in result.x)
+        self.fit_status = FIT_OK
+        return True
 
     def predict_forward(
         self,
