@@ -27,7 +27,7 @@ from data import (
     deduplicate_temperatures,
     DataLoadError,
 )
-from forecaster import WaterTempForecaster
+from forecaster import FIT_OK, WaterTempForecaster
 from config import ENABLE_MOTHERDUCK
 from quotes import QUOTES
 from accuracy import (
@@ -367,6 +367,12 @@ def display_debug_panel(
             st.metric("Hourly Air Temps", len(hourly_air_temps))
 
         st.subheader("Model Parameters")
+        if forecaster.fit_status != FIT_OK:
+            st.warning(
+                f"These are not fitted coefficients: {forecaster.fit_status}. "
+                "The model is running on its defaults, so the forecast below "
+                "is not calibrated to the measured record."
+            )
         st.write(f"**k_air (conduction)**: {forecaster.k_air:.4f} per hour")
         st.write(f"**k_solar (shortwave heating)**: {forecaster.k_solar:.6f} °C per (W/m²) per hour")
         st.write(f"**k_cool (clear-sky cooling)**: {forecaster.k_cool:.4f} °C per hour at fully clear sky")
