@@ -1,0 +1,16 @@
+{
+  "_comment": "Starting coefficients for WaterTempForecaster, used when a model is constructed without them and when a fit fails. Refit from the measured record and update this file; the fit is the source of truth, this is only where it is written down.",
+  "fitted_at": "2026-09-13",
+  "fitted_on": {
+    "readings": 392,
+    "first_reading": "2024-11-05",
+    "last_reading": "2026-09-13",
+    "training_legs": 375
+  },
+  "coefficients": {
+    "k_air": 0.00738795,
+    "k_solar": 0.0000839492,
+    "k_cool": 0.00820885
+  },
+  "daily_air_response": 0.163
+}
