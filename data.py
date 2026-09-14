@@ -199,18 +199,6 @@ def _parse_open_meteo_daily(
     return df.sort_values("date").reset_index(drop=True)
 
 
-def load_historical_air_temps(start_date: datetime, end_date: datetime) -> pd.DataFrame:
-    """Historical daily air temperature from the Open-Meteo archive."""
-    payload = _fetch_archive(start_date, end_date)
-    return _parse_open_meteo_daily(payload, start_date, end_date)
-
-
-def load_hourly_air_temps(start_date: datetime, end_date: datetime) -> pd.DataFrame:
-    """Historical hourly air temperature from the Open-Meteo archive."""
-    payload = _fetch_archive(start_date, end_date)
-    return _parse_open_meteo_hourly(payload, fields={"temperature_2m": "air_temp"})
-
-
 def load_forecast_air_temps(days: int = 5) -> pd.DataFrame:
     """
     Load future air temperature forecast from OpenWeatherMap.
@@ -342,11 +330,6 @@ def _parse_open_meteo_hourly(
         raise DataLoadError("Open-Meteo response contained no valid hourly rows")
 
     return df.sort_values("datetime").reset_index(drop=True)
-
-
-def load_historical_solar_cloud(start_date: datetime, end_date: datetime) -> pd.DataFrame:
-    """Historical hourly shortwave radiation and cloud cover from Open-Meteo."""
-    return _parse_open_meteo_hourly(_fetch_archive(start_date, end_date))
 
 
 def load_forecast_solar_cloud(days: int = 5) -> pd.DataFrame:
