@@ -134,3 +134,10 @@ prompt_stash.txt
 
 # Equivalence-check artefacts
 debug/equivalence/
+
+# Local-only scratch that must never be committed
+env-py310-backup/
+.claude/
+.agents/
+.entire/
+.plans/
