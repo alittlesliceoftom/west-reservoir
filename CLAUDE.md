@@ -180,6 +180,13 @@ temperatures = pd.DataFrame({
   Kept as a fallback, not called by the app
 - All functions raise explicit errors with helpful messages
 
+#### `ingest.py`
+- `ingest()` - Fetch the trailing window of observed weather and upsert it into
+  MotherDuck. Run hourly by `.github/workflows/ingest-weather.yml`; the app
+  reads the table rather than calling Open-Meteo in the request path
+- Re-fetches 10 days because the archive is ERA5T and its most recent 6 days
+  are preliminary and get revised. Overwrites, never appends
+
 #### `forecaster.py`
 - `WaterTempForecaster` class with a three-term hourly physics model
 - Per hour:
