@@ -35,6 +35,7 @@ from data import (
     load_historical_solar_cloud,
     load_hourly_air_temps,
     load_water_temps,
+    today_utc,
 )
 
 pytestmark = pytest.mark.freshness
@@ -79,19 +80,19 @@ class TestHistoricalSources:
         _assert_fresh(df["date"].max(), "water_temps", "Water temperature (Google Sheets)")
 
     def test_hourly_air_temps_are_current(self):
-        end = pd.Timestamp.now().normalize()
+        end = today_utc()
         df = load_hourly_air_temps(end - pd.Timedelta(days=10), end)
         assert not df.empty, "Open-Meteo archive returned no hourly air temperatures"
         _assert_fresh(df["datetime"].max(), "hourly_air", "Hourly air temp (Open-Meteo archive)")
 
     def test_daily_air_temps_are_current(self):
-        end = pd.Timestamp.now().normalize()
+        end = today_utc()
         df = load_historical_air_temps(end - pd.Timedelta(days=10), end)
         assert not df.empty, "Open-Meteo archive returned no daily air temperatures"
         _assert_fresh(df["date"].max(), "daily_air", "Daily air temp (Open-Meteo archive)")
 
     def test_historical_solar_cloud_is_current(self):
-        end = pd.Timestamp.now().normalize()
+        end = today_utc()
         df = load_historical_solar_cloud(end - pd.Timedelta(days=10), end)
         assert not df.empty, "Open-Meteo archive returned no solar/cloud rows"
         _assert_fresh(df["datetime"].max(), "solar_cloud", "Solar/cloud (Open-Meteo archive)")

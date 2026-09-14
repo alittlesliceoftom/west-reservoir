@@ -24,6 +24,7 @@ from data import (
     MAX_INTERPOLATION_HOURS,
     _parse_open_meteo_hourly,
     DataLoadError,
+    today_utc,
 )
 from forecaster import WaterTempForecaster
 
@@ -1250,3 +1251,24 @@ class TestInterpolateRejectsMergedRuns:
 
         assert len(result) == 4
         assert result["air_temp"].tolist() == [12.0, 13.0, 14.0, 15.0]
+
+
+class TestTodayUtc:
+    """today_utc() must track the UTC date, not the local one."""
+
+    def test_returns_previous_day_during_bst_early_morning(self, monkeypatch):
+        # 2026-06-15 00:30 BST (UTC+1) is still 2026-06-14 in UTC.
+        fake_now_utc = pd.Timestamp("2026-06-14 23:30", tz="UTC")
+        real_now = pd.Timestamp.now
+
+        def fake_now(tz=None, *args, **kwargs):
+            if tz is not None:
+                return fake_now_utc.tz_convert(tz)
+            return real_now(*args, **kwargs)
+
+        monkeypatch.setattr(pd.Timestamp, "now", fake_now)
+
+        result = today_utc()
+
+        assert result == pd.Timestamp("2026-06-14")
+        assert result.tzinfo is None
