@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import pytest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from datetime import datetime, timedelta
 
@@ -536,3 +536,62 @@ class TestDashboardModel:
 
         recovered = dashboard_model(self._measured(30), weather)
         assert recovered.fit_status == FIT_OK
+
+
+class TestArchiveIsFetchedOnce:
+    """
+    The consolidation lives in the call sites, not in data.py.
+
+    data.py's own test proves one request per call to load_historical_weather.
+    This proves the app asks once for all three measures, which is the part
+    that actually broke prod - three cache entries meant three chances to hang.
+    """
+
+    def _archive_payload(self, hours=48):
+        times = pd.date_range("2026-05-01", periods=hours, freq="h")
+        days = sorted({t.date().isoformat() for t in times})
+        return {
+            "hourly": {
+                "time": [t.isoformat(timespec="minutes") for t in times],
+                "temperature_2m": [12.0 + (i % 6) for i in range(hours)],
+                "shortwave_radiation": [float(100 * (i % 12)) for i in range(hours)],
+                "cloud_cover": [float(50 + i % 40) for i in range(hours)],
+            },
+            "daily": {
+                "time": days,
+                "temperature_2m_mean": [13.0] * len(days),
+                "temperature_2m_min": [9.0] * len(days),
+                "temperature_2m_max": [17.0] * len(days),
+            },
+        }
+
+    @patch("data.requests.get")
+    def test_fitting_makes_one_archive_request_for_all_three_measures(self, mock_get):
+        import streamlit as st
+
+        from app import cached_fitted_model_coefficients
+
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = self._archive_payload()
+        mock_get.return_value = resp
+
+        st.cache_data.clear()
+        water_temps = pd.DataFrame({
+            "date": pd.to_datetime(["2026-05-01", "2026-05-02"]),
+            "water_temp": [11.0, 11.4],
+        })
+
+        cached_fitted_model_coefficients(
+            water_temps, pd.Timestamp("2026-05-01"), pd.Timestamp("2026-05-02")
+        )
+
+        assert mock_get.call_count == 1, (
+            "the app must ask the archive once; three cached loaders meant "
+            "three chances to hang"
+        )
+        params = mock_get.call_args[1]["params"]
+        assert params["hourly"] == "temperature_2m,shortwave_radiation,cloud_cover"
+        assert "daily" in params
+        st.cache_data.clear()
