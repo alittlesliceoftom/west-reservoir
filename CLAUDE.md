@@ -169,8 +169,10 @@ temperatures = pd.DataFrame({
 
 #### `data.py`
 - `load_water_temps()` - Load from Google Sheets or raise `DataLoadError`
-- `load_historical_air_temps()` - Load daily air temps from Open-Meteo archive or raise `DataLoadError`
-- `load_hourly_air_temps()` - Load hourly air temps from Open-Meteo archive or raise `DataLoadError`
+- `load_historical_weather()` - Load every historical model input (daily air
+  min/mean/max, hourly air, shortwave radiation, cloud cover) from the
+  Open-Meteo archive in ONE request, retried once. Returns `daily_air`,
+  `hourly_air` and `solar_cloud` frames, or raises `DataLoadError`
 - `load_forecast_weather()` - Load the hourly forecast for every model input
   (air temp, shortwave radiation, cloud cover) from Open-Meteo in ONE call.
   This is the live path

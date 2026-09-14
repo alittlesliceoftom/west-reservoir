@@ -5,7 +5,7 @@ import sys
 sys.path.insert(0, '/Users/asliceoftom/Documents/projects/claude/project-1-west-res')
 
 # Import after path is set
-from data import load_water_temps, load_historical_air_temps, load_hourly_air_temps, load_forecast_air_temps, DataLoadError
+from data import load_water_temps, load_historical_weather, load_forecast_air_temps, DataLoadError
 from forecaster import WaterTempForecaster
 
 today = datetime.now().date()
@@ -15,8 +15,9 @@ print(f"Today: {today}\n")
 water_temps = load_water_temps()
 start_date = pd.Timestamp(water_temps["date"].min()).normalize()
 end_date = pd.Timestamp.now().normalize()
-air_temps_hist = load_historical_air_temps(start_date, end_date)
-hourly_air_temps = load_hourly_air_temps(start_date, end_date)
+_archive = load_historical_weather(start_date, end_date)
+air_temps_hist = _archive["daily_air"]
+hourly_air_temps = _archive["hourly_air"]
 
 # Fill missing daily temps from hourly
 hourly_daily_stats = (

@@ -30,10 +30,8 @@ from config import ENABLE_MOTHERDUCK
 from data import (
     DataLoadError,
     load_forecast_air_temps,
+    load_historical_weather,
     load_forecast_solar_cloud,
-    load_historical_air_temps,
-    load_historical_solar_cloud,
-    load_hourly_air_temps,
     load_water_temps,
     today_utc,
 )
@@ -79,23 +77,18 @@ class TestHistoricalSources:
         assert not df.empty, "Google Sheets returned no water temperature rows"
         _assert_fresh(df["date"].max(), "water_temps", "Water temperature (Google Sheets)")
 
-    def test_hourly_air_temps_are_current(self):
+    def test_archive_sources_are_current(self):
+        """One request now serves all three, so one test checks all three."""
         end = today_utc()
-        df = load_hourly_air_temps(end - pd.Timedelta(days=10), end)
-        assert not df.empty, "Open-Meteo archive returned no hourly air temperatures"
-        _assert_fresh(df["datetime"].max(), "hourly_air", "Hourly air temp (Open-Meteo archive)")
+        archive = load_historical_weather(end - pd.Timedelta(days=10), end)
 
-    def test_daily_air_temps_are_current(self):
-        end = today_utc()
-        df = load_historical_air_temps(end - pd.Timedelta(days=10), end)
-        assert not df.empty, "Open-Meteo archive returned no daily air temperatures"
-        _assert_fresh(df["date"].max(), "daily_air", "Daily air temp (Open-Meteo archive)")
+        assert not archive["hourly_air"].empty, "Open-Meteo archive returned no hourly air temperatures"
+        assert not archive["daily_air"].empty, "Open-Meteo archive returned no daily air temperatures"
+        assert not archive["solar_cloud"].empty, "Open-Meteo archive returned no solar/cloud rows"
 
-    def test_historical_solar_cloud_is_current(self):
-        end = today_utc()
-        df = load_historical_solar_cloud(end - pd.Timedelta(days=10), end)
-        assert not df.empty, "Open-Meteo archive returned no solar/cloud rows"
-        _assert_fresh(df["datetime"].max(), "solar_cloud", "Solar/cloud (Open-Meteo archive)")
+        _assert_fresh(archive["hourly_air"]["datetime"].max(), "hourly_air", "Hourly air temp (Open-Meteo archive)")
+        _assert_fresh(archive["daily_air"]["date"].max(), "daily_air", "Daily air temp (Open-Meteo archive)")
+        _assert_fresh(archive["solar_cloud"]["datetime"].max(), "solar_cloud", "Solar/cloud (Open-Meteo archive)")
 
 
 class TestForecastSources:

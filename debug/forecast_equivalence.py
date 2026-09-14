@@ -47,9 +47,7 @@ def capture():
         build_temperatures_frame,
         combine_hourly_temps,
         load_forecast_weather,
-        load_historical_air_temps,
-        load_historical_solar_cloud,
-        load_hourly_air_temps,
+        load_historical_weather,
         load_water_temps,
     )
 
@@ -57,9 +55,10 @@ def capture():
     start = pd.Timestamp(water_temps["date"].min()).normalize()
     end = pd.Timestamp.now().normalize()
 
-    air_hist = load_historical_air_temps(start, end)
-    hourly_air = load_hourly_air_temps(start, end)
-    solar_hist = load_historical_solar_cloud(start, end)
+    archive = load_historical_weather(start, end)
+    air_hist = archive["daily_air"]
+    hourly_air = archive["hourly_air"]
+    solar_hist = archive["solar_cloud"]
     forecast_weather = load_forecast_weather(days=FORECAST_DAYS)
 
     temperatures = build_temperatures_frame(water_temps, air_hist)
