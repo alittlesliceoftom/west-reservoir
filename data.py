@@ -2,6 +2,7 @@
 
 import pandas as pd
 import requests
+import time
 from datetime import datetime
 from io import StringIO
 from typing import Optional
@@ -89,45 +90,86 @@ def load_water_temps() -> pd.DataFrame:
         raise DataLoadError(f"Error processing Google Sheets data: {e}")
 
 
-def load_historical_air_temps(start_date: datetime, end_date: datetime) -> pd.DataFrame:
+ARCHIVE_TIMEOUT = 15
+ARCHIVE_RETRY_BACKOFF = 2.0
+
+_ARCHIVE_HOURLY = "temperature_2m,shortwave_radiation,cloud_cover"
+_ARCHIVE_DAILY = "temperature_2m_mean,temperature_2m_min,temperature_2m_max"
+
+
+def _fetch_archive(start_date: datetime, end_date: datetime) -> dict:
     """
-    Load historical daily air temperature from the Open-Meteo archive.
+    One archive request for every historical variable the model needs.
 
-    Previously sourced from Meteostat, which stopped returning data for every
-    London station in March 2026 (see issue #33). Open-Meteo is already used
-    for solar and cloud, so this adds no new dependency.
-
-    Args:
-        start_date: Start date for historical data
-        end_date: End date for historical data
-
-    Returns:
-        pd.DataFrame: DataFrame with 'date', 'air_temp', 'air_temp_min', 'air_temp_max' columns
-
-    Raises:
-        DataLoadError: If data cannot be loaded
+    Open-Meteo accepts hourly and daily blocks in the same call, so this is one
+    network round trip rather than three. It hangs intermittently - three
+    separate calls meant three chances to take the dashboard down - so a single
+    hang is retried once. A 429 is not retried: Open-Meteo sends no rate-limit
+    headers, so retrying a throttle immediately would only deepen it.
     """
     params = {
         "latitude": RESERVOIR_LAT,
         "longitude": RESERVOIR_LON,
         "start_date": pd.Timestamp(start_date).date().isoformat(),
         "end_date": pd.Timestamp(end_date).date().isoformat(),
-        "daily": "temperature_2m_mean,temperature_2m_min,temperature_2m_max",
+        "hourly": _ARCHIVE_HOURLY,
+        "daily": _ARCHIVE_DAILY,
         "timezone": "UTC",
     }
 
-    try:
-        response = requests.get(OPEN_METEO_ARCHIVE_URL, params=params, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        payload = response.json()
+    last_error = None
+    for attempt in range(2):
+        try:
+            response = requests.get(
+                OPEN_METEO_ARCHIVE_URL, params=params, timeout=ARCHIVE_TIMEOUT
+            )
+            if response.status_code == 429:
+                raise DataLoadError(
+                    "Open-Meteo rate limited the archive request (429)"
+                )
+            response.raise_for_status()
+            return response.json()
 
-    except requests.exceptions.Timeout:
-        raise DataLoadError(
-            f"Request to Open-Meteo archive timed out after {REQUEST_TIMEOUT} seconds"
-        )
-    except requests.exceptions.RequestException as e:
-        raise DataLoadError(f"Failed to fetch historical air temps from Open-Meteo: {e}")
+        except DataLoadError:
+            raise
+        except requests.exceptions.Timeout:
+            last_error = DataLoadError(
+                f"Request to Open-Meteo archive timed out after "
+                f"{ARCHIVE_TIMEOUT} seconds"
+            )
+        except requests.exceptions.RequestException as e:
+            last_error = DataLoadError(
+                f"Failed to fetch historical weather from Open-Meteo: {e}"
+            )
 
+        if attempt == 0:
+            time.sleep(ARCHIVE_RETRY_BACKOFF)
+
+    raise last_error
+
+
+def load_historical_weather(start_date: datetime, end_date: datetime) -> dict:
+    """
+    Every historical input the model needs, from a single archive request.
+
+    Returns:
+        dict with 'daily_air', 'hourly_air' and 'solar_cloud' DataFrames,
+        shaped exactly as the three loaders below return them.
+    """
+    payload = _fetch_archive(start_date, end_date)
+    return {
+        "daily_air": _parse_open_meteo_daily(payload, start_date, end_date),
+        "hourly_air": _parse_open_meteo_hourly(
+            payload, fields={"temperature_2m": "air_temp"}
+        ),
+        "solar_cloud": _parse_open_meteo_hourly(payload),
+    }
+
+
+def _parse_open_meteo_daily(
+    payload: dict, start_date: datetime, end_date: datetime
+) -> pd.DataFrame:
+    """Parse the daily block into date/air_temp/air_temp_min/air_temp_max."""
     daily = payload.get("daily")
     if not daily:
         raise DataLoadError(
@@ -157,47 +199,16 @@ def load_historical_air_temps(start_date: datetime, end_date: datetime) -> pd.Da
     return df.sort_values("date").reset_index(drop=True)
 
 
+def load_historical_air_temps(start_date: datetime, end_date: datetime) -> pd.DataFrame:
+    """Historical daily air temperature from the Open-Meteo archive."""
+    payload = _fetch_archive(start_date, end_date)
+    return _parse_open_meteo_daily(payload, start_date, end_date)
+
+
 def load_hourly_air_temps(start_date: datetime, end_date: datetime) -> pd.DataFrame:
-    """
-    Load historical hourly air temperature from the Open-Meteo archive.
-
-    Previously sourced from Meteostat, which stopped returning data for every
-    London station in March 2026 (see issue #33).
-
-    Args:
-        start_date: Start datetime for historical data
-        end_date: End datetime for historical data
-
-    Returns:
-        pd.DataFrame: DataFrame with 'datetime' and 'air_temp' columns
-
-    Raises:
-        DataLoadError: If data cannot be loaded
-    """
-    params = {
-        "latitude": RESERVOIR_LAT,
-        "longitude": RESERVOIR_LON,
-        "start_date": pd.Timestamp(start_date).date().isoformat(),
-        "end_date": pd.Timestamp(end_date).date().isoformat(),
-        "hourly": "temperature_2m",
-        "timezone": "UTC",
-    }
-
-    try:
-        response = requests.get(OPEN_METEO_ARCHIVE_URL, params=params, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        return _parse_open_meteo_hourly(
-            response.json(), fields={"temperature_2m": "air_temp"}
-        )
-
-    except DataLoadError:
-        raise
-    except requests.exceptions.Timeout:
-        raise DataLoadError(
-            f"Request to Open-Meteo archive timed out after {REQUEST_TIMEOUT} seconds"
-        )
-    except requests.exceptions.RequestException as e:
-        raise DataLoadError(f"Failed to fetch hourly air temps from Open-Meteo: {e}")
+    """Historical hourly air temperature from the Open-Meteo archive."""
+    payload = _fetch_archive(start_date, end_date)
+    return _parse_open_meteo_hourly(payload, fields={"temperature_2m": "air_temp"})
 
 
 def load_forecast_air_temps(days: int = 5) -> pd.DataFrame:
@@ -334,43 +345,8 @@ def _parse_open_meteo_hourly(
 
 
 def load_historical_solar_cloud(start_date: datetime, end_date: datetime) -> pd.DataFrame:
-    """
-    Load historical hourly shortwave radiation and cloud cover from Open-Meteo.
-
-    Args:
-        start_date: Start datetime for historical data (inclusive)
-        end_date: End datetime for historical data (inclusive)
-
-    Returns:
-        pd.DataFrame: columns 'datetime', 'shortwave_radiation' (W/m^2), 'cloud_cover' (%)
-
-    Raises:
-        DataLoadError: If data cannot be loaded
-    """
-    params = {
-        "latitude": RESERVOIR_LAT,
-        "longitude": RESERVOIR_LON,
-        "start_date": pd.Timestamp(start_date).date().isoformat(),
-        "end_date": pd.Timestamp(end_date).date().isoformat(),
-        "hourly": "shortwave_radiation,cloud_cover",
-        "timezone": "UTC",
-    }
-
-    try:
-        response = requests.get(OPEN_METEO_ARCHIVE_URL, params=params, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        return _parse_open_meteo_hourly(response.json())
-
-    except DataLoadError:
-        raise
-    except requests.exceptions.Timeout:
-        raise DataLoadError(
-            f"Request to Open-Meteo archive timed out after {REQUEST_TIMEOUT} seconds"
-        )
-    except requests.exceptions.RequestException as e:
-        raise DataLoadError(f"Failed to fetch historical solar/cloud from Open-Meteo: {e}")
-    except Exception as e:
-        raise DataLoadError(f"Error processing Open-Meteo archive response: {e}")
+    """Historical hourly shortwave radiation and cloud cover from Open-Meteo."""
+    return _parse_open_meteo_hourly(_fetch_archive(start_date, end_date))
 
 
 def load_forecast_solar_cloud(days: int = 5) -> pd.DataFrame:

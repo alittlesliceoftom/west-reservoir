@@ -18,6 +18,7 @@ from data import (
     load_forecast_solar_cloud,
     load_historical_air_temps,
     load_historical_solar_cloud,
+    load_historical_weather,
     load_hourly_air_temps,
     load_water_temps,
     select_storable_predictions,
@@ -860,7 +861,7 @@ class TestLoadHistoricalAirTemps:
         resp.raise_for_status.side_effect = requests.exceptions.HTTPError("503")
         mock_get.return_value = resp
 
-        with pytest.raises(DataLoadError, match="Failed to fetch historical air temps"):
+        with pytest.raises(DataLoadError, match="Failed to fetch historical weather"):
             load_historical_air_temps(datetime(2026, 5, 1), datetime(2026, 5, 2))
 
 
@@ -887,7 +888,7 @@ class TestLoadHourlyAirTemps:
         assert df["datetime"].iloc[0] == pd.Timestamp("2026-05-01 00:00")
 
         params = mock_get.call_args[1]["params"]
-        assert params["hourly"] == "temperature_2m"
+        assert params["hourly"] == "temperature_2m,shortwave_radiation,cloud_cover"
 
     @patch("data.requests.get")
     def test_missing_hourly_block_errors(self, mock_get):
@@ -909,7 +910,7 @@ class TestLoadHourlyAirTemps:
         resp.raise_for_status.side_effect = requests.exceptions.HTTPError("500")
         mock_get.return_value = resp
 
-        with pytest.raises(DataLoadError, match="Failed to fetch hourly air temps"):
+        with pytest.raises(DataLoadError, match="Failed to fetch historical weather"):
             load_hourly_air_temps(datetime(2026, 5, 1), datetime(2026, 5, 1))
 
 
@@ -1272,3 +1273,76 @@ class TestTodayUtc:
 
         assert result == pd.Timestamp("2026-06-14")
         assert result.tzinfo is None
+
+
+class TestLoadHistoricalWeather:
+    """One archive request for every historical model input."""
+
+    def _payload(self):
+        return {
+            "hourly": {
+                "time": ["2026-05-01T00:00", "2026-05-01T01:00"],
+                "temperature_2m": [12.0, 14.5],
+                "shortwave_radiation": [0.0, 30.0],
+                "cloud_cover": [80, 75],
+            },
+            "daily": {
+                "time": ["2026-05-01"],
+                "temperature_2m_mean": [13.2],
+                "temperature_2m_min": [9.1],
+                "temperature_2m_max": [17.4],
+            },
+        }
+
+    @patch("data.requests.get")
+    def test_one_request_returns_all_three_frames(self, mock_get):
+        """The whole point: three network calls collapsed into one."""
+        mock_get.return_value = _response(payload=self._payload())
+
+        result = load_historical_weather(datetime(2026, 5, 1), datetime(2026, 5, 1))
+
+        assert mock_get.call_count == 1
+        assert set(result) == {"daily_air", "hourly_air", "solar_cloud"}
+        assert list(result["hourly_air"].columns) == ["datetime", "air_temp"]
+        assert result["daily_air"]["air_temp_max"].iloc[0] == pytest.approx(17.4)
+        assert result["solar_cloud"]["cloud_cover"].iloc[0] == 80
+
+        params = mock_get.call_args[1]["params"]
+        assert params["hourly"] == "temperature_2m,shortwave_radiation,cloud_cover"
+        assert params["daily"] == "temperature_2m_mean,temperature_2m_min,temperature_2m_max"
+
+    @patch("data.time.sleep")
+    @patch("data.requests.get")
+    def test_a_single_hang_is_retried(self, mock_get, mock_sleep):
+        mock_get.side_effect = [
+            requests.exceptions.Timeout(),
+            _response(payload=self._payload()),
+        ]
+
+        result = load_historical_weather(datetime(2026, 5, 1), datetime(2026, 5, 1))
+
+        assert mock_get.call_count == 2
+        assert not result["hourly_air"].empty
+
+    @patch("data.time.sleep")
+    @patch("data.requests.get")
+    def test_two_hangs_give_up(self, mock_get, mock_sleep):
+        mock_get.side_effect = requests.exceptions.Timeout()
+
+        with pytest.raises(DataLoadError, match="timed out"):
+            load_historical_weather(datetime(2026, 5, 1), datetime(2026, 5, 1))
+
+        assert mock_get.call_count == 2
+
+    @patch("data.time.sleep")
+    @patch("data.requests.get")
+    def test_a_rate_limit_is_not_retried(self, mock_get, mock_sleep):
+        """Retrying a throttle immediately would only deepen it."""
+        resp = MagicMock()
+        resp.status_code = 429
+        mock_get.return_value = resp
+
+        with pytest.raises(DataLoadError, match="rate limited"):
+            load_historical_weather(datetime(2026, 5, 1), datetime(2026, 5, 1))
+
+        assert mock_get.call_count == 1

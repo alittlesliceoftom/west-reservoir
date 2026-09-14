@@ -11,9 +11,7 @@ warnings.filterwarnings("ignore", message=".*DatetimeProperties.to_pydatetime.*"
 
 from data import (
     load_water_temps,
-    load_historical_air_temps,
-    load_hourly_air_temps,
-    load_historical_solar_cloud,
+    load_historical_weather,
     load_forecast_weather,
     daily_from_hourly_forecast,
     interpolate_to_hourly,
@@ -66,9 +64,7 @@ FORECAST_DAYS = 5
 _cached = st.cache_data(ttl=CACHE_TTL)
 
 cached_load_water_temps = _cached(load_water_temps)
-cached_load_historical_air_temps = _cached(load_historical_air_temps)
-cached_load_hourly_air_temps = _cached(load_hourly_air_temps)
-cached_load_historical_solar_cloud = _cached(load_historical_solar_cloud)
+cached_load_historical_weather = _cached(load_historical_weather)
 cached_load_forecast_weather = _cached(load_forecast_weather)
 
 
@@ -124,14 +120,10 @@ def cached_fitted_model_coefficients(water_temps, start_date, end_date):
     Returns:
         (k_air, k_solar, k_cool) - a tuple, so it is hashable as a cache key.
     """
-    hourly_air = cached_load_hourly_air_temps(start_date, end_date)
-
-    try:
-        solar_hist = cached_load_historical_solar_cloud(start_date, end_date)
-    except DataLoadError:
-        solar_hist = None
-
-    weather = build_hourly_weather(hourly_air, solar_hist, None)
+    archive = cached_load_historical_weather(start_date, end_date)
+    weather = build_hourly_weather(
+        archive["hourly_air"], archive["solar_cloud"], None
+    )
 
     forecaster = WaterTempForecaster()
     forecaster.set_hourly_weather(weather)
@@ -224,15 +216,13 @@ def cached_replay(water_temps, coefficients, max_horizon: int = 5):
 
     # Measured air: the head of each window before its forecast was made, and
     # the whole window for anchors with no stored forecast at all.
-    try:
-        actual_hourly = cached_load_hourly_air_temps(start_date, end_date)
-    except DataLoadError:
-        actual_hourly = pd.DataFrame(columns=["datetime", "air_temp"])
-
     # Solar/cloud was never stored, so actuals are all we have - for every date.
     try:
-        solar_hist = cached_load_historical_solar_cloud(start_date, end_date)
+        archive = cached_load_historical_weather(start_date, end_date)
+        actual_hourly = archive["hourly_air"]
+        solar_hist = archive["solar_cloud"]
     except DataLoadError:
+        actual_hourly = pd.DataFrame(columns=["datetime", "air_temp"])
         solar_hist = None
 
     def weather_provider(anchor_date):
@@ -1072,9 +1062,10 @@ def page_temperature():
         # Normalize dates to day-level for consistent caching
         start_date = pd.Timestamp(water_temps["date"].min()).normalize()
         end_date = today_utc()
-        air_temps_hist = cached_load_historical_air_temps(start_date, end_date)
-
-        hourly_air_temps = cached_load_hourly_air_temps(start_date, end_date)
+        archive = cached_load_historical_weather(start_date, end_date)
+        air_temps_hist = archive["daily_air"]
+        hourly_air_temps = archive["hourly_air"]
+        solar_hist = archive["solar_cloud"]
 
         temperatures = build_temperatures_frame(water_temps, air_temps_hist)
 
@@ -1113,12 +1104,6 @@ def page_temperature():
             st.info("Showing historical data only")
             combined_hourly = hourly_air_temps
             temperatures_deduped = temperatures.copy()  # No duplicates without forecast
-
-        solar_hist = None
-        try:
-            solar_hist = cached_load_historical_solar_cloud(start_date, end_date)
-        except DataLoadError as e:
-            st.warning(f"Open-Meteo historical solar/cloud unavailable: {e}")
 
         hourly_weather = build_hourly_weather(
             combined_hourly, solar_hist, forecast_weather
@@ -1469,8 +1454,10 @@ def main():
             water_temps = cached_load_water_temps()
             start_date = pd.Timestamp(water_temps["date"].min()).normalize()
             end_date = today_utc()
-            air_temps_hist = cached_load_historical_air_temps(start_date, end_date)
-            hourly_air_temps = cached_load_hourly_air_temps(start_date, end_date)
+            archive = cached_load_historical_weather(start_date, end_date)
+            air_temps_hist = archive["daily_air"]
+            hourly_air_temps = archive["hourly_air"]
+            solar_hist = archive["solar_cloud"]
 
             temperatures = build_temperatures_frame(water_temps, air_temps_hist)
 
@@ -1500,12 +1487,6 @@ def main():
                 temperatures_deduped = deduplicate_temperatures(temperatures)
             except DataLoadError:
                 temperatures_deduped = temperatures.copy()
-
-            solar_hist = None
-            try:
-                solar_hist = cached_load_historical_solar_cloud(start_date, end_date)
-            except DataLoadError:
-                pass
 
             hourly_weather = build_hourly_weather(
                 combined_hourly, solar_hist, forecast_weather
