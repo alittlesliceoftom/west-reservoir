@@ -104,7 +104,7 @@ def get_storage():
     return storage
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=CACHE_TTL)
 def cached_load_stored_forecasts(max_horizon: int = 5):
     """Stored water-temp forecasts, one run per creation day."""
     return get_storage().get_water_predictions_last_run_per_day(
@@ -112,7 +112,10 @@ def cached_load_stored_forecasts(max_horizon: int = 5):
     )
 
 
-@st.cache_data(ttl=3600)
+# CACHE_TTL, not something shorter: this reads weather through a CACHE_TTL
+# cache, so a shorter TTL here only reruns the optimiser against weather that
+# has not changed.
+@st.cache_data(ttl=CACHE_TTL)
 def cached_fitted_model_coefficients(water_temps, start_date, end_date):
     """
     Fit the model on historical weather and return its coefficients.
@@ -140,7 +143,7 @@ def cached_fitted_model_coefficients(water_temps, start_date, end_date):
     return (forecaster.k_air, forecaster.k_solar, forecaster.k_cool)
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=CACHE_TTL)
 def cached_dashboard_coefficients(measured, hourly_weather):
     """
     Fit the dashboard's model, returning its coefficients and what happened.
@@ -190,7 +193,7 @@ def solar_cloud_runs_by_date(stored_weather):
     return {date: group for date, group in usable.groupby("forecast_created_date")}
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=CACHE_TTL)
 def cached_replay(water_temps, coefficients, max_horizon: int = 5):
     """
     Backtest replay over history, using the given model coefficients.
