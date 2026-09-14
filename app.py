@@ -26,6 +26,7 @@ from data import (
     build_temperatures_frame,
     deduplicate_temperatures,
     DataLoadError,
+    today_utc,
 )
 from forecaster import FIT_OK, WaterTempForecaster
 from config import ENABLE_MOTHERDUCK
@@ -259,7 +260,7 @@ def cached_replay(water_temps, coefficients, max_horizon: int = 5):
     )
 
     start_date = pd.Timestamp(water_temps["date"].min()).normalize()
-    end_date = pd.Timestamp.now().normalize()
+    end_date = today_utc()
 
     # Measured air: the head of each window before its forecast was made, and
     # the whole window for anchors with no stored forecast at all.
@@ -1110,7 +1111,7 @@ def page_temperature():
 
         # Normalize dates to day-level for consistent caching
         start_date = pd.Timestamp(water_temps["date"].min()).normalize()
-        end_date = pd.Timestamp.now().normalize()
+        end_date = today_utc()
         air_temps_hist = cached_load_historical_air_temps(start_date, end_date)
 
         hourly_air_temps = cached_load_hourly_air_temps(start_date, end_date)
@@ -1385,7 +1386,7 @@ def page_accuracy():
                 coefficients = cached_fitted_model_coefficients(
                     water_temps,
                     pd.Timestamp(water_temps["date"].min()).normalize(),
-                    pd.Timestamp.now().normalize(),
+                    today_utc(),
                 )
                 raw = cached_replay(water_temps, coefficients, 5)
             else:
@@ -1507,7 +1508,7 @@ def main():
         try:
             water_temps = cached_load_water_temps()
             start_date = pd.Timestamp(water_temps["date"].min()).normalize()
-            end_date = pd.Timestamp.now().normalize()
+            end_date = today_utc()
             air_temps_hist = cached_load_historical_air_temps(start_date, end_date)
             hourly_air_temps = cached_load_hourly_air_temps(start_date, end_date)
 

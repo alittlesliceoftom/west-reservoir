@@ -26,6 +26,19 @@ class DataLoadError(Exception):
     pass
 
 
+def today_utc() -> pd.Timestamp:
+    """
+    Naive midnight Timestamp for the current UTC date.
+
+    The Open-Meteo archive API bounds end_date by today in UTC. Using the
+    local clock instead can request a date the archive doesn't have yet
+    (e.g. during BST, between local midnight and UTC midnight), which the
+    API rejects with a 400. Use this instead of
+    `pd.Timestamp.now().normalize()` for archive-window end_dates.
+    """
+    return pd.Timestamp.now("UTC").normalize().tz_localize(None)
+
+
 def load_water_temps() -> pd.DataFrame:
     """
     Load water temperature measurements from Google Sheets.
