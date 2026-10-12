@@ -1513,11 +1513,21 @@ def main():
 
     st.title("West Reservoir Temperature Tracker + Forecaster")
     st.markdown("Tracking and forecasting water temperature at West Reservoir, London.")
-    st.link_button(
-        "Buy me a coffee",
-        BUY_ME_A_COFFEE_URL,
-        icon=":material/coffee:",
+    # Pinned bottom-right so it stays in view while scrolling. Streamlit has
+    # no native fixed positioning; the keyed container gets the class
+    # .st-key-buy_me_a_coffee for the CSS to target.
+    st.html(
+        "<style>.st-key-buy_me_a_coffee {"
+        "position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 1000; width: auto;"
+        "}</style>"
     )
+    with st.container(key="buy_me_a_coffee"):
+        st.link_button(
+            "Buy me a coffee",
+            BUY_ME_A_COFFEE_URL,
+            icon=":material/coffee:",
+            type="primary",
+        )
 
     # st.navigation runs ONLY the selected page. Tabs did the opposite:
     # every tab body executed on every rerun, so the accuracy page's
