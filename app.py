@@ -58,6 +58,8 @@ METEOSTAT_OUTAGE_END = pd.Timestamp("2026-09-06")
 # mostly drift. Raise this to show more of the air forecast.
 FORECAST_DAYS = 5
 
+BUY_ME_A_COFFEE_URL = "https://buymeacoffee.com/asliceoftom"
+
 
 # Streamlit caching applied here rather than in data.py: the data layer has no
 # Streamlit dependency, so tests and scripts can import it without a runtime.
@@ -1526,6 +1528,13 @@ def main():
         position="top",
     )
     page.run()
+
+    st.divider()
+    st.link_button(
+        "Buy me a coffee",
+        BUY_ME_A_COFFEE_URL,
+        icon=":material/coffee:",
+    )
 
 
 if __name__ == "__main__":
