@@ -5,6 +5,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+from pathlib import Path
 
 # Suppress known pandas/plotly compatibility warning (harmless)
 warnings.filterwarnings("ignore", message=".*DatetimeProperties.to_pydatetime.*")
@@ -334,11 +335,15 @@ def retrieve_gap_fill_forecasts(
 
 
 
+ASSETS = Path(__file__).parent / "assets"
+
 st.set_page_config(
     page_title="West Reservoir Water Temperature Tracker",
+    page_icon=str(ASSETS / "favicon.svg"),
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+st.logo(str(ASSETS / "icon.svg"), size="large")
 
 
 def display_debug_panel(
