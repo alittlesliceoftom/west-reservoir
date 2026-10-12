@@ -297,14 +297,13 @@ def cached_replay(water_temps, coefficients, max_horizon: int = 5):
 
 
 
-def replay_runs(water_temps, forecaster) -> pd.DataFrame:
+def replay_runs(water_temps, coefficients) -> pd.DataFrame:
     """
     The replay shaped like stored runs: one run per measured anchor day.
 
-    Uses the dashboard model's coefficients. Each run gets its anchor
-    measurement as horizon 0, so its line starts on the measured point.
+    Each run gets its anchor measurement as horizon 0, so its line starts on
+    the measured point.
     """
-    coefficients = (forecaster.k_air, forecaster.k_solar, forecaster.k_cool)
     replay = cached_replay(water_temps, coefficients, FORECAST_DAYS)
     replay = replay.dropna(subset=["forecast_temp"])
     replay = replay.assign(
@@ -1332,49 +1331,6 @@ def page_temperature():
                 forecast_weather, temperatures_deduped, forecaster
             )
 
-            st.header("How the Forecast Evolves")
-            st.text(
-                "Every forecast we published, one line per day it was made. "
-                "Where lines land on the same date, you can see how the "
-                "forecast for that day changed as it got closer. Green is "
-                "what was measured."
-            )
-            evolution_source = st.radio(
-                "Forecasts", ["Published", "Replay (current model)"],
-                horizontal=True, key="evolution_source",
-                help=(
-                    "Published: what we actually forecast at the time. "
-                    "Replay: today's model re-run from every measurement, "
-                    "showing what we would have forecast."
-                ),
-            )
-            evolution_period = st.radio(
-                "Period", list(CHART_PERIODS), horizontal=True,
-                key="evolution_period",
-            )
-            is_replay = evolution_source.startswith("Replay")
-            try:
-                if is_replay:
-                    runs = replay_runs(water_temps, forecaster)
-                else:
-                    runs = cached_load_stored_forecasts(max_horizon=FORECAST_DAYS)
-                runs = filter_to_period(
-                    runs, "forecast_created_date", CHART_PERIODS[evolution_period]
-                )
-                # Measurements from the first run in the window onward, so
-                # both series share one x-axis.
-                window_measured = water_temps[
-                    water_temps["date"] >= runs["forecast_created_date"].min()
-                ] if not runs.empty else water_temps.iloc[0:0]
-                st.plotly_chart(
-                    create_forecast_evolution_chart(
-                        runs, window_measured, mark_outage=not is_replay
-                    ),
-                    width='stretch',
-                )
-            except ForecastStorageError as e:
-                st.error(f"Could not load stored forecasts: {e}")
-
         st.header("Summary Statistics")
         measured = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
         col1, col2, col3 = st.columns(3)
@@ -1589,6 +1545,88 @@ def page_accuracy():
             st.error(f"Could not load measurements: {e}")
 
 
+def page_evolution():
+    """
+    Every forecast as its own line, against what was then measured.
+
+    Its own page for the same reason as the accuracy page: it reads
+    MotherDuck, and only whoever opens it should pay for that connection.
+    """
+    st.header("Forecast Evolution")
+
+    if not ENABLE_MOTHERDUCK:
+        st.warning(
+            "Forecast evolution requires MotherDuck, which is not configured. "
+            "Set MOTHERDUCK_TOKEN to enable this page."
+        )
+        return
+
+    st.text(
+        "Every forecast, one line per day it was made. Each line starts dark "
+        "on that day and fades the further ahead it reaches. Where lines land "
+        "on the same date, you can see how the forecast for that day changed "
+        "as it got closer. Green is what was measured."
+    )
+    evolution_source = st.radio(
+        "Forecasts", ["Published", "Replay (current model)"],
+        horizontal=True, key="evolution_source",
+        help=(
+            "Published: what we actually forecast at the time. "
+            "Replay: today's model re-run from every measurement, "
+            "showing what we would have forecast."
+        ),
+    )
+    evolution_period = st.radio(
+        "Period", list(CHART_PERIODS), horizontal=True, key="evolution_period",
+    )
+    is_replay = evolution_source.startswith("Replay")
+
+    if is_replay:
+        st.caption(
+            "Uses the air forecast stored at the time and the repaired "
+            "weather archive. Dates before 2026-09-06 use actual solar and "
+            "cloud, which no forecast had, so read those as an optimistic bound."
+        )
+    else:
+        st.caption(
+            "Shaded period: from 2026-03-20 we were missing up-to-date weather "
+            "data, and forecasts made then were affected. See "
+            "[issue #33](https://github.com/alittlesliceoftom/"
+            "west-reservoir/issues/33)."
+        )
+
+    try:
+        water_temps = cached_load_water_temps()
+        if is_replay:
+            coefficients = cached_fitted_model_coefficients(
+                water_temps,
+                pd.Timestamp(water_temps["date"].min()).normalize(),
+                today_utc(),
+            )
+            runs = replay_runs(water_temps, coefficients)
+        else:
+            runs = cached_load_stored_forecasts(max_horizon=FORECAST_DAYS)
+        runs = filter_to_period(
+            runs, "forecast_created_date", CHART_PERIODS[evolution_period]
+        )
+
+        # Measurements from the first run in the window onward, so both
+        # series share one x-axis.
+        window_measured = water_temps[
+            water_temps["date"] >= runs["forecast_created_date"].min()
+        ] if not runs.empty else water_temps.iloc[0:0]
+        st.plotly_chart(
+            create_forecast_evolution_chart(
+                runs, window_measured, mark_outage=not is_replay
+            ),
+            width='stretch',
+        )
+    except ForecastStorageError as e:
+        st.error(f"Could not load stored forecasts: {e}")
+    except DataLoadError as e:
+        st.error(f"Could not load measurements: {e}")
+
+
 def page_quotes():
     """Static quotes."""
     st.header("Heard at the Res")
@@ -1676,9 +1714,10 @@ def main():
         [
             st.Page(page_temperature, title="Temperature", default=True),
             st.Page(page_accuracy, title="Forecast Accuracy"),
+            st.Page(page_evolution, title="Forecast Evolution"),
             st.Page(page_quotes, title="Heard at the Res"),
         ],
-        # Top rather than the sidebar default, so the three views stay
+        # Top rather than the sidebar default, so the views stay
         # side by side where the tabs were.
         position="top",
     )
@@ -1722,7 +1761,6 @@ def main():
             BUY_ME_A_COFFEE_URL,
             icon=":material/coffee:",
         )
-
 
 if __name__ == "__main__":
     main()
