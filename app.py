@@ -58,6 +58,16 @@ METEOSTAT_OUTAGE_END = pd.Timestamp("2026-09-06")
 # mostly drift. Raise this to show more of the air forecast.
 FORECAST_DAYS = 5
 
+MEASUREMENT_NOTE = (
+    "Water temperatures are taken each morning around 7am. "
+    "The water will often be warmer by the time you get in!\n\n"
+    "The forecast simulates hourly heat transfer using air temperature, "
+    "shortwave solar radiation, and cloud cover (clear-sky overnight "
+    "cooling). It does not yet account for wind or evaporation.\n\n"
+    "Additionally, temperature varies throughout the reservoir "
+    "by both position and depth - this is just a snapshot of conditions."
+)
+
 BUY_ME_A_COFFEE_URL = "https://buymeacoffee.com/asliceoftom"
 
 
@@ -1048,16 +1058,6 @@ def store_forecast_and_predictions(forecast_weather, temperatures_deduped, forec
 def page_temperature():
     """The dashboard: measurements, forecast and the model debug panel."""
     col_info, col_image = st.columns([1, 1])
-    with col_info:
-        st.info(
-            "Water temperatures are taken each morning around 7am. "
-            "The water will often be warmer by the time you get in!\n\n "
-            "The forecast simulates hourly heat transfer using air temperature, "
-            "shortwave solar radiation, and cloud cover (clear-sky overnight "
-            "cooling). It does not yet account for wind or evaporation.\n\n"
-            "Additionally, temperature varies throughout the reservoir "
-            "by both position and depth - this is just a snapshot of conditions."
-        )
     with col_image:
         st.image("image.png",)
 
@@ -1126,7 +1126,7 @@ def page_temperature():
             yesterday = today - timedelta(days=1)
             tomorrow = today + timedelta(days=1)
 
-            st.header("Current Temperature")
+            st.header("Current Temperature", help=MEASUREMENT_NOTE)
 
             measured_data = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
             today_data = temperatures_deduped[temperatures_deduped["date"].dt.date == today]
@@ -1513,6 +1513,11 @@ def main():
 
     st.title("West Reservoir Temperature Tracker + Forecaster")
     st.markdown("Tracking and forecasting water temperature at West Reservoir, London.")
+    st.link_button(
+        "Buy me a coffee",
+        BUY_ME_A_COFFEE_URL,
+        icon=":material/coffee:",
+    )
 
     # st.navigation runs ONLY the selected page. Tabs did the opposite:
     # every tab body executed on every rerun, so the accuracy page's
@@ -1528,13 +1533,6 @@ def main():
         position="top",
     )
     page.run()
-
-    st.divider()
-    st.link_button(
-        "Buy me a coffee",
-        BUY_ME_A_COFFEE_URL,
-        icon=":material/coffee:",
-    )
 
 
 if __name__ == "__main__":
