@@ -1519,6 +1519,13 @@ def main():
     st.html(
         "<style>.st-key-buy_me_a_coffee {"
         "position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 1000; width: auto;"
+        "}"
+        # Buy Me a Coffee's brand yellow, with their black text.
+        ".st-key-buy_me_a_coffee a {"
+        "background-color: #FFDD00; color: #000000; border-color: #FFDD00;"
+        "}"
+        ".st-key-buy_me_a_coffee a:hover {"
+        "background-color: #F2D100; color: #000000; border-color: #F2D100;"
         "}</style>"
     )
     with st.container(key="buy_me_a_coffee"):
@@ -1526,7 +1533,6 @@ def main():
             "Buy me a coffee",
             BUY_ME_A_COFFEE_URL,
             icon=":material/coffee:",
-            type="primary",
         )
 
     # st.navigation runs ONLY the selected page. Tabs did the opposite:
