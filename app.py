@@ -1010,6 +1010,15 @@ def create_forecast_evolution_chart(
         hovertemplate="Measured %{x|%d %b}<br>%{y:.1f} C<extra></extra>",
     ))
 
+    # Horizon 0: every line starts on its creation date, so the band marks
+    # exactly the runs that were made while the air feed was frozen.
+    if not runs.empty:
+        _shade_meteostat_outage(
+            fig,
+            min(runs["target_date"].min(), measured["date"].min()),
+            max(runs["target_date"].max(), measured["date"].max()),
+        )
+
     fig.update_layout(
         xaxis_title="Date", yaxis_title="Water temperature (C)",
         height=480, hovermode="closest", margin=dict(t=30),
