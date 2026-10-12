@@ -297,6 +297,34 @@ def cached_replay(water_temps, coefficients, max_horizon: int = 5):
 
 
 
+def replay_runs(water_temps, forecaster) -> pd.DataFrame:
+    """
+    The replay shaped like stored runs: one run per measured anchor day.
+
+    Uses the dashboard model's coefficients. Each run gets its anchor
+    measurement as horizon 0, so its line starts on the measured point.
+    """
+    coefficients = (forecaster.k_air, forecaster.k_solar, forecaster.k_cool)
+    replay = cached_replay(water_temps, coefficients, FORECAST_DAYS)
+    replay = replay.dropna(subset=["forecast_temp"])
+    replay = replay.assign(
+        forecast_created_date=replay["target_date"]
+        - pd.to_timedelta(replay["horizon_days"], unit="D")
+    )
+
+    anchors = water_temps.dropna(subset=["water_temp"]).assign(
+        date=lambda df: pd.to_datetime(df["date"]).dt.normalize()
+    ).drop_duplicates(subset=["date"], keep="last")
+    anchors = anchors[anchors["date"].isin(replay["forecast_created_date"])]
+    anchor_rows = pd.DataFrame({
+        "forecast_created_date": anchors["date"],
+        "target_date": anchors["date"],
+        "forecast_temp": anchors["water_temp"],
+        "horizon_days": 0,
+    })
+    return pd.concat([anchor_rows, replay], ignore_index=True)
+
+
 def retrieve_gap_fill_forecasts(
     hist_end: datetime,
     fore_start: datetime
@@ -967,7 +995,7 @@ def create_forecast_vs_actual_chart(
 
 
 def create_forecast_evolution_chart(
-    runs: pd.DataFrame, water_temps: pd.DataFrame
+    runs: pd.DataFrame, water_temps: pd.DataFrame, mark_outage: bool = True
 ) -> go.Figure:
     """
     Every stored forecast run as its own line, over the measured record.
@@ -979,6 +1007,8 @@ def create_forecast_evolution_chart(
     Args:
         runs: Stored forecasts, one run per creation day.
         water_temps: Measurements over the same window.
+        mark_outage: Shade the Meteostat outage window. Off for the replay,
+                     which reads the repaired archive.
     """
     fig = go.Figure()
 
@@ -1012,7 +1042,7 @@ def create_forecast_evolution_chart(
 
     # Horizon 0: every line starts on its creation date, so the band marks
     # exactly the runs that were made while the air feed was frozen.
-    if not runs.empty:
+    if mark_outage and not runs.empty:
         _shade_meteostat_outage(
             fig,
             min(runs["target_date"].min(), measured["date"].min()),
@@ -1292,15 +1322,27 @@ def page_temperature():
                 "forecast for that day changed as it got closer. Green is "
                 "what was measured."
             )
+            evolution_source = st.radio(
+                "Forecasts", ["Published", "Replay (current model)"],
+                horizontal=True, key="evolution_source",
+                help=(
+                    "Published: what we actually forecast at the time. "
+                    "Replay: today's model re-run from every measurement, "
+                    "showing what we would have forecast."
+                ),
+            )
             evolution_period = st.radio(
                 "Period", list(CHART_PERIODS), horizontal=True,
                 key="evolution_period",
             )
+            is_replay = evolution_source.startswith("Replay")
             try:
+                if is_replay:
+                    runs = replay_runs(water_temps, forecaster)
+                else:
+                    runs = cached_load_stored_forecasts(max_horizon=FORECAST_DAYS)
                 runs = filter_to_period(
-                    cached_load_stored_forecasts(max_horizon=FORECAST_DAYS),
-                    "forecast_created_date",
-                    CHART_PERIODS[evolution_period],
+                    runs, "forecast_created_date", CHART_PERIODS[evolution_period]
                 )
                 # Measurements from the first run in the window onward, so
                 # both series share one x-axis.
@@ -1308,7 +1350,9 @@ def page_temperature():
                     water_temps["date"] >= runs["forecast_created_date"].min()
                 ] if not runs.empty else water_temps.iloc[0:0]
                 st.plotly_chart(
-                    create_forecast_evolution_chart(runs, window_measured),
+                    create_forecast_evolution_chart(
+                        runs, window_measured, mark_outage=not is_replay
+                    ),
                     width='stretch',
                 )
             except ForecastStorageError as e:
