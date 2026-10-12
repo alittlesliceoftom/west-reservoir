@@ -4,6 +4,7 @@ import warnings
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.colors import sample_colorscale
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -965,6 +966,57 @@ def create_forecast_vs_actual_chart(
     return fig
 
 
+def create_forecast_evolution_chart(
+    runs: pd.DataFrame, water_temps: pd.DataFrame
+) -> go.Figure:
+    """
+    Every stored forecast run as its own line, over the measured record.
+
+    One line per creation day, spanning that run's horizons, so the lines that
+    land on any one date show how the forecast for it moved as the date came
+    closer. Older runs are paler, so the newest forecast reads on top.
+
+    Args:
+        runs: Stored forecasts, one run per creation day.
+        water_temps: Measurements over the same window.
+    """
+    fig = go.Figure()
+
+    created_dates = sorted(runs["forecast_created_date"].unique())
+    colours = sample_colorscale(
+        "Blues", [0.3 + 0.7 * i / max(len(created_dates) - 1, 1)
+                  for i in range(len(created_dates))]
+    )
+    for i, (created, colour) in enumerate(zip(created_dates, colours)):
+        run = runs[runs["forecast_created_date"] == created].sort_values("target_date")
+        made = pd.Timestamp(created).strftime("%d %b")
+        fig.add_trace(go.Scatter(
+            x=run["target_date"], y=run["forecast_temp"],
+            mode="lines+markers",
+            line=dict(color=colour, width=1.5), marker=dict(size=4),
+            name="Forecast runs", legendgroup="runs", showlegend=i == 0,
+            customdata=run["horizon_days"],
+            hovertemplate=(
+                f"Made {made}<br>For %{{x|%d %b}} (+%{{customdata}}d)"
+                "<br>%{y:.1f} C<extra></extra>"
+            ),
+        ))
+
+    measured = water_temps.dropna(subset=["water_temp"]).sort_values("date")
+    fig.add_trace(go.Scatter(
+        x=measured["date"], y=measured["water_temp"],
+        name="Measured", mode="lines+markers",
+        line=dict(color="#2ca02c", width=3), marker=dict(size=7),
+        hovertemplate="Measured %{x|%d %b}<br>%{y:.1f} C<extra></extra>",
+    ))
+
+    fig.update_layout(
+        xaxis_title="Date", yaxis_title="Water temperature (C)",
+        height=480, hovermode="closest", margin=dict(t=30),
+    )
+    return fig
+
+
 def _one_sided(values) -> bool:
     """True when every value sits on the same side of zero."""
     v = pd.Series(values).dropna()
@@ -1223,6 +1275,35 @@ def page_temperature():
             store_forecast_and_predictions(
                 forecast_weather, temperatures_deduped, forecaster
             )
+
+            st.header("How the Forecast Evolves")
+            st.text(
+                "Every forecast we published, one line per day it was made. "
+                "Where lines land on the same date, you can see how the "
+                "forecast for that day changed as it got closer. Green is "
+                "what was measured."
+            )
+            evolution_period = st.radio(
+                "Period", list(CHART_PERIODS), horizontal=True,
+                key="evolution_period",
+            )
+            try:
+                runs = filter_to_period(
+                    cached_load_stored_forecasts(max_horizon=FORECAST_DAYS),
+                    "forecast_created_date",
+                    CHART_PERIODS[evolution_period],
+                )
+                # Measurements from the first run in the window onward, so
+                # both series share one x-axis.
+                window_measured = water_temps[
+                    water_temps["date"] >= runs["forecast_created_date"].min()
+                ] if not runs.empty else water_temps.iloc[0:0]
+                st.plotly_chart(
+                    create_forecast_evolution_chart(runs, window_measured),
+                    width='stretch',
+                )
+            except ForecastStorageError as e:
+                st.error(f"Could not load stored forecasts: {e}")
 
         st.header("Summary Statistics")
         measured = temperatures_deduped[temperatures_deduped["source"] == "MEASURED"]
