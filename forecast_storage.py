@@ -247,6 +247,24 @@ class ForecastStorage:
             ON weather_forecasts_hourly(target_datetime, forecast_created_timestamp)
         """)
 
+        # Weather that actually happened, as opposed to what was forecast.
+        #
+        # Keyed on the hour alone: there is only one truth per hour, however
+        # many times we fetch it. Open-Meteo's archive is ERA5T, and the most
+        # recent six days are preliminary and get revised, so ingestion
+        # re-fetches a trailing window and overwrites rather than appending.
+        # ingested_at records when we last heard, not when the weather was.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS weather_actuals_hourly (
+                datetime TIMESTAMP NOT NULL,
+                air_temp DOUBLE,
+                shortwave_radiation DOUBLE,
+                cloud_cover DOUBLE,
+                ingested_at TIMESTAMP NOT NULL,
+                PRIMARY KEY (datetime)
+            )
+        """)
+
     def store_water_predictions(
         self,
         predictions_df: pd.DataFrame,
@@ -385,6 +403,96 @@ class ForecastStorage:
             """)
         except Exception as e:
             raise ForecastStorageError(f"Failed to store weather forecast: {e}")
+
+    def store_weather_actuals(self, actuals_df: pd.DataFrame) -> None:
+        """
+        Store observed hourly weather, overwriting any earlier value for an hour.
+
+        A revision must win: the archive's most recent days are preliminary and
+        get corrected, so this overwrites where the incoming frame has a value
+        and leaves what is stored where it has NULL.
+
+        Args:
+            actuals_df: DataFrame with 'datetime' plus any of 'air_temp',
+                        'shortwave_radiation', 'cloud_cover'.
+        """
+        if actuals_df is None or actuals_df.empty:
+            return
+
+        measures = [c for c in WEATHER_MEASURES if c in actuals_df.columns]
+        if not measures:
+            raise ForecastStorageError(
+                "Actuals frame has none of the measure columns "
+                f"{WEATHER_MEASURES}: got {list(actuals_df.columns)}"
+            )
+
+        to_store = actuals_df.copy()
+        for measure in WEATHER_MEASURES:
+            if measure not in to_store.columns:
+                to_store[measure] = None
+        to_store["ingested_at"] = datetime.now()
+        to_store = to_store[["datetime"] + WEATHER_MEASURES + ["ingested_at"]]
+
+        conn = self._get_connection()
+        try:
+            conn.execute("""
+                INSERT INTO weather_actuals_hourly
+                SELECT * FROM to_store
+                ON CONFLICT (datetime) DO UPDATE SET
+                    air_temp = COALESCE(excluded.air_temp, weather_actuals_hourly.air_temp),
+                    shortwave_radiation = COALESCE(
+                        excluded.shortwave_radiation,
+                        weather_actuals_hourly.shortwave_radiation
+                    ),
+                    cloud_cover = COALESCE(
+                        excluded.cloud_cover, weather_actuals_hourly.cloud_cover
+                    ),
+                    ingested_at = excluded.ingested_at
+            """)
+        except Exception as e:
+            raise ForecastStorageError(f"Failed to store weather actuals: {e}")
+
+    def get_weather_actuals(self, start_date=None, end_date=None) -> pd.DataFrame:
+        """
+        Observed hourly weather, oldest first.
+
+        Args:
+            start_date: Inclusive lower bound, or None for everything stored.
+            end_date: Inclusive upper bound, or None.
+
+        Returns:
+            DataFrame with 'datetime' plus the measure columns.
+        """
+        conn = self._get_connection()
+        clauses, params = [], []
+        if start_date is not None:
+            clauses.append("datetime >= ?")
+            params.append(pd.Timestamp(start_date).to_pydatetime())
+        if end_date is not None:
+            clauses.append("datetime <= ?")
+            params.append(pd.Timestamp(end_date).to_pydatetime())
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        try:
+            return conn.execute(
+                f"""
+                SELECT datetime, air_temp, shortwave_radiation, cloud_cover
+                FROM weather_actuals_hourly
+                {where}
+                ORDER BY datetime
+                """,
+                params,
+            ).df()
+        except Exception as e:
+            raise ForecastStorageError(f"Failed to read weather actuals: {e}")
+
+    def latest_actual_datetime(self):
+        """The most recent stored hour, or None if the table is empty."""
+        conn = self._get_connection()
+        row = conn.execute(
+            "SELECT max(datetime) FROM weather_actuals_hourly"
+        ).fetchone()
+        return row[0] if row and row[0] is not None else None
 
     def get_weather_forecasts_last_run_per_day(self) -> pd.DataFrame:
         """

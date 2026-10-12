@@ -1,0 +1,45 @@
+# Hourly weather ingestion.
+#
+# The dashboard used to call Open-Meteo itself, and the archive hangs
+# intermittently - a hang there is a blank page, a hang here is a retry in an
+# hour. The app reads MotherDuck instead.
+#
+# NOTE: GitHub disables scheduled workflows after 60 days without repo
+# activity. On a quiet month this stops silently. Check with
+# `gh workflow list` after a lull, or re-enable from the Actions tab.
+name: Ingest weather
+
+on:
+  schedule:
+    # Hourly. GitHub's scheduler can lag by tens of minutes under load, which
+    # is fine at this cadence - the trailing window re-fetches 10 days anyway.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Days back to fetch (10 is the usual trailing window)"
+        required: false
+        default: "10"
+
+concurrency:
+  group: ingest-weather
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Ingest
+        env:
+          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
+        run: python ingest.py --days "${{ inputs.days || 10 }}"
