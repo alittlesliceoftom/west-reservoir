@@ -1520,19 +1520,24 @@ def main():
     st.markdown("Tracking and forecasting water temperature at West Reservoir, London.")
     # Pinned bottom-right so it stays in view while scrolling. Streamlit has
     # no native fixed positioning; the keyed container gets the class
-    # .st-key-buy_me_a_coffee for the CSS to target. It sits 5rem up because
-    # Streamlit Community Cloud overlays its own badge in the bottom-right
-    # corner, which the button would otherwise cover.
+    # .st-key-buy_me_a_coffee for the CSS to target. It sits 13rem in from
+    # the right because Streamlit Community Cloud overlays its own badge and
+    # the creator's avatar in the bottom-right corner.
     st.html(
         "<style>.st-key-buy_me_a_coffee {"
-        "position: fixed; bottom: 5rem; right: 1.5rem; z-index: 1000; width: auto;"
+        "position: fixed; bottom: 1.5rem; right: 13rem; z-index: 1000; width: auto;"
         "}"
-        # Buy Me a Coffee's brand yellow, with their black text.
+        # Buy Me a Coffee's brand yellow, with their black text. The label and
+        # icon are nested elements that take the theme's text colour, which
+        # goes white in dark mode, so they are forced black too.
+        ".st-key-buy_me_a_coffee a, .st-key-buy_me_a_coffee a * {"
+        "color: #000000 !important;"
+        "}"
         ".st-key-buy_me_a_coffee a {"
-        "background-color: #FFDD00; color: #000000; border-color: #FFDD00;"
+        "background-color: #FFDD00; border-color: #FFDD00;"
         "}"
         ".st-key-buy_me_a_coffee a:hover {"
-        "background-color: #F2D100; color: #000000; border-color: #F2D100;"
+        "background-color: #F2D100; border-color: #F2D100;"
         "}</style>"
     )
     with st.container(key="buy_me_a_coffee"):
