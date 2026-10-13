@@ -1518,14 +1518,39 @@ def main():
 
     st.title("West Reservoir Temperature Tracker + Forecaster")
     st.markdown("Tracking and forecasting water temperature at West Reservoir, London.")
+    # st.navigation runs ONLY the selected page. Tabs did the opposite:
+    # every tab body executed on every rerun, so the accuracy page's
+    # MotherDuck connection was billed to anyone opening the dashboard.
+    page = st.navigation(
+        [
+            st.Page(page_temperature, title="Temperature", default=True),
+            st.Page(page_accuracy, title="Forecast Accuracy"),
+            st.Page(page_quotes, title="Heard at the Res"),
+        ],
+        # Top rather than the sidebar default, so the three views stay
+        # side by side where the tabs were.
+        position="top",
+    )
+    page.run()
+
     # Pinned bottom-right so it stays in view while scrolling. Streamlit has
     # no native fixed positioning; the keyed container gets the class
     # .st-key-buy_me_a_coffee for the CSS to target. It sits 13rem in from
     # the right because Streamlit Community Cloud overlays its own badge and
     # the creator's avatar in the bottom-right corner.
+    #
+    # On phones there is no room to float it, so below Streamlit's 640px
+    # mobile breakpoint it drops back into the page flow, right-aligned.
+    # That is why it renders after page.run(): in flow, it lands at the
+    # bottom of whichever page is open.
     st.html(
         "<style>.st-key-buy_me_a_coffee {"
         "position: fixed; bottom: 1.5rem; right: 13rem; z-index: 1000; width: auto;"
+        "}"
+        "@media (max-width: 640px) {"
+        ".st-key-buy_me_a_coffee {"
+        "position: static; width: 100%; align-items: flex-end;"
+        "}"
         "}"
         # Buy Me a Coffee's brand yellow, with their black text. The label and
         # icon are nested elements that take the theme's text colour, which
@@ -1546,21 +1571,6 @@ def main():
             BUY_ME_A_COFFEE_URL,
             icon=":material/coffee:",
         )
-
-    # st.navigation runs ONLY the selected page. Tabs did the opposite:
-    # every tab body executed on every rerun, so the accuracy page's
-    # MotherDuck connection was billed to anyone opening the dashboard.
-    page = st.navigation(
-        [
-            st.Page(page_temperature, title="Temperature", default=True),
-            st.Page(page_accuracy, title="Forecast Accuracy"),
-            st.Page(page_quotes, title="Heard at the Res"),
-        ],
-        # Top rather than the sidebar default, so the three views stay
-        # side by side where the tabs were.
-        position="top",
-    )
-    page.run()
 
 
 if __name__ == "__main__":
