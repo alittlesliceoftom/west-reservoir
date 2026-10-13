@@ -254,8 +254,8 @@ temperatures = pd.DataFrame({
 
 #### `app.py`
 - Streamlit web interface
-- Three pages, via `st.navigation`: Temperature, Forecast Accuracy, Heard at
-  the Res. Each is a `page_*` function
+- Four pages, via `st.navigation`: Temperature, Forecast Accuracy, Forecast
+  Evolution, Heard at the Res. Each is a `page_*` function
 - **Pages, not tabs, because `st.navigation` runs only the selected page.**
   `st.tabs` executes every tab body on every rerun, so the accuracy page's
   MotherDuck connection — several seconds — was charged to anyone opening the
