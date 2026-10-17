@@ -1,7 +1,7 @@
-# Watercast: multi-water forecasting platform — design
+# swimtemps: multi-water forecasting platform — design
 
-Status: draft for review. Name `watercast` is a placeholder until a domain is bought.
-Tracking: Linear project "Watercast - multi-water platform" (P-CRA-20).
+Status: draft for review. Project name: `swimtemps`.
+Tracking: Linear project "swimtemps" (P-CRA-20).
 
 ## 1. Goal
 
@@ -352,4 +352,4 @@ Each step ends deployable.
 
 ## 11. Open questions
 
-- Product name and domain.
+- Domain.
