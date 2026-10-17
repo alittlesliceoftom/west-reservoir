@@ -236,9 +236,14 @@ def fit_water(
     `method` and `prior_scale` override the choice and the prior, for the replay.
     """
     params = params or load_params()
-    ref = west_res_coefficients(params)
     s_prior = prior_scale if prior_scale is not None else params["depth_prior"][depth_class]
     legs = build_legs(readings, weather, params["max_leg_days"], params["min_leg_coverage"])
+    return fit_legs(legs, s_prior, params, method)
+
+
+def fit_legs(legs: Legs, s_prior: float, params: dict, method: str | None = None) -> FitResult:
+    """`fit_water` on legs already built."""
+    ref = west_res_coefficients(params)
     method = method or choose_method(legs.count, params)
     if legs.count == 0:
         method = "prior"

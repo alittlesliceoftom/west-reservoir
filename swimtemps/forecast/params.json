@@ -2,17 +2,41 @@
   "_comment": "Model constants. west_res is the reference fit; lambda, the leg thresholds and band_base are chosen by the cold-start replay (docs/cold-start-replay.md).",
   "provenance": {
     "west_res": "West Res model_defaults.json, fitted 2026-09-13 on 392 readings / 375 legs",
-    "replay": "placeholder until the cold-start replay runs"
+    "replay": "docs/cold-start-replay.md, 2026-10-18, West Res 416 readings 2024-11-05..2026-10-17. lambda 0.3 (tied with 0.1 within 0.01 C, larger chosen); scale from 2 legs (beats prior at every count); full from 30 legs (spec value kept, full never sustained a win on the reference water); band_base = replay p80/MAE spread x West Res production MAE on forecast weather (0.28 C 1d, 1.31 C 5d)",
+    "multipliers": "spec values kept: the replay measures prior/scale at x0.95 of mature, but its prior is West Res's own fit, so it cannot measure a new water's prior error"
   },
-  "west_res": {"k_air": 0.00738795, "k_solar": 0.0000839492, "k_cool": 0.00820885},
-  "depth_prior": {"shallow": 2.0, "lake": 1.0, "deep": 0.5, "unknown": 1.0},
-  "lambda": 1.0,
-  "scale_min_legs": 3,
+  "west_res": {
+    "k_air": 0.00738795,
+    "k_solar": 8.39492e-05,
+    "k_cool": 0.00820885
+  },
+  "depth_prior": {
+    "shallow": 2.0,
+    "lake": 1.0,
+    "deep": 0.5,
+    "unknown": 1.0
+  },
+  "lambda": 0.3,
+  "scale_min_legs": 2,
   "full_min_legs": 30,
   "max_leg_days": 3,
   "min_leg_coverage": 0.8,
-  "band_base": {"1": 0.4, "2": 0.8, "3": 1.1, "4": 1.4, "5": 1.7},
-  "method_multiplier": {"prior": 1.5, "scale": 1.25, "full": 1.0},
-  "type_multiplier": {"still": 1.0, "river": 1.5, "harbour": 1.5},
+  "band_base": {
+    "1": 0.46,
+    "2": 0.89,
+    "3": 1.21,
+    "4": 1.66,
+    "5": 1.95
+  },
+  "method_multiplier": {
+    "prior": 1.5,
+    "scale": 1.25,
+    "full": 1.0
+  },
+  "type_multiplier": {
+    "still": 1.0,
+    "river": 1.5,
+    "harbour": 1.5
+  },
   "own_errors_min_points": 20
 }

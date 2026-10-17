@@ -147,14 +147,21 @@ def test_same_hour_readings_collapse_to_one():
 
 # --- staged fitting ------------------------------------------------------
 
-def test_fewer_than_three_legs_uses_the_depth_prior():
+def test_below_the_scale_threshold_uses_the_depth_prior():
     weather = prepare_weather(synthetic_weather(5).reset_index())
-    readings = synthetic_readings(weather, REF).head(3)  # 2 legs
+    readings = synthetic_readings(weather, REF).head(2)  # 1 leg
     fit = fit_water(readings, weather, "shallow")
+    assert load_params()["scale_min_legs"] == 2
     assert fit.method == "prior"
     assert fit.scale == 2.0
     assert fit.coefficients == REF.scaled(2.0)
-    assert fit.n_legs == 2
+    assert fit.n_legs == 1
+
+
+def test_two_legs_already_fit_the_scale():
+    weather = prepare_weather(synthetic_weather(5).reset_index())
+    readings = synthetic_readings(weather, REF).head(3)
+    assert fit_water(readings, weather, "shallow").method == "scale"
 
 
 def test_scale_fit_moves_toward_the_true_scale():
