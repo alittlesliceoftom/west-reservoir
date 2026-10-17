@@ -12,7 +12,7 @@ MEASURES = ("air_temp", "shortwave", "cloud_cover")
 # archive value. A null in the incoming row keeps what is stored.
 UPSERT_WEATHER = text("""
     INSERT INTO weather_hourly (water_id, valid_at, source, air_temp, shortwave, cloud_cover, fetched_at)
-    VALUES (:water_id, :valid_at, :source, :air_temp, :shortwave, :cloud_cover, now())
+    VALUES (:water_id, :valid_at, :source, :air_temp, :shortwave, :cloud_cover, COALESCE(:fetched_at, now()))
     ON CONFLICT (water_id, valid_at) DO UPDATE SET
         source = excluded.source,
         air_temp = COALESCE(excluded.air_temp, weather_hourly.air_temp),
@@ -27,13 +27,15 @@ def _none_if_nan(value):
     return None if pd.isna(value) else float(value)
 
 
-def upsert_weather(session: Session, water_id: int, frame: pd.DataFrame, source: str) -> int:
+def upsert_weather(session: Session, water_id: int, frame: pd.DataFrame, source: str,
+                   fetched_at: datetime | None = None) -> int:
     """Store hourly weather for one water. Rows with no air temperature are skipped."""
     rows = [
         {
             "water_id": water_id,
             "valid_at": row.valid_at.to_pydatetime(),
             "source": source,
+            "fetched_at": fetched_at,
             **{m: _none_if_nan(getattr(row, m)) for m in MEASURES},
         }
         for row in frame.itertuples(index=False)

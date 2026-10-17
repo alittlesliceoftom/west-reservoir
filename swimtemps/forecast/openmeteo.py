@@ -20,7 +20,7 @@ GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 HOURLY = "temperature_2m,shortwave_radiation,cloud_cover"
 RENAME = {"temperature_2m": "air_temp", "shortwave_radiation": "shortwave", "cloud_cover": "cloud_cover"}
 PAST_DAYS = 7
-FORECAST_DAYS = 6
+FORECAST_DAYS = 7
 TIMEOUT = 20.0
 
 
@@ -60,7 +60,11 @@ class OpenMeteoClient:
         raise OpenMeteoError(f"Open-Meteo request to {url} failed: {last}")
 
     def forecast(self, lat: float, lon: float) -> pd.DataFrame:
-        """The last 7 days and the next 6, hourly, in one call."""
+        """
+        The last 7 days and the next 7, hourly, in one call. Days are UTC days,
+        so 7 rather than 5 keeps the fifth local reading time covered in
+        timezones ahead of UTC and just after local midnight.
+        """
         payload = self._get(FORECAST_URL, {
             "latitude": lat, "longitude": lon, "hourly": HOURLY, "timezone": "UTC",
             "past_days": PAST_DAYS, "forecast_days": FORECAST_DAYS,

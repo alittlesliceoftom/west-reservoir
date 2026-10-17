@@ -74,6 +74,12 @@ def test_forecast_targets_are_the_next_five_local_days_at_reading_time_across_ds
     ]
 
 
+def test_forecast_targets_start_today_when_the_reading_time_is_still_to_come():
+    targets = forecast_targets(ts("2026-06-01 00:30"), "Europe/London", time(7, 0))  # 01:30 BST
+    assert targets[0] == ts("2026-06-01 06:00")
+    assert targets[-1] == ts("2026-06-05 06:00")
+
+
 def test_forecast_targets_use_the_waters_local_date_not_utc():
     # 23:30 UTC on the 1st is already the 2nd in Auckland.
     targets = forecast_targets(ts("2026-06-01 23:30"), "Pacific/Auckland", time(8, 0))

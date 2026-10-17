@@ -34,10 +34,10 @@ def make_water(db, creator, name="Test Lake", slug=None, lat=51.45, lon=-2.6,
     return water
 
 
-def add_reading(db, water, user, at, temp) -> Reading:
+def add_reading(db, water, user, at, temp, **extra) -> Reading:
     reading = Reading(
         water_id=water.id, measured_at=pd.Timestamp(at, tz="UTC").to_pydatetime() if isinstance(at, str) else at,
-        temp_c=temp, submitted_by=user.id,
+        temp_c=temp, submitted_by=user.id, **extra,
     )
     db.add(reading)
     db.commit()

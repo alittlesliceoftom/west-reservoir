@@ -59,13 +59,19 @@ def anchor_hour(at) -> pd.Timestamp:
 
 
 def forecast_targets(now, tz: str, reading_time: time, days: int = 5) -> list[pd.Timestamp]:
-    """The water's reading time on each of the next `days` local days, in UTC."""
+    """
+    The next `days` occurrences of the water's local reading time after
+    `now`, in UTC: today's if it is still to come, then one per day.
+    """
     zone = ZoneInfo(tz)
-    today = pd.Timestamp(now).tz_convert(zone).date()
-    return [
-        pd.Timestamp(datetime.combine(today + timedelta(days=d), reading_time, tzinfo=zone)).tz_convert("UTC")
-        for d in range(1, days + 1)
-    ]
+    now = pd.Timestamp(now).tz_convert("UTC")
+    today = now.tz_convert(zone).date()
+
+    def at(day):
+        return pd.Timestamp(datetime.combine(day, reading_time, tzinfo=zone)).tz_convert("UTC")
+
+    first = 0 if at(today) > now else 1
+    return [at(today + timedelta(days=d)) for d in range(first, first + days)]
 
 
 def run_forward(anchor_at, anchor_temp: float, weather: pd.DataFrame, c: Coefficients, until) -> pd.Series:

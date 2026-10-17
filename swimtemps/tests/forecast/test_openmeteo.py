@@ -23,7 +23,7 @@ def client_returning(handler):
 def test_parse_hourly_gives_a_utc_frame_with_model_column_names():
     frame = parse_hourly(fixture("openmeteo_forecast.json"))
     assert list(frame.columns) == ["valid_at", "air_temp", "shortwave", "cloud_cover"]
-    assert len(frame) == 13 * 24
+    assert len(frame) == 14 * 24
     assert str(frame["valid_at"].dt.tz) == "UTC"
     assert frame["valid_at"].diff().dropna().eq(pd.Timedelta(hours=1)).all()
 
@@ -40,7 +40,7 @@ def test_parse_hourly_keeps_nulls_as_nan():
     assert np.isnan(frame.loc[0, "shortwave"])
 
 
-def test_forecast_requests_seven_past_and_six_forecast_days_in_utc():
+def test_forecast_requests_seven_past_and_seven_forecast_days_in_utc():
     seen = {}
 
     def handler(request):
@@ -51,10 +51,10 @@ def test_forecast_requests_seven_past_and_six_forecast_days_in_utc():
     frame = client_returning(handler).forecast(51.5669, -0.0905)
     assert seen["host"] == "api.open-meteo.com"
     assert seen["past_days"] == "7"
-    assert seen["forecast_days"] == "6"
+    assert seen["forecast_days"] == "7"
     assert seen["timezone"] == "UTC"
     assert seen["hourly"] == "temperature_2m,shortwave_radiation,cloud_cover"
-    assert len(frame) == 312
+    assert len(frame) == 336
 
 
 def test_archive_requests_the_date_range():
@@ -80,7 +80,7 @@ def test_one_failure_is_retried():
             return httpx.Response(502)
         return httpx.Response(200, json=fixture("openmeteo_forecast.json"))
 
-    assert len(client_returning(handler).forecast(51.57, -0.09)) == 312
+    assert len(client_returning(handler).forecast(51.57, -0.09)) == 336
     assert len(calls) == 2
 
 
