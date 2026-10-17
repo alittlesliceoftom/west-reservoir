@@ -1,0 +1,18 @@
+{
+  "_comment": "Model constants. west_res is the reference fit; lambda, the leg thresholds and band_base are chosen by the cold-start replay (docs/cold-start-replay.md).",
+  "provenance": {
+    "west_res": "West Res model_defaults.json, fitted 2026-09-13 on 392 readings / 375 legs",
+    "replay": "placeholder until the cold-start replay runs"
+  },
+  "west_res": {"k_air": 0.00738795, "k_solar": 0.0000839492, "k_cool": 0.00820885},
+  "depth_prior": {"shallow": 2.0, "lake": 1.0, "deep": 0.5, "unknown": 1.0},
+  "lambda": 1.0,
+  "scale_min_legs": 3,
+  "full_min_legs": 30,
+  "max_leg_days": 3,
+  "min_leg_coverage": 0.8,
+  "band_base": {"1": 0.4, "2": 0.8, "3": 1.1, "4": 1.4, "5": 1.7},
+  "method_multiplier": {"prior": 1.5, "scale": 1.25, "full": 1.0},
+  "type_multiplier": {"still": 1.0, "river": 1.5, "harbour": 1.5},
+  "own_errors_min_points": 20
+}

@@ -1,0 +1,16 @@
+[project]
+name = "swimtemps"
+version = "0.1.0"
+requires-python = ">=3.14"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    "slow: long-running replay over the West Res record (deselect with -m 'not slow')",
+]
+addopts = "-m 'not slow'"
+
+[tool.ruff.lint]
+# Bugs only: pyflakes and syntax errors. No style rules.
+select = ["F", "E9"]
