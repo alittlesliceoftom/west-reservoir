@@ -9,7 +9,7 @@ exists within 90 minutes of its target.
 - `lambda` = 0.3
 - `scale_min_legs` = 2
 - `full_min_legs` = 30 (kept: the full fit never sustained a win over the scale fit)
-- `band_base` = 1d 0.46, 2d 0.89, 3d 1.21, 4d 1.66, 5d 1.95
+- `band_base` = 1d 0.46, 2d 0.88, 3d 1.20, 4d 1.64, 5d 1.98
 
 ## Mean |error| by readings available and method (chosen lambda)
 
@@ -65,10 +65,10 @@ actually achieves on forecast weather: band_base = p80 / MAE x production MAE.
 | horizon (days) | p80 |error| | MAE | production MAE | band_base |
 |---|---|---|---|---|
 | 1 | 0.46 | 0.28 | 0.28 | 0.46 |
-| 2 | 0.66 | 0.40 | 0.54 | 0.89 |
-| 3 | 0.74 | 0.49 | 0.80 | 1.21 |
-| 4 | 0.75 | 0.48 | 1.05 | 1.66 |
-| 5 | 0.90 | 0.60 | 1.31 | 1.95 |
+| 2 | 0.66 | 0.40 | 0.54 | 0.88 |
+| 3 | 0.74 | 0.49 | 0.80 | 1.20 |
+| 4 | 0.75 | 0.48 | 1.05 | 1.64 |
+| 5 | 0.92 | 0.61 | 1.31 | 1.98 |
 
 ## Method multipliers
 
