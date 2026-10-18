@@ -266,3 +266,22 @@ def test_feed_legs_need_weather_like_any_leg():
     weather.loc[ts("2026-04-02 12:00"):ts("2026-04-03 12:00"), "air_temp"] = np.nan
     readings = hourly_feed("2026-04-02 00:00", range(48))
     assert build_legs(readings, weather, max_leg_days=3, min_coverage=0.8).count == 0
+
+
+def test_feed_legs_count_as_days_when_choosing_the_fit():
+    params = load_params()
+    weather = prepare_weather(synthetic_weather(50).reset_index())
+    four_days = hourly_feed("2026-04-02 00:00", range(4 * 24))
+    assert fit_water(four_days, weather, "lake").method == "scale"
+    days = params["full_min_legs"] + 5
+    assert fit_water(hourly_feed("2026-04-02 00:00", range(days * 24)), weather, "lake").method == "full"
+
+
+def test_a_days_feed_legs_weigh_as_one_leg():
+    weather = prepare_weather(synthetic_weather(10).reset_index())
+    legs = build_legs(hourly_feed("2026-04-02 00:00", range(96)), weather, max_leg_days=3, min_coverage=0.8)
+    assert legs.count == 75
+    assert legs.effective == pytest.approx(4.0)
+    manual = pd.DataFrame({"measured_at": [ts("2026-04-01 07:00") + pd.Timedelta(days=d) for d in range(4)],
+                           "temp_c": [11.0, 11.2, 11.3, 11.5]})
+    assert build_legs(manual, weather, max_leg_days=3, min_coverage=0.8).effective == 3.0

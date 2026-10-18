@@ -99,3 +99,11 @@ def test_thresholds_can_be_overridden():
 def test_defaults():
     assert DEFAULT_THRESHOLDS == {"jump_base": 2.0, "jump_per_hour": 0.1, "day_limit": 2.5,
                                   "flatline_hours": 24, "air_margin": 1.0}
+
+
+def test_stored_good_readings_between_new_rows_are_the_reference():
+    t0 = FAULT_DAY
+    history = [(t0 - timedelta(hours=h), 13.2) for h in range(80, 0, -1)]
+    reasons = clean([(t0 - timedelta(hours=50), 13.3), (t0, 9.0)], history, NO_AIR)
+    assert reasons[0] is None
+    assert reasons[1] is not None and "Jumped" in reasons[1]

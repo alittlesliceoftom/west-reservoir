@@ -323,3 +323,58 @@ def test_an_existing_feed_reading_keeps_its_overrule(db, feed):
     poll_feed(db, feed, NOW, fetch=fetching(columns(("2026-10-18 07:00", 12.4))))
     db.commit()
     assert fresh(db, Reading, reading.id).flag_override == "reject"
+
+
+# --- a feed that reads nothing usable says why --------------------------------
+
+ROWS = {"url": "https://lake.example/rows", "orientation": "rows", "rows_path": "$", "time_field": "time",
+        "value_field": "temp", "time_format": "iso"}
+
+
+@pytest.fixture
+def rows_feed(db, owner):
+    water = make_water(db, owner, name="Rows Lake", feed_mode="feed")
+    return make_feed(db, water, owner, config=ROWS)
+
+
+def test_a_renamed_key_records_an_error_instead_of_a_silent_success(db, rows_feed):
+    payload = [{"time": "2026-10-18T07:00Z", "temperature": 12.4}, {"time": "2026-10-18T08:00Z", "temperature": 12.5}]
+    result = poll_feed(db, rows_feed, NOW, fetch=fetching(payload))
+    db.commit()
+    stored = fresh(db, Feed, rows_feed.id)
+    assert result.ok is False
+    assert "0 of 2 rows" in stored.last_error and "row 1" in stored.last_error
+    assert stored.last_success_at is None and stored.last_polled_at == NOW
+
+
+def test_an_empty_feed_records_an_error(db, rows_feed):
+    poll_feed(db, rows_feed, NOW, fetch=fetching([]))
+    db.commit()
+    assert fresh(db, Feed, rows_feed.id).last_error == "The feed returned no readings."
+
+
+def test_a_feed_whose_rows_all_fail_the_checks_records_an_error(db, rows_feed):
+    payload = [{"time": "2026-10-18T07:00Z", "temp": 54.4}, {"time": "2026-10-18T08:00Z", "temp": 54.5}]
+    poll_feed(db, rows_feed, NOW, fetch=fetching(payload))
+    db.commit()
+    error = fresh(db, Feed, rows_feed.id).last_error
+    assert "0 of 2 rows" in error and "outside -2 to 40" in error
+
+
+def test_a_feed_whose_rows_are_all_stored_already_is_a_success(db, rows_feed):
+    payload = [{"time": "2026-10-18T07:00Z", "temp": 12.4}]
+    poll_feed(db, rows_feed, NOW, fetch=fetching(payload))
+    result = poll_feed(db, rows_feed, NOW, fetch=fetching(payload))
+    db.commit()
+    assert result.ok and fresh(db, Feed, rows_feed.id).last_error is None
+
+
+def test_a_correction_in_the_same_poll_does_not_unguard_new_rows(db, feed):
+    start = pd.Timestamp("2026-10-15 00:00", tz="UTC")
+    steady = [((start + timedelta(hours=h)).isoformat(), 13.2 + 0.1 * (h % 3)) for h in range(80)]
+    poll_feed(db, feed, NOW, fetch=fetching(columns(*steady)))
+    db.commit()
+    corrected = [(at, 13.0 if i == 30 else t) for i, (at, t) in enumerate(steady)]
+    result = poll_feed(db, feed, NOW, fetch=fetching(columns(*corrected, ((start + timedelta(hours=80)).isoformat(), 9.0))))
+    db.commit()
+    assert (result.new, result.corrected, result.flagged) == (1, 1, 1)

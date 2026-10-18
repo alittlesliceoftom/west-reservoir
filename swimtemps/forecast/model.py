@@ -6,7 +6,7 @@ the frame `prepare_weather` returns: a complete UTC hourly index, so a gap in
 the data is a NaN row rather than a missing one.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -111,7 +111,14 @@ def forecast_points(anchor_at, anchor_temp, weather, c, targets) -> list[tuple[p
 
 @dataclass
 class Legs:
-    """Reading pairs, weather held as padded (legs x hours) matrices."""
+    """
+    Reading pairs, weather held as padded (legs x hours) matrices.
+
+    `weights` make overlapping legs count as the days they cover: a manual
+    leg weighs 1, and the feed legs starting on one day share a weight of 1,
+    so an hourly feed's 24 legs a day carry one day of evidence, as the fit
+    thresholds and the prior's strength were calibrated on.
+    """
     start_temps: np.ndarray
     end_temps: np.ndarray
     air: np.ndarray
@@ -119,10 +126,20 @@ class Legs:
     cloud: np.ndarray
     mask: np.ndarray
     n_hours: np.ndarray
+    weights: np.ndarray = field(default=None)
+
+    def __post_init__(self):
+        if self.weights is None:
+            self.weights = np.ones(len(self.start_temps))
 
     @property
     def count(self) -> int:
         return len(self.start_temps)
+
+    @property
+    def effective(self) -> float:
+        """How many independent legs these amount to."""
+        return float(self.weights.sum())
 
     def predict(self, c: Coefficients) -> np.ndarray:
         return leg_end_temps(self.start_temps, self.air, self.solar, self.cloud, self.mask, self.n_hours, c)
@@ -174,7 +191,7 @@ def build_legs(readings: pd.DataFrame, weather: pd.DataFrame, max_leg_days: floa
     else:
         groups = [(_collapse_same_hour(readings), False)]
 
-    kept = []
+    kept, days = [], []
     for frame, feed in groups:
         pairs = _day_pairs(frame) if feed else _consecutive_pairs(frame, max_leg_days)
         for i, j in pairs:
@@ -185,6 +202,10 @@ def build_legs(readings: pd.DataFrame, weather: pd.DataFrame, max_leg_days: floa
                 continue
             window = window.interpolate(limit_direction="both")
             kept.append((frame.loc[i, "temp_c"], frame.loc[j, "temp_c"], window))
+            days.append(start.date() if feed else None)
+
+    per_day = pd.Series([d for d in days if d is not None]).value_counts()
+    weights = np.array([1.0 if d is None else 1.0 / per_day[d] for d in days])
 
     width = max((len(w) for *_, w in kept), default=0)
     shape = (len(kept), width)
@@ -200,7 +221,7 @@ def build_legs(readings: pd.DataFrame, weather: pd.DataFrame, max_leg_days: floa
         start_temps=np.array([k[0] for k in kept], dtype=float),
         end_temps=np.array([k[1] for k in kept], dtype=float),
         air=air, solar=solar, cloud=cloud, mask=mask,
-        n_hours=mask.sum(axis=1),
+        n_hours=mask.sum(axis=1), weights=weights,
     )
 
 
@@ -213,7 +234,7 @@ class FitResult:
     train_mae: float    # NaN when there are no legs
 
 
-def choose_method(n_legs: int, params: dict) -> str:
+def choose_method(n_legs: float, params: dict) -> str:
     if n_legs < params["scale_min_legs"]:
         return "prior"
     if n_legs < params["full_min_legs"]:
@@ -224,7 +245,7 @@ def choose_method(n_legs: int, params: dict) -> str:
 def _mae(legs: Legs, c: Coefficients) -> float:
     if legs.count == 0:
         return float("nan")
-    return float(np.abs(legs.predict(c) - legs.end_temps).mean())
+    return float(np.average(np.abs(legs.predict(c) - legs.end_temps), weights=legs.weights))
 
 
 def _fit_scale(legs: Legs, ref: Coefficients, s_prior: float, lam: float) -> float:
@@ -232,7 +253,7 @@ def _fit_scale(legs: Legs, ref: Coefficients, s_prior: float, lam: float) -> flo
 
     def objective(u):
         error = legs.predict(ref.scaled(np.exp(u))) - legs.end_temps
-        return float((error ** 2).sum() + lam * (u - log_prior) ** 2)
+        return float((legs.weights * error ** 2).sum() + lam * (u - log_prior) ** 2)
 
     bounds = tuple(np.log(SCALE_BOUNDS))
     result = minimize_scalar(objective, bounds=bounds, method="bounded", options={"xatol": 1e-4})
@@ -246,7 +267,7 @@ def _fit_full(legs: Legs, ref: Coefficients, s_prior: float, lam: float) -> Coef
     def objective(x):
         k = np.exp(x)
         error = legs.predict(Coefficients(*k)) - legs.end_temps
-        return float((error ** 2).sum() + lam * ((x - centre) ** 2).sum())
+        return float((legs.weights * error ** 2).sum() + lam * ((x - centre) ** 2).sum())
 
     bounds = [tuple(np.log(K_BOUNDS[n])) for n in names]
     x0 = np.clip(centre, [b[0] for b in bounds], [b[1] for b in bounds])
@@ -282,7 +303,7 @@ def fit_water(
 def fit_legs(legs: Legs, s_prior: float, params: dict, method: str | None = None) -> FitResult:
     """`fit_water` on legs already built."""
     ref = west_res_coefficients(params)
-    method = method or choose_method(legs.count, params)
+    method = method or choose_method(legs.effective, params)
     if legs.count == 0:
         method = "prior"
 

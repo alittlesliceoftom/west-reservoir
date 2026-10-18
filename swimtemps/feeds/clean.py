@@ -64,13 +64,19 @@ def clean(
 ) -> list[str | None]:
     """
     One reason, or None, for each of `new_rows`, in order. Both lists are
-    sorted (time, °C); each accepted row joins the good history for the rows
-    after it. `air` is hourly air temperature on a UTC index.
+    sorted (time, °C). Each new row is judged against the good readings
+    before it: those of `good_history` earlier than it (which may also run
+    past it, between new rows) and the new rows accepted so far. `air` is
+    hourly air temperature on a UTC index.
     """
     limits = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
-    good = list(good_history)
+    history = sorted(good_history)
+    good, next_stored = [], 0
     reasons = []
     for at, temp in new_rows:
+        while next_stored < len(history) and history[next_stored][0] < at:
+            good.append(history[next_stored])
+            next_stored += 1
         reason = _reason(at, temp, good, limits)
         if reason is None:
             good.append((at, temp))

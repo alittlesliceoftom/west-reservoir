@@ -9,8 +9,10 @@ stored the way an admin correction is (old row soft-deleted, new row, old
 a new row at another minute, so thinning stays stable from poll to poll.
 
 New and corrected rows are cleaned against the feed's good readings and
-the stored air temperature. Each feed is polled in its own transaction,
-and one failure never stops the others.
+the stored air temperature. A poll with no usable row (the venue renamed a
+key, or the feed is empty) is a failure with the reason in `last_error`.
+Each feed is polled in its own transaction, and one failure never stops
+the others.
 """
 
 import logging
@@ -69,13 +71,18 @@ def checked(rows: list[tuple[datetime, float]], now: datetime) -> tuple[list[tup
     return kept, errors
 
 
-def _good_history(session: Session, feed: Feed, before: datetime) -> list[tuple[datetime, float]]:
+def _good_history(session: Session, feed: Feed, written: list[Reading]) -> list[tuple[datetime, float]]:
+    """
+    The feed's usable standing readings from 48 h before the first written
+    row to the last, leaving out the written rows themselves.
+    """
     rows = session.execute(text(f"""
         SELECT r.measured_at, r.temp_c::float8 FROM readings r
         WHERE r.feed_id = :feed AND r.deleted_at IS NULL AND {queries.USABLE_SQL}
-          AND r.measured_at >= :since AND r.measured_at < :before
+          AND r.measured_at >= :since AND r.measured_at <= :until AND NOT (r.id = ANY(:written))
         ORDER BY r.measured_at
-    """), {"feed": feed.id, "since": before - CLEAN_HISTORY, "before": before}).all()
+    """), {"feed": feed.id, "since": written[0].measured_at - CLEAN_HISTORY, "until": written[-1].measured_at,
+           "written": [r.id for r in written]}).all()
     return [(_utc(at), temp) for at, temp in rows]
 
 
@@ -136,12 +143,20 @@ def poll_feed(session: Session, feed: Feed, now: datetime, fetch=fetch_json) -> 
         return PollResult(errors=[str(error)], ok=False)
 
     rows, rejected = checked(parsed.rows, now)
+    problems = parsed.errors + rejected
+    if not rows:
+        total = len(parsed.rows) + len(parsed.errors)
+        feed.last_error = (f"0 of {total} rows could be used, e.g. {problems[0]}." if problems
+                           else "The feed returned no readings.")
+        log.warning("feed %s for water %s: %s", feed.id, water.id, feed.last_error)
+        return PollResult(errors=problems, ok=False)
     written, corrected = store(session, feed, thin_hourly(rows), now)
     flagged = 0
     if written:
+        session.flush()
         written.sort(key=lambda r: r.measured_at)
         first = written[0].measured_at
-        reasons = clean([(r.measured_at, float(r.temp_c)) for r in written], _good_history(session, feed, first),
+        reasons = clean([(r.measured_at, float(r.temp_c)) for r in written], _good_history(session, feed, written),
                         _air(session, water.id, first - CLEAN_HISTORY), feed.thresholds)
         for reading, reason in zip(written, reasons):
             reading.flagged, reading.flag_reason = reason is not None, reason
@@ -152,8 +167,7 @@ def poll_feed(session: Session, feed: Feed, now: datetime, fetch=fetch_json) -> 
     feed.last_success_at = now
     feed.last_error = None
     feed.last_good_reading_at = last_good_reading_at(session, feed.id)
-    result = PollResult(new=len(written) - corrected, corrected=corrected, flagged=flagged,
-                        errors=parsed.errors + rejected)
+    result = PollResult(new=len(written) - corrected, corrected=corrected, flagged=flagged, errors=problems)
     if result.errors:
         log.info("feed %s: %d rows not stored, e.g. %s", feed.id, len(result.errors), result.errors[0])
     return result
