@@ -295,7 +295,7 @@ def test_an_accepted_flag_is_noted_on_the_chart(db, polled):
     db.commit()
     payload = compute(db, polled, NOW)
     item = next(r for r in payload["readings"] if r[0] == pd.Timestamp(reading.measured_at).tz_convert("UTC").isoformat())
-    assert item[2] is None and "accepted by the water's admin" in item[3]
+    assert item[2] is None and "Accepted by the water's admin" in item[3]
 
 
 def test_the_anchor_is_the_latest_usable_reading(db, polled):

@@ -170,4 +170,4 @@ def test_chart_readings_note_a_flag_an_admin_accepted(db, feed_water):
     frame = queries.chart_readings(db, water.id, since=None)
     assert frame["usable"].tolist() == [True, True]
     assert frame["note"].iloc[0] is None
-    assert frame["note"].iloc[1] == "Flagged (Jumped 4.4 °C.), accepted by the water's admin"
+    assert frame["note"].iloc[1] == "Accepted by the water's admin. The cleaning had flagged it: Jumped 4.4 °C."

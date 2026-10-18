@@ -13,7 +13,7 @@ MIN_POINTS_PER_HORIZON = 10
 # and accepted by an admin, and not marked wrong. Expects the alias `r`.
 USABLE_SQL = "(r.flag_override = 'accept' OR (r.flag_override IS NULL AND NOT r.flagged))"
 REJECTED_REASON = "Marked as wrong by the water's admin"
-ACCEPTED_NOTE = "Flagged ({reason}), accepted by the water's admin"
+ACCEPTED_NOTE = "Accepted by the water's admin. The cleaning had flagged it: {reason}"
 
 # Archive values overwrite forecast values; a forecast never overwrites an
 # archive value. A null in the incoming row keeps what is stored.
