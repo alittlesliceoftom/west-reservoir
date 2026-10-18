@@ -9,6 +9,7 @@ RUN pip install -r requirements.txt
 
 COPY alembic.ini ./
 COPY db ./db
+COPY feeds ./feeds
 COPY forecast ./forecast
 COPY web ./web
 COPY worker ./worker

@@ -14,6 +14,7 @@ from datetime import datetime
 
 import pandas as pd
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -93,7 +94,11 @@ class TestResult:
 
 
 def run_test(request: Request, db: Session, water: Water, config: dict) -> TestResult:
-    """One fetch, read, checked, thinned and cleaned in memory. Stores nothing."""
+    """
+    One fetch, read, checked, thinned and cleaned in memory. Stores nothing.
+    It blocks for up to the fetch's deadline, so async routes run it in the
+    threadpool, never on the event loop.
+    """
     now = request.app.state.clock()
     recipe_config = {k: v for k, v in config.items() if k not in CREDIT_KEYS}
     try:
@@ -157,7 +162,7 @@ async def test(request: Request, slug: str, db: Session = Depends(get_db), user:
     config, errors = form_config(form)
     if errors:
         return setup_page(request, db, water, status_code=422, fields=form, errors=errors)
-    result = run_test(request, db, water, config)
+    result = await run_in_threadpool(run_test, request, db, water, config)
     return setup_page(request, db, water, status_code=422 if result.failure else 200, fields=form,
                       test=result, config=config)
 
@@ -172,7 +177,7 @@ async def turn_on(request: Request, slug: str, db: Session = Depends(get_db), us
     if form.get("tested") != config_token(config):
         return setup_page(request, db, water, status_code=422, fields=form,
                           errors=["Press Test first, and turn the feed on from its result."])
-    result = run_test(request, db, water, config)
+    result = await run_in_threadpool(run_test, request, db, water, config)
     if form.get("attest") != "yes":
         return setup_page(request, db, water, status_code=422, fields=form, test=result, config=config,
                           errors=["Tick the box to confirm you have permission to share this data."])

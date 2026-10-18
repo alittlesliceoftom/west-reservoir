@@ -387,3 +387,21 @@ def test_me_lists_feed_waters_with_a_switch_to_manual(client, db, water, admin):
     assert 'action="/w/test-lake/feed/disable"' in page
     assert feed.id
     assert csrf(client)
+
+
+def test_test_and_turn_on_fetch_off_the_event_loop(client, app, water, admin):
+    import asyncio
+    seen = []
+
+    def fetch(url):
+        try:
+            asyncio.get_running_loop()
+            seen.append("on the event loop")
+        except RuntimeError:
+            seen.append("in a thread")
+        return deep()
+
+    app.state.feed_fetch = fetch
+    sign_in(client, admin)
+    assert enable(client).status_code == 303
+    assert seen == ["in a thread", "in a thread"]

@@ -1,8 +1,12 @@
+import asyncio
 import socket
+import threading
+import time
 
 import httpx
 import pytest
 
+from feeds import fetch as fetch_module
 from feeds.fetch import MAX_BYTES, FetchError, fetch_json
 
 ADDRESSES = {
@@ -22,7 +26,7 @@ def resolver(host, port, *args, **kwargs):
 
 
 def client_for(handler):
-    return httpx.Client(transport=httpx.MockTransport(handler))
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
 def json_ok(request):
@@ -128,7 +132,7 @@ def test_a_body_over_five_megabytes_is_refused():
 def test_a_streamed_body_over_five_megabytes_is_refused_without_reading_it_all():
     chunks = []
 
-    def stream():
+    async def stream():
         for _ in range(100):
             chunks.append(1)
             yield b" " * (256 * 1024)
@@ -139,16 +143,76 @@ def test_a_streamed_body_over_five_megabytes_is_refused_without_reading_it_all()
     assert len(chunks) * 256 * 1024 <= MAX_BYTES + 256 * 1024
 
 
-def test_a_trickling_body_is_cut_off_at_twenty_seconds():
-    clock = iter(range(0, 1000, 8))
+@pytest.fixture
+def short_deadline(monkeypatch):
+    monkeypatch.setattr(fetch_module, "TIMEOUT_SECONDS", 0.5)
 
-    def stream():
+
+def test_a_trickling_body_is_cut_off_at_the_deadline(short_deadline):
+    async def stream():
         for _ in range(100):
+            await asyncio.sleep(0.05)
             yield b" "
 
     handler = lambda r: httpx.Response(200, content=stream())  # noqa: E731
-    with pytest.raises(FetchError, match="20 seconds"):
-        fetch_json("https://lake.example/", client_for(handler), resolver, clock=lambda: next(clock))
+    started = time.monotonic()
+    with pytest.raises(FetchError, match="seconds"):
+        fetch_json("https://lake.example/", client_for(handler), resolver)
+    assert time.monotonic() - started < 1.5
+
+
+def test_slow_name_resolution_counts_against_the_deadline(short_deadline):
+    def slow(host, port, *args, **kwargs):
+        time.sleep(2)
+        return resolver(host, port)
+
+    started = time.monotonic()
+    with pytest.raises(FetchError, match="seconds"):
+        fetch_json("https://lake.example/", client_for(json_ok), slow)
+    assert time.monotonic() - started < 1.5
+
+
+@pytest.fixture
+def trickling_server():
+    """A local server that sends its response headers one byte at a time, forever."""
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    stop = threading.Event()
+
+    def serve():
+        server.settimeout(0.2)
+        while not stop.is_set():
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                continue
+            with conn:
+                for byte in b"HTTP/1.1 200 OK\r\nX-Slow: " + b"a" * 10_000:
+                    if stop.is_set():
+                        break
+                    try:
+                        conn.sendall(bytes([byte]))
+                    except OSError:
+                        break
+                    time.sleep(0.05)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    yield server.getsockname()[1]
+    stop.set()
+    server.close()
+
+
+def test_headers_trickled_a_byte_at_a_time_are_cut_off_at_the_deadline(short_deadline, trickling_server):
+    def public(host, port, *args, **kwargs):
+        # Passes the address check as if public; the connection still goes to the local server.
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+
+    started = time.monotonic()
+    with pytest.raises(FetchError, match="seconds"):
+        fetch_json(f"http://127.0.0.1:{trickling_server}/temps", resolver=public)
+    assert time.monotonic() - started < 2
 
 
 def test_a_timeout_is_a_fetch_error():
