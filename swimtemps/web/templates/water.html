@@ -13,20 +13,21 @@
 
 {% if updating %}{% include "_status.html" with context %}{% endif %}
 
+{% if p and p.latest_reading %}
+  <section class="headline">
+    {% if p.estimate_now %}<p class="now">About {{ p.estimate_now.temp | temp }} now</p>{% endif %}
+    <p class="last">Last reading {{ p.latest_reading.temp | temp }}, {{ p.latest_reading.at | localtime(water.timezone) }}</p>
+  </section>
+{% elif not updating %}
+  <section class="headline">
+    <p class="last">No readings yet. Add the first one to get a forecast.</p>
+  </section>
+{% endif %}
+
+<p><a class="button primary" href="/w/{{ water.slug }}/readings">Add a reading</a>
+  {% if is_admin %}<a class="button" href="/w/{{ water.slug }}/admin">Manage</a>{% endif %}</p>
+
 {% if p %}
-  {% if p.latest_reading %}
-    <section class="headline">
-      {% if p.estimate_now %}<p class="now">About {{ p.estimate_now.temp | temp }} now</p>{% endif %}
-      <p class="last">Last reading {{ p.latest_reading.temp | temp }}, {{ p.latest_reading.at | localtime(water.timezone) }}</p>
-    </section>
-  {% elif not updating %}
-    <section class="headline">
-      <p class="last">No readings yet. Add the first one to get a forecast.</p>
-    </section>
-  {% endif %}
-
-  <p><a class="button primary" href="/w/{{ water.slug }}/readings">Add a reading</a></p>
-
   {% if chart %}
   <section class="chart">
     <div id="chart" aria-label="Readings, air temperature and the 5-day forecast"></div>

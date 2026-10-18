@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from db import queries
 from db.models import Snapshot, Water
 from web.deps import get_db
+from web.permissions import can_admin
 from web.templating import render
 
 router = APIRouter()
@@ -43,6 +44,7 @@ def water_page(request: Request, slug: str, db: Session = Depends(get_db)):
         "chart": chart,
         "updating": water.needs_recompute or snapshot is None,
         "first": snapshot is None,
+        "is_admin": can_admin(db, request.state.user, water),
         "since": snapshot.built_at.isoformat() if snapshot else "",
     })
 

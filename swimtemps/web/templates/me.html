@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Your waters - swimtemps{% endblock %}
+{% block main %}
+<h1>{{ user.display_name or user.email }}</h1>
+<p class="muted">Signed in as {{ user.email }}.</p>
+
+<h2>Your waters</h2>
+<ul class="waters">
+  {% for w in waters %}
+  <li><a href="/w/{{ w.slug }}"><span class="name">{{ w.name }}</span><span class="muted">Manage at /w/{{ w.slug }}/admin</span></a></li>
+  {% else %}
+  <li class="empty">None yet. <a href="/new">Add your water</a>.</li>
+  {% endfor %}
+</ul>
+
+<h2>Your recent readings</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Water</th><th>Taken</th><th>°C</th></tr></thead>
+  <tbody>
+  {% for r, name, slug, tz in readings %}
+    <tr><td><a href="/w/{{ slug }}">{{ name }}</a></td><td>{{ r.measured_at | localtime(tz) }}</td><td>{{ "%.1f" | format(r.temp_c) }}</td></tr>
+  {% else %}
+    <tr><td colspan="3" class="muted">No readings yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

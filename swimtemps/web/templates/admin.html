@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Admin - {{ water.name }} - swimtemps{% endblock %}
+{% block main %}
+<p class="steps"><a href="/w/{{ water.slug }}">{{ water.name }}</a> · Admin</p>
+<h1>Manage {{ water.name }}</h1>
+{% if message %}<p class="flash" role="status">{{ message }}</p>{% endif %}
+{% if error %}<p class="warning error-text" role="alert">{{ error }}</p>{% endif %}
+
+<h2>Readings</h2>
+<p class="muted small">{{ total }} reading{{ "" if total == 1 else "s" }}{% if total > rows|length %}, newest {{ rows|length }} shown{% endif %}. Corrections and deletions keep the original, so nothing is lost.</p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Taken</th><th>°C</th><th>By</th><th></th></tr></thead>
+  <tbody>
+  {% for r, name, email in rows %}
+    <tr>
+      <td>{{ r.measured_at | localtime(water.timezone) }}</td>
+      <td>{{ "%.1f" | format(r.temp_c) }}</td>
+      <td>{{ name or email }}</td>
+      <td>
+        <details>
+          <summary>Correct</summary>
+          <form method="post" action="/w/{{ water.slug }}/admin/readings/{{ r.id }}/correct" class="stack">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label>°C <input name="temp" value="{{ '%.1f' | format(r.temp_c) }}" inputmode="decimal" required></label>
+            <label>Taken at <input type="datetime-local" name="measured_at" value="{{ input_value(r.measured_at) }}" required></label>
+            <button class="primary" type="submit">Save correction</button>
+          </form>
+        </details>
+        <form method="post" action="/w/{{ water.slug }}/admin/readings/{{ r.id }}/delete" class="inline"
+              onsubmit="return confirm('Delete this reading?');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="link danger" type="submit">Delete</button>
+        </form>
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4" class="muted">No readings yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h2>Details</h2>
+<form method="post" action="/w/{{ water.slug }}/admin/details" class="stack">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label>Name <input name="name" value="{{ form.name or water.name }}" maxlength="80" required></label>
+  <label>Kind of water
+    <select name="water_type">
+      {% for value, label in WATER_TYPES.items() %}<option value="{{ value }}" {% if (form.water_type or water.water_type) == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Rough depth
+    <select name="depth_class">
+      {% for value, label in DEPTH_CLASSES.items() %}<option value="{{ value }}" {% if (form.depth_class or water.depth_class) == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Usual reading time <input type="time" name="reading_time" value="{{ form.reading_time or water.default_reading_time.strftime('%H:%M') }}" required></label>
+  <p class="muted small">The web address (/w/{{ water.slug }}) stays the same if you rename it.</p>
+  <button type="submit">Save details</button>
+</form>
+
+<h2>Admins</h2>
+<ul>
+  {% for name, email, role in members %}<li>{{ name or email }}{% if role != "admin" %} ({{ role }}){% endif %}</li>{% endfor %}
+</ul>
+<form method="post" action="/w/{{ water.slug }}/admin/members" class="stack">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label>Make someone an admin <input type="email" name="email" placeholder="their sign-in email" required>
+    <span class="hint">They need to have signed in to swimtemps at least once.</span>
+  </label>
+  <button type="submit">Add admin</button>
+</form>
+
+<h2>Archive</h2>
+<p class="muted">Archiving hides this water from the site. Its readings and forecasts are kept.</p>
+<form method="post" action="/w/{{ water.slug }}/admin/archive" onsubmit="return confirm('Archive {{ water.name }}? It will disappear from the site.');">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button class="danger" type="submit">Archive this water</button>
+</form>
+{% endblock %}

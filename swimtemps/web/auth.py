@@ -105,12 +105,13 @@ def upsert_user(session: Session, claims: dict, identities=None) -> User:
     user = session.get(User, uuid.UUID(claims["sub"]))
     metadata = claims.get("user_metadata") or {}
     name = metadata.get("full_name") or metadata.get("name") or (claims.get("email") or "").split("@")[0]
+    email = (claims.get("email") or "").strip().lower() or None
     if user is None:
-        user = User(id=uuid.UUID(claims["sub"]), email=claims.get("email"), display_name=name,
+        user = User(id=uuid.UUID(claims["sub"]), email=email, display_name=name,
                     google_sub=google_sub(claims, identities))
         session.add(user)
     else:
-        user.email = claims.get("email") or user.email
+        user.email = email or user.email
         user.google_sub = user.google_sub or google_sub(claims, identities)
     session.commit()
     return user

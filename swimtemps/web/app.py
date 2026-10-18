@@ -17,7 +17,7 @@ from db.session import session_factory as default_session_factory
 from web.auth import AuthMiddleware, LoginRequired, SupabaseAuth, TokenVerifier, login_redirect
 from web.config import Settings
 from forecast.openmeteo import OpenMeteoClient
-from web.routes import auth, create, health, pages, readings
+from web.routes import admin, auth, create, health, pages, readings
 from web.templating import render
 
 
@@ -43,6 +43,7 @@ def create_app(settings: Settings | None = None, session_factory=None, clock=Non
     app.include_router(auth.router)
     app.include_router(readings.router)
     app.include_router(create.router)
+    app.include_router(admin.router)
 
     @app.exception_handler(LoginRequired)
     async def login_required(request: Request, exc: LoginRequired):

@@ -45,6 +45,13 @@ def check_location(lat: str, lon: str, timezone: str) -> tuple[dict, list[str]]:
 
 def check_details(form: dict) -> tuple[dict, list[str]]:
     values, errors = check_location(form.get("lat", ""), form.get("lon", ""), form.get("timezone", ""))
+    about, about_errors = check_about(form)
+    return {**values, **about}, errors + about_errors
+
+
+def check_about(form: dict) -> tuple[dict, list[str]]:
+    """Name, type, depth class and reading time: the details an admin can edit later."""
+    values, errors = {}, []
     name = " ".join(form.get("name", "").split())
     if not name:
         errors.append("Give the water a name.")
