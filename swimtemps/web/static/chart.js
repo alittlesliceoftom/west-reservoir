@@ -37,7 +37,7 @@
         { name: "band-lower", type: "line", data: lower, stack: "band", showSymbol: false, lineStyle: { opacity: 0 }, tooltip: { show: false }, silent: true },
         { name: "80% range", type: "line", data: width, stack: "band", showSymbol: false, lineStyle: { opacity: 0 }, areaStyle: { color: "#0b6e99", opacity: 0.18 }, tooltip: { show: false }, silent: true },
         { name: "Forecast", type: "line", data: d.trajectory, showSymbol: false, lineStyle: { type: "dashed", width: 2 }, itemStyle: { color: "#0b6e99" },
-          markLine: { silent: true, symbol: "none", label: { formatter: "now", position: "start" }, lineStyle: { color: "#e3b341" }, data: [{ xAxis: nowMs }] } },
+          markLine: { silent: true, symbol: "none", label: { formatter: "now", position: "insideEndTop" }, lineStyle: { color: "#e3b341" }, data: [{ xAxis: nowMs }] } },
         { name: "Readings", type: "scatter", data: d.readings, symbolSize: 7, itemStyle: { color: dark ? "#e6edf2" : "#13202b" }, z: 3 }
       ]
     });
