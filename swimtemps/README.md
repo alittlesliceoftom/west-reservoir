@@ -4,8 +4,8 @@ Water temperatures for open-water swimming spots. Anyone can add a body of
 water, swimmers add readings, and every water gets a 5-day forecast with an
 80% range, driven by Open-Meteo weather and the West Reservoir heat model.
 
-Design: [`docs/superpowers/specs/2026-10-18-swimtemps-platform-design.md`](../docs/superpowers/specs/2026-10-18-swimtemps-platform-design.md)
-(in the West Res repo until this directory becomes its own repo).
+Design: [`docs/design/2026-10-18-platform-design.md`](docs/design/2026-10-18-platform-design.md);
+implementation plan alongside it.
 
 ## How it works
 
