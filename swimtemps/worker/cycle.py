@@ -1,7 +1,8 @@
 """
 One worker cycle's units of work: refresh weather, fit, forecast, snapshot.
 
-`sweep` runs over every active water; `drain_dirty` over those the web has
+`sweep` polls every feed, then runs over every active water; `drain_dirty`
+polls any feed not yet polled, then runs over the waters the web has
 flagged with `needs_recompute`. Each water is processed in its own
 transaction, and its flag is cleared *before* its data is read: a reading
 saved mid-compute sets the flag again and is picked up next time, and a
@@ -18,7 +19,8 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from db import queries
-from db.models import ForecastPoint, ForecastRun, Heartbeat, ModelFit, Snapshot, Water
+from db.models import Feed, ForecastPoint, ForecastRun, Heartbeat, ModelFit, Snapshot, Water
+from feeds.fetch import fetch_json
 from forecast.band import halfwidth, horizon_days
 from forecast.model import (
     FitResult,
@@ -31,7 +33,8 @@ from forecast.model import (
 )
 from forecast.openmeteo import PAST_DAYS, OpenMeteoError
 from forecast.physics import Coefficients, load_params
-from worker.snapshot import build_payload, iso
+from worker.feeds import poll_feeds
+from worker.snapshot import READINGS_DAYS, build_payload, iso
 
 log = logging.getLogger("swimtemps.worker")
 
@@ -42,6 +45,9 @@ HEARTBEAT_KEEP = timedelta(days=7)
 # record but form no training legs, which keeps a mistyped year from pulling
 # decades of hourly weather into a free-tier database.
 ARCHIVE_MAX = timedelta(days=3 * 365)
+# A feed water's clocks run from its feed's last good reading.
+FEED_QUIET_AFTER = timedelta(hours=12)
+FEED_FORECAST_PAUSED_AFTER = timedelta(days=5)
 
 
 def coordinate_key(water: Water) -> tuple[float, float]:
@@ -136,6 +142,23 @@ def _fit(session: Session, water: Water, readings, weather, now, params) -> FitR
     return fit
 
 
+def feed_status(feed: Feed, now: datetime) -> dict:
+    """
+    The feed block of a feed water's payload. Quiet after 12 hours without a
+    good reading; no forecast after 5 days without one, or while paused.
+    """
+    last = feed.last_good_reading_at
+    age = None if last is None else now - last
+    return {
+        "source_name": feed.source_name,
+        "source_link": feed.source_link,
+        "state": feed.state,
+        "last_good_reading_at": None if last is None else iso(last),
+        "quiet": age is None or age > FEED_QUIET_AFTER,
+        "paused_forecast": feed.state == "paused" or age is None or age > FEED_FORECAST_PAUSED_AFTER,
+    }
+
+
 def compute_water(session: Session, water: Water, client, now: datetime, refresh: bool = True,
                   params: dict | None = None) -> Snapshot:
     """Weather (optionally), fit, forecast run and snapshot for one water."""
@@ -148,9 +171,15 @@ def compute_water(session: Session, water: Water, client, now: datetime, refresh
     fit = _fit(session, water, readings, weather, now, params)
     fit_row = _latest_fit(session, water.id)
 
+    feed = None
+    if water.feed_mode == "feed":
+        row = session.scalar(select(Feed).where(Feed.water_id == water.id))
+        feed = feed_status(row, now) if row is not None else None
+    paused = feed is not None and feed["paused_forecast"]
+
     anchor = readings.iloc[-1] if len(readings) else None
     estimate, points, trajectory = None, [], None
-    if anchor is not None:
+    if anchor is not None and not paused:
         targets = forecast_targets(now, water.timezone, water.default_reading_time)
         estimate = estimate_at(anchor.measured_at, anchor.temp_c, weather, fit.coefficients, at=now)
         trajectory = run_forward(anchor.measured_at, anchor.temp_c, weather, fit.coefficients, until=targets[-1])
@@ -177,6 +206,8 @@ def compute_water(session: Session, water: Water, client, now: datetime, refresh
         water=water, now=now, readings=readings, fit=fit, anchor=anchor, estimate=estimate,
         points=points, trajectory=trajectory, weather=weather,
         weather_fetched_at=last_forecast_fetch(session, water.id),
+        chart=queries.chart_readings(session, water.id, since=now - timedelta(days=READINGS_DAYS)),
+        feed=feed,
     )
     session.execute(
         insert(Snapshot).values(water_id=water.id, built_at=now, payload=payload)
@@ -211,8 +242,12 @@ def _active_ids(session: Session, dirty_only: bool) -> list[int]:
     return list(session.scalars(query))
 
 
-def sweep(factory: sessionmaker, client, now: datetime) -> int:
-    """Refresh weather for every active water (one call per coordinate group), then recompute each."""
+def sweep(factory: sessionmaker, client, now: datetime, fetch=fetch_json) -> int:
+    """
+    Poll every feed, refresh weather for every active water (one call per
+    coordinate group), then recompute each.
+    """
+    poll_feeds(factory, now, fetch=fetch)
     with factory() as session:
         ids = _active_ids(session, dirty_only=False)
         if not ids:
@@ -223,8 +258,13 @@ def sweep(factory: sessionmaker, client, now: datetime) -> int:
     return sum(process(factory, water_id, client, now, refresh=False) for water_id in ids)
 
 
-def drain_dirty(factory: sessionmaker, client, now: datetime) -> int:
-    """Recompute every flagged water. Returns how many succeeded."""
+def drain_dirty(factory: sessionmaker, client, now: datetime, fetch=fetch_json) -> int:
+    """
+    Poll feeds just turned on, so a new feed water fills in without waiting
+    for the sweep, then recompute every flagged water. Returns how many
+    recomputes succeeded.
+    """
+    poll_feeds(factory, now, fetch=fetch, unpolled_only=True)
     with factory() as session:
         ids = _active_ids(session, dirty_only=True)
     return sum(process(factory, water_id, client, now, refresh=True) for water_id in ids)

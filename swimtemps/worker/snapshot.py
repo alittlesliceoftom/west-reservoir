@@ -36,8 +36,18 @@ def build_payload(
     trajectory: pd.Series | None,
     weather: pd.DataFrame,
     weather_fetched_at: datetime | None,
+    chart: pd.DataFrame | None = None,
+    feed: dict | None = None,
 ) -> dict:
-    recent = readings[readings.measured_at >= pd.Timestamp(now) - timedelta(days=READINGS_DAYS)]
+    """
+    `readings` are the usable readings the model ran on; `chart` is every
+    standing reading for the chart, each with the reason it is not usable
+    (None when it is). Without `chart`, the usable readings are charted.
+    `feed` is the feed block for a feed water, or None.
+    """
+    if chart is None:
+        chart = readings.assign(reason=None)
+    recent = chart[chart.measured_at >= pd.Timestamp(now) - timedelta(days=READINGS_DAYS)]
     air = weather["air_temp"] if not weather.empty else pd.Series(dtype=float, index=pd.DatetimeIndex([], tz="UTC"))
     air = air[air.index >= pd.Timestamp(now) - timedelta(days=AIR_PAST_DAYS)]
     if trajectory is not None:
@@ -61,7 +71,7 @@ def build_payload(
         },
         "forecast": points,
         "trajectory": [] if trajectory is None else _series(trajectory),
-        "readings": [[iso(r.measured_at), round(float(r.temp_c), 1)] for r in recent.itertuples()],
+        "readings": [[iso(r.measured_at), round(float(r.temp_c), 1), r.reason] for r in recent.itertuples()],
         "air": _series(air, digits=1),
         "calibration": {
             "method": fit.method,
@@ -71,4 +81,5 @@ def build_payload(
         },
         "train_mae": train_mae,
         "weather_fetched_at": None if weather_fetched_at is None else iso(weather_fetched_at),
+        "feed": feed,
     }

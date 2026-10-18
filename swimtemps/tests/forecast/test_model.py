@@ -214,3 +214,55 @@ def test_no_readings_is_a_prior_fit():
     fit = fit_water(empty, weather, "deep")
     assert (fit.method, fit.scale, fit.n_legs) == ("prior", 0.5, 0)
     assert np.isnan(fit.train_mae)
+
+
+# --- feed legs -----------------------------------------------------------
+
+def hourly_feed(start, hours, temp=12.0):
+    times = [ts(start) + pd.Timedelta(hours=h) for h in hours]
+    return pd.DataFrame({"measured_at": times, "temp_c": [temp + 0.01 * h for h in hours], "source": "feed"})
+
+
+def test_hourly_feed_readings_pair_into_day_long_legs():
+    weather = prepare_weather(synthetic_weather(10).reset_index())
+    readings = hourly_feed("2026-04-02 00:00", range(96))
+    legs = build_legs(readings, weather, max_leg_days=3, min_coverage=0.8)
+    # 72 readings have a partner exactly a day later; the next three pair with
+    # the last reading, 23, 22 and 21 hours on.
+    assert legs.count == 75
+    assert sorted(set(legs.n_hours)) == [21, 22, 23, 24]
+
+
+def test_a_feed_reading_with_no_partner_21_to_27_hours_later_starts_no_leg():
+    weather = prepare_weather(synthetic_weather(10).reset_index())
+    readings = hourly_feed("2026-04-02 00:00", [*range(24), *range(54, 78)])
+    legs = build_legs(readings, weather, max_leg_days=3, min_coverage=0.8)
+    assert legs.count == 6
+    assert min(legs.n_hours) >= 21 and max(legs.n_hours) <= 27
+
+
+def test_the_partner_is_the_reading_closest_to_a_day_later():
+    weather = prepare_weather(synthetic_weather(10).reset_index())
+    readings = hourly_feed("2026-04-02 00:00", [0, 22, 25, 26])
+    legs = build_legs(readings, weather, max_leg_days=3, min_coverage=0.8)
+    assert legs.count == 1 and list(legs.n_hours) == [25]
+
+
+def test_a_mixed_water_fits_on_manual_legs_and_feed_legs():
+    weather = prepare_weather(synthetic_weather(12).reset_index())
+    manual = pd.DataFrame({
+        "measured_at": [ts("2026-04-01 07:00") + pd.Timedelta(days=d) for d in range(4)],
+        "temp_c": [11.0, 11.2, 11.3, 11.5], "source": "manual",
+    })
+    feed = hourly_feed("2026-04-06 00:00", range(72))
+    readings = pd.concat([manual, feed], ignore_index=True)
+    legs = build_legs(readings, weather, max_leg_days=3, min_coverage=0.8)
+    assert legs.count == 3 + 51
+    assert list(legs.n_hours[:3]) == [24, 24, 24]
+
+
+def test_feed_legs_need_weather_like_any_leg():
+    weather = prepare_weather(synthetic_weather(10).reset_index())
+    weather.loc[ts("2026-04-02 12:00"):ts("2026-04-03 12:00"), "air_temp"] = np.nan
+    readings = hourly_feed("2026-04-02 00:00", range(48))
+    assert build_legs(readings, weather, max_leg_days=3, min_coverage=0.8).count == 0

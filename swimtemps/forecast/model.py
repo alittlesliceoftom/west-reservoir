@@ -111,7 +111,7 @@ def forecast_points(anchor_at, anchor_temp, weather, c, targets) -> list[tuple[p
 
 @dataclass
 class Legs:
-    """Consecutive reading pairs, weather held as padded (legs x hours) matrices."""
+    """Reading pairs, weather held as padded (legs x hours) matrices."""
     start_temps: np.ndarray
     end_temps: np.ndarray
     air: np.ndarray
@@ -128,6 +128,9 @@ class Legs:
         return leg_end_temps(self.start_temps, self.air, self.solar, self.cloud, self.mask, self.n_hours, c)
 
 
+FEED_LEG_HOURS = (21, 27)
+
+
 def _collapse_same_hour(readings: pd.DataFrame) -> pd.DataFrame:
     frame = readings[["measured_at", "temp_c"]].copy()
     frame["hour"] = frame["measured_at"].map(anchor_hour)
@@ -135,24 +138,53 @@ def _collapse_same_hour(readings: pd.DataFrame) -> pd.DataFrame:
     return frame.reset_index(drop=True)
 
 
-def build_legs(readings: pd.DataFrame, weather: pd.DataFrame, max_leg_days: float, min_coverage: float) -> Legs:
-    """
-    One leg per consecutive pair of readings, kept when the pair is at most
-    `max_leg_days` apart and the weather covers at least `min_coverage` of the
-    hours between them. Short holes inside a kept leg are interpolated.
-    """
-    frame = _collapse_same_hour(readings)
-    kept = []
+def _consecutive_pairs(frame: pd.DataFrame, max_leg_days: float):
+    """Each reading to the next, up to `max_leg_days` apart."""
     for i in range(len(frame) - 1):
         start, end = frame.loc[i, "hour"], frame.loc[i + 1, "hour"]
-        n = int((end - start) / HOUR)
-        if n <= 0 or n > max_leg_days * 24:
-            continue
-        window = weather.reindex(pd.date_range(start, end - HOUR, freq="h"))
-        if window["air_temp"].notna().sum() < min_coverage * n:
-            continue
-        window = window.interpolate(limit_direction="both")
-        kept.append((frame.loc[i, "temp_c"], frame.loc[i + 1, "temp_c"], window))
+        if 0 < (end - start) / HOUR <= max_leg_days * 24:
+            yield i, i + 1
+
+
+def _day_pairs(frame: pd.DataFrame):
+    """Each reading to the one closest to 24 hours later, if one is 21 to 27 hours later."""
+    hours = ((frame["hour"] - frame["hour"].iloc[0]) / HOUR).to_numpy() if len(frame) else np.array([])
+    low, high = FEED_LEG_HOURS
+    for i, h in enumerate(hours):
+        first, last = np.searchsorted(hours, h + low), np.searchsorted(hours, h + high, side="right")
+        if first < last:
+            j = first + int(np.argmin(np.abs(hours[first:last] - (h + 24))))
+            yield i, j
+
+
+def build_legs(readings: pd.DataFrame, weather: pd.DataFrame, max_leg_days: float, min_coverage: float) -> Legs:
+    """
+    Training legs, kept when the weather covers at least `min_coverage` of the
+    hours in them. Short holes inside a kept leg are interpolated.
+
+    Manual readings pair each to the next, up to `max_leg_days` apart. Feed
+    readings (`source == 'feed'`, when the column is present) pair each to the
+    feed reading closest to a day later, within 21 to 27 hours: legs as long
+    as the forecast's own steps, from every reading. A water with both kinds
+    pairs each among its own kind.
+    """
+    if "source" in readings.columns:
+        is_feed = (readings["source"] == "feed").to_numpy()
+        groups = [(_collapse_same_hour(readings[~is_feed]), False), (_collapse_same_hour(readings[is_feed]), True)]
+    else:
+        groups = [(_collapse_same_hour(readings), False)]
+
+    kept = []
+    for frame, feed in groups:
+        pairs = _day_pairs(frame) if feed else _consecutive_pairs(frame, max_leg_days)
+        for i, j in pairs:
+            start, end = frame.loc[i, "hour"], frame.loc[j, "hour"]
+            n = int((end - start) / HOUR)
+            window = weather.reindex(pd.date_range(start, end - HOUR, freq="h"))
+            if window["air_temp"].notna().sum() < min_coverage * n:
+                continue
+            window = window.interpolate(limit_direction="both")
+            kept.append((frame.loc[i, "temp_c"], frame.loc[j, "temp_c"], window))
 
     width = max((len(w) for *_, w in kept), default=0)
     shape = (len(kept), width)
