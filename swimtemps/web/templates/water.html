@@ -15,7 +15,8 @@
 
 {% if p and p.latest_reading %}
   <section class="headline">
-    {% if p.estimate_now %}<p class="now">About {{ p.estimate_now.temp | temp }} now</p>{% endif %}
+    {% if p.estimate_now %}<p class="now">About {{ p.estimate_now.temp | temp }} now</p>
+    {% else %}<p class="muted">No current estimate: the weather data for this spot has a gap. It will return when the weather service catches up.</p>{% endif %}
     <p class="last">Last reading {{ p.latest_reading.temp | temp }}, {{ p.latest_reading.at | localtime(water.timezone) }}</p>
   </section>
 {% elif not updating %}

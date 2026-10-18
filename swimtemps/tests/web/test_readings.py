@@ -232,3 +232,38 @@ def test_the_page_offers_paste_several(client, db, water, swimmer):
     page = client.get("/w/test-lake/readings").text
     assert 'hx-post="/w/test-lake/readings/preview"' in page
     assert "dd/mm/yyyy" in page
+
+
+# --- final review fixes ---------------------------------------------------
+
+def test_a_save_still_flags_the_water_when_the_worker_clears_it_mid_request(client, db, water, swimmer, monkeypatch, session_factory):
+    from sqlalchemy import text
+    from web.routes import readings as routes
+    db.execute(text("UPDATE waters SET needs_recompute = true"))
+    db.commit()
+    original = routes.current_estimate
+
+    def worker_clears_the_flag(session, w):
+        with session_factory() as other:
+            other.execute(text("UPDATE waters SET needs_recompute = false WHERE id = :id"), {"id": w.id})
+            other.commit()
+        return original(session, w)
+
+    monkeypatch.setattr(routes, "current_estimate", worker_clears_the_flag)
+    sign_in(client, swimmer)
+    assert post(client, "/w/test-lake/readings", {"temp": "13.9", "measured_at": "2026-10-18T07:00"}).status_code == 303
+    db.expire_all()
+    assert db.get(Water, water.id).needs_recompute is True
+
+
+def test_a_paste_accepts_the_same_ten_minute_allowance_as_single_entry(client, db, water, swimmer):
+    sign_in(client, swimmer)
+    # NOW is 13:00 local; 13:05 is within the allowance.
+    response = post(client, "/w/test-lake/readings/paste", {"rows": "18/10/2026 13:05 13.9"})
+    assert response.status_code == 303
+
+
+def test_a_reading_from_before_2000_is_refused(client, db, water, swimmer):
+    sign_in(client, swimmer)
+    response = post(client, "/w/test-lake/readings", {"temp": "13.9", "measured_at": "1995-06-01T07:00"})
+    assert response.status_code == 422 and "2000" in response.text

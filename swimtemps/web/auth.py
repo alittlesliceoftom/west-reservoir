@@ -148,21 +148,24 @@ class AuthMiddleware(BaseHTTPMiddleware):
         token = request.cookies.get(ACCESS_COOKIE)
         if token:
             claims = None
+            unverifiable = False
             try:
-                claims = app.state.verifier.verify(token)
+                claims = await run_in_threadpool(app.state.verifier.verify, token)
             except jwt.ExpiredSignatureError:
                 refresh_token = request.cookies.get(REFRESH_COOKIE)
                 if refresh_token:
                     try:
                         session = await run_in_threadpool(app.state.supabase.refresh, refresh_token)
-                        claims = app.state.verifier.verify(session.access_token)
+                        claims = await run_in_threadpool(app.state.verifier.verify, session.access_token)
                         new_tokens = (session.access_token, session.refresh_token)
                     except Exception:
                         claims = None
+            except jwt.PyJWKClientConnectionError:
+                unverifiable = True  # Supabase unreachable: anonymous for now, session kept
             except (jwt.InvalidTokenError, jwt.PyJWKClientError):
                 claims = None
             if claims is None:
-                clear = True
+                clear = not unverifiable
             else:
                 request.state.user = await run_in_threadpool(self._load_user, app, claims)
 

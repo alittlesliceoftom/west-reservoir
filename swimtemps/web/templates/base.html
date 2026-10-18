@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/static/app.css">
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
   {% block head %}{% endblock %}
 </head>
 <body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>

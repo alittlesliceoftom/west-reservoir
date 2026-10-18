@@ -14,7 +14,7 @@ from db import queries
 from db.models import Reading, Snapshot, User, Water
 from web.auth import require_user, verify_csrf
 from web.deps import get_db
-from web.paste import MAX_TEMP, MIN_TEMP, ParsedRow, parse_paste
+from web.paste import EARLIEST, MAX_TEMP, MIN_TEMP, ParsedRow, parse_paste
 from web.permissions import can_admin
 from web.routes.pages import active_water
 from web.templating import render
@@ -71,7 +71,7 @@ def reading_in_same_hour(db: Session, water: Water, at: datetime) -> Reading | N
 
 def save(db: Session, water: Water, user: User, rows: list[tuple[datetime, float]]) -> None:
     db.add_all(Reading(water_id=water.id, measured_at=at, temp_c=temp, submitted_by=user.id) for at, temp in rows)
-    water.needs_recompute = True
+    queries.mark_dirty(db, water.id)
     db.commit()
 
 
@@ -119,6 +119,8 @@ def add_reading(
         return form_page(request, water, status_code=422, error="Enter the date and time the reading was taken.", **page)
     if at > now + FUTURE_SLACK:
         return form_page(request, water, status_code=422, error="That time is in the future.", **page)
+    if at.date() < EARLIEST:
+        return form_page(request, water, status_code=422, error="That date is before 2000. Check the year.", **page)
 
     remaining = allowance(db, user, water, now)
     if remaining == 0:
@@ -174,7 +176,8 @@ def analyse_paste(db: Session, water: Water, text: str, now: datetime) -> Previe
     of readings within 3 days (stored or pasted) are flagged but kept.
     """
     zone = ZoneInfo(water.timezone)
-    parsed = parse_paste(text, water.timezone, water.default_reading_time, now.astimezone(zone).date(), now=now)
+    parsed = parse_paste(text, water.timezone, water.default_reading_time, now.astimezone(zone).date(),
+                         now=now + FUTURE_SLACK)
     stored = queries.active_readings(db, water.id)
     stored_points = list(zip(stored.measured_at.dt.to_pydatetime(), stored.temp_c))
     stored_hours = {hour_bounds(at, water.timezone)[0] for at, _ in stored_points}

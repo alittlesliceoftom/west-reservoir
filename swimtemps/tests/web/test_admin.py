@@ -196,3 +196,13 @@ def test_make_superuser_cli(db, session_factory, swimmer):
     assert cli.make_superuser(session_factory, "SWIMMER@example.com") == "swimmer@example.com is now a superuser"
     assert fresh(db, User, swimmer.id).is_superuser is True
     assert "no user" in cli.make_superuser(session_factory, "ghost@example.com")
+
+
+def test_a_water_name_cannot_inject_script_into_the_admin_page(client, db, admin):
+    import html
+    make_water(db, admin, name="Lido'+alert(document.domain)+'", slug="lido")
+    sign_in(client, admin)
+    page = html.unescape(client.get("/w/lido/admin").text)
+    assert "confirm('Archive Lido'+alert" not in page
+    assert "onsubmit" not in page
+    assert 'data-confirm="Archive Lido' in client.get("/w/lido/admin").text.replace("&#39;", "'")

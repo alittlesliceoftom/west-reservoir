@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 MEASURES = ("air_temp", "shortwave", "cloud_cover")
+MIN_POINTS_PER_HORIZON = 10
 
 # Archive values overwrite forecast values; a forecast never overwrites an
 # archive value. A null in the incoming row keeps what is stored.
@@ -73,6 +74,15 @@ def active_readings(session: Session, water_id: int) -> pd.DataFrame:
     return frame.astype({"temp_c": float})
 
 
+def mark_dirty(session: Session, water_id: int) -> None:
+    """
+    Ask the worker to recompute a water. Always an explicit UPDATE: setting the
+    ORM attribute is skipped when the loaded value is already true, and the
+    worker may have cleared it since that load.
+    """
+    session.execute(text("UPDATE waters SET needs_recompute = true WHERE id = :id"), {"id": water_id})
+
+
 def readings_changed_since(session: Session, water_id: int, since: datetime) -> bool:
     """Whether any reading was added, deleted or corrected after `since`."""
     sql = text("""
@@ -84,30 +94,33 @@ def readings_changed_since(session: Session, water_id: int, since: datetime) -> 
     return bool(session.execute(sql, {"water_id": water_id, "since": since}).scalar())
 
 
-def earliest_reading_without_weather(session: Session, water_id: int) -> datetime | None:
-    """The oldest standing reading whose hour has no stored weather."""
+def earliest_reading_without_weather(session: Session, water_id: int, since: datetime) -> datetime | None:
+    """The oldest standing reading since `since` whose hour has no stored weather."""
     sql = text("""
         SELECT min(r.measured_at)
         FROM readings r
         LEFT JOIN weather_hourly w
           ON w.water_id = r.water_id AND w.valid_at = date_trunc('hour', r.measured_at)
         WHERE r.water_id = :water_id AND r.deleted_at IS NULL AND w.valid_at IS NULL
+          AND r.measured_at >= :since
     """)
-    return session.execute(sql, {"water_id": water_id}).scalar()
+    return session.execute(sql, {"water_id": water_id, "since": since}).scalar()
 
 
 def own_errors(session: Session, water_id: int, min_points: int) -> dict[int, float] | None:
     """
     This water's 80th-percentile absolute forecast error by horizon, or None
-    until it has `min_points` scored points.
+    until it has `min_points` scored points. A horizon with fewer than
+    MIN_POINTS_PER_HORIZON of its own is left out, so the base band is used there.
 
-    A point is scored against a reading in the same hour. For each reading and
-    horizon only the latest run made before the reading counts, so hourly
-    re-runs do not multiply one miss into many.
+    A point is scored against a reading in the same hour. Each anchor's
+    forecast is scored as first issued: hourly re-runs from the same anchor
+    have seen more of the real weather, and scoring them would make the band
+    look tighter than the forecasts people actually read.
     """
     sql = text("""
         WITH scored AS (
-            SELECT DISTINCT ON (r.id, horizon)
+            SELECT DISTINCT ON (r.id, fr.anchor_reading_id)
                 r.id AS reading_id,
                 GREATEST(1, CEIL(EXTRACT(EPOCH FROM (p.valid_at - fr.anchor_at)) / 86400 - 1e-9))::int AS horizon,
                 abs(p.water_temp - r.temp_c::float8) AS abs_error
@@ -118,7 +131,7 @@ def own_errors(session: Session, water_id: int, min_points: int) -> dict[int, fl
              AND r.deleted_at IS NULL
              AND date_trunc('hour', r.measured_at + interval '30 minutes') = p.valid_at
             WHERE fr.water_id = :water_id AND fr.created_at < r.measured_at
-            ORDER BY r.id, horizon, fr.created_at DESC
+            ORDER BY r.id, fr.anchor_reading_id, fr.created_at
         )
         SELECT horizon, count(*) AS n,
                percentile_cont(0.8) WITHIN GROUP (ORDER BY abs_error) AS p80
@@ -127,7 +140,7 @@ def own_errors(session: Session, water_id: int, min_points: int) -> dict[int, fl
     rows = session.execute(sql, {"water_id": water_id}).all()
     if sum(r.n for r in rows) < min_points:
         return None
-    return {int(r.horizon): float(r.p80) for r in rows if r.n >= 3}
+    return {int(r.horizon): float(r.p80) for r in rows if r.n >= MIN_POINTS_PER_HORIZON}
 
 
 def recent_submissions(session: Session, user_id, water_id: int, since: datetime) -> int:

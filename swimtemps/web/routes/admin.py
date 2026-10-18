@@ -14,10 +14,11 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from db import queries
 from db.models import Reading, User, Water, WaterMember
 from web.auth import require_user, verify_csrf
 from web.deps import get_db
-from web.paste import MAX_TEMP, MIN_TEMP
+from web.paste import EARLIEST, MAX_TEMP, MIN_TEMP
 from web.permissions import can_admin
 from web.routes.create import check_about
 from web.routes.pages import active_water
@@ -97,12 +98,14 @@ def correct(request: Request, slug: str, reading_id: int, temp: str = Form(""), 
         return admin_page(request, db, water, status_code=422, error="Enter the date and time the reading was taken.")
     if at > now + FUTURE_SLACK:
         return admin_page(request, db, water, status_code=422, error="That time is in the future.")
+    if at.date() < EARLIEST:
+        return admin_page(request, db, water, status_code=422, error="That date is before 2000. Check the year.")
 
     new = Reading(water_id=water.id, measured_at=at, temp_c=value, submitted_by=user.id)
     db.add(new)
     db.flush()
     old.deleted_at, old.deleted_by, old.replaced_by = now, user.id, new.id
-    water.needs_recompute = True
+    queries.mark_dirty(db, water.id)
     db.commit()
     return back(water, "corrected")
 
@@ -112,7 +115,7 @@ def delete(request: Request, slug: str, reading_id: int, db: Session = Depends(g
     water = admin_water(db, slug, user)
     reading = standing_reading(db, water, reading_id)
     reading.deleted_at, reading.deleted_by = request.app.state.clock(), user.id
-    water.needs_recompute = True
+    queries.mark_dirty(db, water.id)
     db.commit()
     return back(water, "deleted")
 
@@ -126,7 +129,7 @@ async def details(request: Request, slug: str, db: Session = Depends(get_db), us
         return admin_page(request, db, water, status_code=422, error=" ".join(errors), form=form)
     water.name, water.water_type, water.depth_class = values["name"], values["water_type"], values["depth_class"]
     water.default_reading_time = values["reading_time"]
-    water.needs_recompute = True
+    queries.mark_dirty(db, water.id)
     db.commit()
     return back(water, "details")
 

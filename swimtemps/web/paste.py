@@ -17,6 +17,7 @@ from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
 MIN_TEMP, MAX_TEMP = -2.0, 40.0
+EARLIEST = date(2000, 1, 1)  # anything earlier is almost certainly a mistyped year
 
 ISO_DATE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ](\d{1,2}):(\d{2}))?")
 # The lookaheads stop a match ending inside a longer number or date: without
@@ -86,6 +87,8 @@ def _parse_line(text: str, tz: ZoneInfo, default_time: time, today: date, now: d
         day_value = date(year, month, day)
     except ValueError:
         return "not a real date"
+    if day_value < EARLIEST:
+        return "before 2000: check the year"
 
     numbers = NUMBER.findall(rest)
     if not numbers:

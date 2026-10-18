@@ -38,6 +38,10 @@ log = logging.getLogger("swimtemps.worker")
 FIT_MAX_AGE = timedelta(hours=24)
 FORECAST_FRESH = timedelta(minutes=50)
 HEARTBEAT_KEEP = timedelta(days=7)
+# Weather is backfilled for readings up to this old. Older readings stay in the
+# record but form no training legs, which keeps a mistyped year from pulling
+# decades of hourly weather into a free-tier database.
+ARCHIVE_MAX = timedelta(days=3 * 365)
 
 
 def coordinate_key(water: Water) -> tuple[float, float]:
@@ -59,14 +63,16 @@ def _forecast_is_fresh(session: Session, water_id: int, now: datetime) -> bool:
 def refresh_weather(session: Session, waters: list[Water], client, now: datetime, skip_fresh: bool = False) -> None:
     """
     Store the forecast for each coordinate group, one call per group, and
-    backfill from the archive any reading more than 7 days old that has no
-    weather. A failed call is logged and skipped: the stored weather stands.
+    backfill from the archive any reading between 7 days and 3 years old that
+    has no weather. A failed call is logged and skipped: the stored weather
+    stands, and one group's failure never stops another's.
     """
     groups: dict[tuple, list[Water]] = defaultdict(list)
     for water in waters:
         groups[coordinate_key(water)].append(water)
 
     archive_before = (pd.Timestamp(now) - timedelta(days=PAST_DAYS)).tz_convert("UTC")
+    archive_from = (pd.Timestamp(now) - ARCHIVE_MAX).tz_convert("UTC").to_pydatetime()
     for (lat, lon), members in groups.items():
         fresh = skip_fresh and all(_forecast_is_fresh(session, w.id, now) for w in members)
         if not fresh:
@@ -74,13 +80,15 @@ def refresh_weather(session: Session, waters: list[Water], client, now: datetime
                 frame = client.forecast(lat, lon)
             except OpenMeteoError as error:
                 log.warning("forecast for %s,%s failed: %s", lat, lon, error)
+            except Exception:
+                log.exception("forecast for %s,%s failed unexpectedly", lat, lon)
             else:
                 for water in members:
                     queries.upsert_weather(session, water.id, frame, "forecast", fetched_at=now)
 
         missing = [
             m for w in members
-            if (m := queries.earliest_reading_without_weather(session, w.id)) is not None
+            if (m := queries.earliest_reading_without_weather(session, w.id, since=archive_from)) is not None
             and pd.Timestamp(m) < archive_before
         ]
         if missing:
@@ -90,6 +98,8 @@ def refresh_weather(session: Session, waters: list[Water], client, now: datetime
                 frame = client.archive(lat, lon, start, end)
             except OpenMeteoError as error:
                 log.warning("archive for %s,%s failed: %s", lat, lon, error)
+            except Exception:
+                log.exception("archive for %s,%s failed unexpectedly", lat, lon)
             else:
                 for water in members:
                     queries.upsert_weather(session, water.id, frame, "archive", fetched_at=now)
@@ -134,7 +144,6 @@ def compute_water(session: Session, water: Water, client, now: datetime, refresh
         refresh_weather(session, [water], client, now, skip_fresh=True)
 
     readings = queries.active_readings(session, water.id)
-    readings = readings[readings.measured_at <= pd.Timestamp(now)]
     weather = prepare_weather(queries.weather_frame(session, water.id))
     fit = _fit(session, water, readings, weather, now, params)
     fit_row = _latest_fit(session, water.id)

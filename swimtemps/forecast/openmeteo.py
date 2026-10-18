@@ -51,7 +51,11 @@ class OpenMeteoClient:
                 last = f"{type(error).__name__}: {error}"
                 continue
             if response.status_code == 200:
-                return response.json()
+                try:
+                    return response.json()
+                except ValueError:
+                    last = "HTTP 200 with a body that is not JSON"
+                    continue
             try:
                 reason = response.json().get("reason", "")
             except ValueError:

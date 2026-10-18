@@ -77,3 +77,7 @@ def test_a_reading_time_in_the_spring_gap_is_moved_forward_not_lost():
     row = parse_paste("29/03/2026 13.5", TZ, time(1, 30), TODAY)[0]
     assert row.error is None
     assert row.measured_at == utc(2026, 3, 29, 1, 30)
+
+
+def test_dates_before_2000_are_refused():
+    assert "2000" in one("01/06/1995 14.2").error

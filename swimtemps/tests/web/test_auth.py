@@ -165,3 +165,16 @@ def test_signed_out_visitors_are_sent_to_sign_in(client, db):
     response = client.get("/w/test-lake/readings", follow_redirects=False)
     assert response.status_code == 303
     assert response.headers["location"] == "/auth/login?next=/w/test-lake/readings"
+
+
+def test_a_jwks_outage_does_not_sign_everyone_out(settings, session_factory, db, monkeypatch):
+    import jwt as pyjwt
+    user = make_user(db)
+    with make_client(settings, session_factory) as c:
+        def unreachable(token):
+            raise pyjwt.PyJWKClientConnectionError("Supabase is not answering")
+        c.app.state.verifier.verify = unreachable
+        sign_in(c, user)
+        response = c.get("/")
+    assert "Sign in" in response.text
+    assert ACCESS_COOKIE not in response.headers.get("set-cookie", "")

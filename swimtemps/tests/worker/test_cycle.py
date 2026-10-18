@@ -227,3 +227,52 @@ def test_each_cycle_writes_a_heartbeat_and_prunes_old_ones(db, session_factory):
     cycle.write_heartbeat(session_factory, NOW)
     beats = db.scalars(select(Heartbeat.at)).all()
     assert beats == [NOW]
+
+
+# --- final review fixes ---------------------------------------------------
+
+def test_a_new_water_gets_a_snapshot_even_when_open_meteo_is_down(db, session_factory, owner):
+    water = make_water(db, owner)
+    daily_readings(db, water, owner, [13.0, 12.8])
+    client = FakeOpenMeteo(fail=True)
+    assert cycle.drain_dirty(session_factory, client, NOW) == 1
+    payload = snapshot(db, water)
+    assert payload["latest_reading"]["temp"] == 12.8
+    assert payload["estimate_now"] is None and payload["forecast"] == []
+    assert db.get(Water, water.id).needs_recompute is False
+
+
+def test_a_reading_a_few_minutes_ahead_of_the_worker_clock_is_used(db, session_factory, owner):
+    water = make_water(db, owner)
+    daily_readings(db, water, owner, [13.0, 12.8])
+    add_reading(db, water, owner, NOW + timedelta(minutes=5), 12.4)
+    cycle.drain_dirty(session_factory, FakeOpenMeteo(), NOW)
+    assert snapshot(db, water)["latest_reading"]["temp"] == 12.4
+
+
+class GarbledOpenMeteo(FakeOpenMeteo):
+    def forecast(self, lat, lon):
+        self.forecast_calls.append((lat, lon))
+        raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+
+def test_an_unexpected_weather_error_does_not_stop_the_sweep(db, session_factory, owner):
+    water = make_water(db, owner)
+    daily_readings(db, water, owner, [13.0, 12.8])
+    assert cycle.sweep(session_factory, GarbledOpenMeteo(), NOW) == 1
+    assert snapshot(db, water)["latest_reading"]["temp"] == 12.8
+
+
+def test_the_archive_backfill_goes_back_at_most_three_years(db, session_factory, owner):
+    water = make_water(db, owner)
+    add_reading(db, water, owner, pd.Timestamp("2021-06-01 06:00", tz="UTC").to_pydatetime(), 16.0)
+    client = FakeOpenMeteo()
+    cycle.drain_dirty(session_factory, client, NOW)
+    assert client.archive_calls == []
+
+    add_reading(db, water, owner, pd.Timestamp("2026-09-20 06:00", tz="UTC").to_pydatetime(), 16.0)
+    db.execute(text("UPDATE waters SET needs_recompute = true"))
+    db.commit()
+    cycle.drain_dirty(session_factory, client, NOW + timedelta(hours=1))
+    assert len(client.archive_calls) == 1
+    assert client.archive_calls[0][2] >= pd.Timestamp("2023-10-01").date()

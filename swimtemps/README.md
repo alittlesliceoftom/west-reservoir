@@ -81,7 +81,7 @@ ENV=development DEV_LOGIN=1 SUPABASE_JWT_SECRET=any-long-local-string-of-32-char
 ## Tests
 
 ```bash
-.venv/bin/pytest            # ~230 tests, ~10 s, no network
+.venv/bin/pytest            # ~245 tests, ~10 s, no network
 .venv/bin/pytest -m slow    # the full West Res cold-start replay (~1 min), rewrites docs/cold-start-replay.md
 .venv/bin/ruff check .
 ```
@@ -103,8 +103,11 @@ Each step names the setting it produces.
 2. **Domain** (open question in the spec). Point `A`/`AAAA` records at the VPS.
    Sets `DOMAIN`, `SITE_URL`.
 3. **Supabase** project, London region.
-   - Database connection string -> `DATABASE_URL` (direct connection is
-     IPv6-only, fine on Hetzner; the session pooler is the IPv4 fallback).
+   - Database -> Connect -> **Session pooler** string -> `DATABASE_URL`. The
+     direct connection is IPv6-only, and containers on Docker's default
+     network have no IPv6, so the pooler is the default here. To use the
+     direct connection, enable IPv6 in the Docker daemon and add
+     `networks: {default: {enable_ipv6: true}}` to the compose file first.
    - Project URL and anon key -> `SUPABASE_URL`, `SUPABASE_ANON_KEY`.
    - Keep the default asymmetric JWT signing keys and leave
      `SUPABASE_JWT_SECRET` empty: tokens are verified against the project's JWKS.
@@ -113,7 +116,8 @@ Each step names the setting it produces.
    `https://PROJECTREF.supabase.co/auth/v1/callback`. In Supabase, Auth ->
    Providers -> Google: paste its client ID and secret. Auth -> URL
    configuration: Site URL = `SITE_URL`; add `SITE_URL/auth/callback` to the
-   redirect allow-list.
+   redirect allow-list. **Disable the Email and Anonymous providers**: the app
+   accepts any token the project signs, so a provider left on is another way in.
 5. **Hetzner CX23**, Ubuntu 24.04: install Docker, create `/opt/swimtemps`,
    put `.env` there (from `deploy/.env.example`), and a deploy user whose SSH
    key goes in GitHub. If the image is private, `docker login ghcr.io` on the

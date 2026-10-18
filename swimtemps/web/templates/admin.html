@@ -28,7 +28,7 @@
           </form>
         </details>
         <form method="post" action="/w/{{ water.slug }}/admin/readings/{{ r.id }}/delete" class="inline"
-              onsubmit="return confirm('Delete this reading?');">
+              data-confirm="Delete this reading?">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button class="link danger" type="submit">Delete</button>
         </form>
@@ -74,7 +74,7 @@
 
 <h2>Archive</h2>
 <p class="muted">Archiving hides this water from the site. Its readings and forecasts are kept.</p>
-<form method="post" action="/w/{{ water.slug }}/admin/archive" onsubmit="return confirm('Archive {{ water.name }}? It will disappear from the site.');">
+<form method="post" action="/w/{{ water.slug }}/admin/archive" data-confirm="Archive {{ water.name }}? It will disappear from the site.">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <button class="danger" type="submit">Archive this water</button>
 </form>

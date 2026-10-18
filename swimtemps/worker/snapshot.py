@@ -38,7 +38,7 @@ def build_payload(
     weather_fetched_at: datetime | None,
 ) -> dict:
     recent = readings[readings.measured_at >= pd.Timestamp(now) - timedelta(days=READINGS_DAYS)]
-    air = weather["air_temp"] if not weather.empty else pd.Series(dtype=float)
+    air = weather["air_temp"] if not weather.empty else pd.Series(dtype=float, index=pd.DatetimeIndex([], tz="UTC"))
     air = air[air.index >= pd.Timestamp(now) - timedelta(days=AIR_PAST_DAYS)]
     if trajectory is not None:
         trajectory = trajectory.iloc[::TRAJECTORY_STEP_HOURS]
