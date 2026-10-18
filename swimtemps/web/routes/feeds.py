@@ -3,7 +3,8 @@ Feed setup for a water's admins: paste an AI's `swimtemps-feed v1` block or
 fill in the fields, Test (one fetch, nothing stored), confirm permission and
 Turn on. Also pause, resume, switching back to manual, and overruling the
 cleaning's flags. The Test and Turn-on POSTs are the only web requests that
-contact a feed; pages never do.
+contact a feed; pages never do. Any signed-in user can request a feed the
+recipe cannot express; superusers handle the requests.
 """
 
 import hashlib
@@ -18,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db import queries
-from db.models import Feed, Reading, User, Water
+from db.models import Feed, FeedRequest, Reading, User, Water
 from feeds.block import PROMPT, RECIPE_KEYS, REQUIRED_FOR, check_value, missing_keys, parse_block
 from feeds.clean import clean
 from feeds.fetch import FetchError
@@ -243,3 +244,79 @@ def overrule(request: Request, slug: str, reading_id: int, decision: str = Form(
     queries.mark_dirty(db, water.id)
     db.commit()
     return back(water, "overruled")
+
+
+# --- feed requests -------------------------------------------------------------
+
+REQUEST_LIMITS = {"page_url": 2000, "notes": 5000, "ai_block": 10000}
+REQUEST_STATUSES = ("open", "done", "declined")
+
+
+def _requested_water(db: Session, slug: str) -> Water | None:
+    if not slug:
+        return None
+    return db.scalar(select(Water).where(Water.slug == slug, Water.archived_at.is_(None)))
+
+
+def request_page(request, db, *, water_slug="", form=None, error=None, status_code=200):
+    return render(request, "feed_request.html", {
+        "water": _requested_water(db, water_slug), "form": form or {}, "error": error,
+        "done": request.query_params.get("done") == "1",
+    }, status_code=status_code)
+
+
+@router.get("/feeds/request", response_class=HTMLResponse)
+def request_form(request: Request, water: str = "", db: Session = Depends(get_db),
+                 user: User = Depends(require_user)):
+    return request_page(request, db, water_slug=water)
+
+
+@router.post("/feeds/request", response_class=HTMLResponse, dependencies=[Depends(verify_csrf)])
+def request_feed(request: Request, page_url: str = Form(""), notes: str = Form(""), ai_block: str = Form(""),
+                 water: str = Form(""), db: Session = Depends(get_db), user: User = Depends(require_user)):
+    form = {"page_url": page_url.strip(), "notes": notes.strip(), "ai_block": ai_block.strip()}
+    error = None
+    try:
+        check_value("url", form["page_url"])
+    except ValueError:
+        error = "Enter the venue page's web address, starting http:// or https://."
+    too_long = [k for k, limit in REQUEST_LIMITS.items() if len(form[k]) > limit]
+    if too_long:
+        error = "That is too long to send. Shorten it and try again."
+    if error:
+        return request_page(request, db, water_slug=water, form=form, error=error, status_code=422)
+    target = _requested_water(db, water)
+    db.add(FeedRequest(page_url=form["page_url"], notes=form["notes"] or None, ai_block=form["ai_block"] or None,
+                       requested_by=user.id, water_id=target.id if target else None))
+    db.commit()
+    return RedirectResponse("/feeds/request?done=1", status_code=303)
+
+
+def require_superuser(user: User = Depends(require_user)) -> User:
+    if not user.is_superuser:
+        raise HTTPException(403, "Only the site's superusers can see feed requests.")
+    return user
+
+
+@router.get("/admin/feed-requests", response_class=HTMLResponse)
+def feed_requests(request: Request, db: Session = Depends(get_db), user: User = Depends(require_superuser)):
+    rows = db.execute(
+        select(FeedRequest, User.display_name, User.email, Water.slug, Water.name)
+        .join(User, User.id == FeedRequest.requested_by)
+        .outerjoin(Water, Water.id == FeedRequest.water_id)
+        .order_by((FeedRequest.status == "open").desc(), FeedRequest.created_at.desc())
+    ).all()
+    return render(request, "feed_requests.html", {"rows": rows})
+
+
+@router.post("/admin/feed-requests/{request_id}", dependencies=[Depends(verify_csrf)])
+def update_request(request: Request, request_id: int, status: str = Form(""), db: Session = Depends(get_db),
+                   user: User = Depends(require_superuser)):
+    row = db.get(FeedRequest, request_id)
+    if row is None:
+        raise HTTPException(404, "There is no such request.")
+    if status not in REQUEST_STATUSES:
+        raise HTTPException(422, "Choose open, done or declined.")
+    row.status, row.updated_at = status, request.app.state.clock()
+    db.commit()
+    return RedirectResponse("/admin/feed-requests", status_code=303)

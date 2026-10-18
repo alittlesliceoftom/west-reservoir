@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Request a feed - swimtemps{% endblock %}
+{% block main %}
+{% if water %}<p class="steps"><a href="/w/{{ water.slug }}">{{ water.name }}</a> · Request a feed</p>{% endif %}
+<h1>Request a feed{% if water %} for {{ water.name }}{% endif %}</h1>
+{% if done %}
+<p class="flash" role="status">Thanks. We will look at the venue's page and get back to the water's admins.</p>
+{% else %}
+<p>If your venue publishes live readings from a sensor or logger, but the feed setup could not read them, tell us
+  where they are and we will set it up. Sources that staff update by hand stay manual waters.</p>
+<form method="post" action="/feeds/request" class="stack">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="water" value="{{ water.slug if water else '' }}">
+  <label>The venue's page with the temperatures <input name="page_url" type="url" value="{{ form.page_url or '' }}" maxlength="2000" required></label>
+  <label>Anything we should know <textarea name="notes" maxlength="5000">{{ form.notes or '' }}</textarea>
+    <span class="hint">For example how often it updates, or who at the venue to ask.</span></label>
+  <label>The AI's answer, if you have one <textarea name="ai_block" maxlength="10000">{{ form.ai_block or '' }}</textarea></label>
+  {% if error %}<p class="warning error-text" role="alert">{{ error }}</p>{% endif %}
+  <button class="primary" type="submit">Send the request</button>
+</form>
+{% endif %}
+{% endblock %}

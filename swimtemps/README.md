@@ -36,11 +36,82 @@ implementation plan alongside it.
 | Directory | What it is |
 |---|---|
 | `forecast/` | Pure model: physics, staged fit, band, Open-Meteo client, cold-start replay. No DB, no web |
+| `feeds/` | Pure feed handling: the `swimtemps-feed v1` block, the `json_table` recipe, hourly thinning, cleaning, the guarded fetch |
 | `db/` | SQLAlchemy models, Alembic migrations, analytical SQL, operator CLI |
 | `worker/` | The worker loop, one cycle's units of work, the snapshot payload, a dev seed |
 | `web/` | FastAPI app: pages, auth, readings, create wizard, admin. Templates and static files |
 | `deploy/` | Compose stack, Caddyfile, `.env.example` |
 | `tests/` | pytest; runs against a throwaway Postgres, no network |
+
+## Feeds
+
+A few venues publish water temperatures automatically from a sensor or
+logger. Such a water can take its readings from the venue's feed instead of
+from people typing them in. Design: [`docs/design/2026-10-18-feeds-design.md`](docs/design/2026-10-18-feeds-design.md).
+
+- **What qualifies.** Only automated, machine-readable sources: a sensor or
+  logger publishing JSON or an API. Sources staff update by hand (a Google
+  Form, a sentence on a web page) stay manual waters, even when they are
+  machine-readable. One measurement point per water.
+- **Mode.** Each water is `manual` or `feed`, never both. Its admins switch
+  either way from Admin, then "set up a feed" (`/w/<slug>/feed`); history is
+  kept both ways. A feed water refuses typed readings with 409.
+- **Setup.** The setup page offers a prompt to give an AI with the venue's
+  page. The AI answers with a fixed block, which the page reads back into the
+  fields:
+
+  ```
+  swimtemps-feed v1
+  url: https://example-lake.org/wp-json/lake/v1/temps?hours=168
+  orientation: columns
+  time_path: labels
+  value_path: datasets[0].data
+  time_format: epoch_ms
+  timezone: Europe/London
+  unit: C
+  source_name: Example Lake
+  source_link: https://example-lake.org/live-temperature/
+  automated: yes
+  terms: unknown
+  notes: half-hourly sensor; the API keeps 7 days
+  end
+  ```
+
+  `orientation: rows` uses `rows_path`, `header_row`, `time_field` and
+  `value_field` instead. `automated: no` or `terms: forbids automated access`
+  stops setup and points to the request form. **Test** fetches once and shows
+  what would be stored and flagged, storing nothing. **Turn on** needs that
+  test, and the permission box (ticked by default): "I have the venue's
+  permission to share this data, or it is publicly published." Who ticked it,
+  when, and the statement are stored. The water page credits the venue with a
+  link.
+- **Requests.** Anything the recipe cannot read goes to `/feeds/request`
+  (any signed-in user); superusers handle them at `/admin/feed-requests`. A
+  source that needs code gets a small adapter registered in
+  `feeds.recipe.ADAPTERS`.
+- **Polling.** The worker polls each feed that is on at the start of its
+  hourly sweep (and a just-enabled feed within seconds). Fetches go only to
+  public addresses, at most 5 MB and 20 s, with the user-agent `swimtemps/0.1`.
+  A failure is recorded on the feed and never stops other feeds.
+- **Storing.** Rows pass the manual checks (-2 to 40 °C, not in the future,
+  not before 2000), are thinned to one per clock hour, and are matched on
+  their time: new rows are inserted, unchanged ones skipped, and a changed
+  value is stored as the venue's correction. Nothing is destroyed.
+- **Cleaning.** A reading is flagged, with its reason, when it jumps more than
+  2.0 °C + 0.1 °C an hour from the last good reading, sits more than 2.5 °C
+  from the previous day's good readings, or repeats one value for more than
+  a day. Flagged readings are stored and shown in grey on the chart, and kept
+  out of the fit, the estimate and scoring. Admins can overrule a flag either
+  way from the admin page.
+- **Model.** Feed readings pair into day-long legs: each to the feed reading
+  closest to 24 hours later, within 21 to 27 hours. Typed readings pair as
+  before.
+- **Quiet and paused.** Clocks run from the feed's last good reading: the
+  page says "Feed quiet since ..." after 12 hours; `/healthz` fails after 3
+  days; the forecast stops after 5 days and resumes with the next good
+  reading. Admins can pause a feed (a sensor out for winter): a paused feed is
+  not polled, shows no forecast, and does not fail `/healthz`. `/me` lists a
+  user's feeds with a switch to manual.
 
 ## Local development
 

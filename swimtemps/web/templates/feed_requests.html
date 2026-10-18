@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Feed requests - swimtemps{% endblock %}
+{% block main %}
+<h1>Feed requests</h1>
+{% for r, name, email, slug, water_name in rows %}
+<section class="request {{ r.status }}">
+  <h2><a href="{{ r.page_url }}" rel="noopener nofollow">{{ r.page_url }}</a></h2>
+  <p class="muted small">{{ r.status | capitalize }} · from {{ name or email }} · {{ r.created_at | localtime("Europe/London") }}
+    {% if slug %} · for <a href="/w/{{ slug }}">{{ water_name }}</a> (<a href="/w/{{ slug }}/feed">feed setup</a>){% endif %}</p>
+  {% if r.notes %}<p>{{ r.notes }}</p>{% endif %}
+  {% if r.ai_block %}<pre class="prompt">{{ r.ai_block }}</pre>{% endif %}
+  <div class="actions">
+    {% for status, label in (("done", "Mark done"), ("declined", "Decline"), ("open", "Reopen")) if status != r.status %}
+    <form method="post" action="/admin/feed-requests/{{ r.id }}" class="inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" name="status" value="{{ status }}">{{ label }}</button>
+    </form>
+    {% endfor %}
+  </div>
+</section>
+{% else %}
+<p class="muted">No requests yet.</p>
+{% endfor %}
+{% endblock %}

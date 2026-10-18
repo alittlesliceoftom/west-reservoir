@@ -3,6 +3,7 @@
 {% block main %}
 <h1>{{ user.display_name or user.email }}</h1>
 <p class="muted">Signed in as {{ user.email }}.</p>
+{% if user.is_superuser %}<p><a href="/admin/feed-requests">Feed requests</a></p>{% endif %}
 
 <h2>Your waters</h2>
 <ul class="waters">
