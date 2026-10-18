@@ -93,6 +93,12 @@ def parse_time(value, time_format: str, tz: str, default_time: time) -> datetime
     return parsed.astimezone(timezone.utc)
 
 
+def date_only(config: dict) -> bool:
+    """Whether the feed's times are dates alone (a strptime pattern with no time in it)."""
+    fmt = config.get("time_format", "")
+    return fmt not in ("epoch_ms", "epoch_s", "iso") and not any(d in fmt for d in _TIME_DIRECTIVES)
+
+
 def _pick(record, key):
     if isinstance(record, dict) and isinstance(key, int):
         key = str(key)

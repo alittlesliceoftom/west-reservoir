@@ -13,6 +13,7 @@ MIN_POINTS_PER_HORIZON = 10
 # and accepted by an admin, and not marked wrong. Expects the alias `r`.
 USABLE_SQL = "(r.flag_override = 'accept' OR (r.flag_override IS NULL AND NOT r.flagged))"
 REJECTED_REASON = "Marked as wrong by the water's admin"
+ACCEPTED_NOTE = "Flagged ({reason}), accepted by the water's admin"
 
 # Archive values overwrite forecast values; a forecast never overwrites an
 # archive value. A null in the incoming row keeps what is stored.
@@ -85,22 +86,26 @@ def active_readings(session: Session, water_id: int) -> pd.DataFrame:
 def chart_readings(session: Session, water_id: int, since: datetime | None) -> pd.DataFrame:
     """
     Every standing reading from `since`, usable or not, oldest first:
-    measured_at (UTC), temp_c, usable (bool), and reason (None when usable).
+    measured_at (UTC), temp_c, usable (bool), reason (why it is not usable;
+    None when it is) and note (for a flag an admin accepted; else None).
     """
     sql = text(f"""
         SELECT r.measured_at, r.temp_c::float8 AS temp_c, {USABLE_SQL} AS usable,
                CASE WHEN {USABLE_SQL} THEN NULL
-                    ELSE COALESCE(r.flag_reason, :rejected) END AS reason
+                    ELSE COALESCE(r.flag_reason, :rejected) END AS reason,
+               CASE WHEN r.flagged AND r.flag_override = 'accept' THEN r.flag_reason END AS accepted
         FROM readings r
         WHERE r.water_id = :water_id AND r.deleted_at IS NULL
           AND (CAST(:since AS timestamptz) IS NULL OR r.measured_at >= :since)
         ORDER BY r.measured_at, r.id
     """)
     rows = session.execute(sql, {"water_id": water_id, "since": since, "rejected": REJECTED_REASON}).all()
-    frame = pd.DataFrame(rows, columns=["measured_at", "temp_c", "usable", "reason"])
+    frame = pd.DataFrame(rows, columns=["measured_at", "temp_c", "usable", "reason", "accepted"])
     frame["measured_at"] = pd.to_datetime(frame["measured_at"], utc=True)
     frame = frame.astype({"temp_c": float, "usable": bool, "reason": object})
     frame["reason"] = frame["reason"].where(frame["reason"].notna(), None)
+    notes = [None if pd.isna(a) else ACCEPTED_NOTE.format(reason=a) for a in frame.pop("accepted")]
+    frame["note"] = pd.Series(notes, index=frame.index, dtype=object)
     return frame
 
 

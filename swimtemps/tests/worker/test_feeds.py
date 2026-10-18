@@ -286,7 +286,16 @@ def test_chart_readings_carry_flag_reasons(db, polled):
     payload = compute(db, polled, NOW)
     reasons = [r[2] for r in payload["readings"]]
     assert sum(r is not None for r in reasons) == 5
-    assert all(len(r) == 3 for r in payload["readings"])
+    assert all(len(r) == 4 for r in payload["readings"])
+
+
+def test_an_accepted_flag_is_noted_on_the_chart(db, polled):
+    reading = db.scalar(select(Reading).where(Reading.flagged.is_(True)).order_by(Reading.measured_at))
+    reading.flag_override = "accept"
+    db.commit()
+    payload = compute(db, polled, NOW)
+    item = next(r for r in payload["readings"] if r[0] == pd.Timestamp(reading.measured_at).tz_convert("UTC").isoformat())
+    assert item[2] is None and "accepted by the water's admin" in item[3]
 
 
 def test_the_anchor_is_the_latest_usable_reading(db, polled):
@@ -378,3 +387,42 @@ def test_a_correction_in_the_same_poll_does_not_unguard_new_rows(db, feed):
     result = poll_feed(db, feed, NOW, fetch=fetching(columns(*corrected, ((start + timedelta(hours=80)).isoformat(), 9.0))))
     db.commit()
     assert (result.new, result.corrected, result.flagged) == (1, 1, 1)
+
+
+# --- date-only feeds match on the local date -----------------------------------
+
+@pytest.fixture
+def dated_feed(db, owner):
+    water = make_water(db, owner, name="Dated Lake", feed_mode="feed")
+    config = {"url": "https://lake.example/rows", "orientation": "rows", "rows_path": "$", "header_row": True,
+              "time_field": 0, "value_field": 1, "time_format": "%d-%b-%Y"}
+    return make_feed(db, water, owner, config=config)
+
+
+DATED = [["date", "temp"], ["16-Oct-2026", "12.5"], ["17-Oct-2026", "12.4"]]
+
+
+def test_a_new_reading_time_does_not_duplicate_a_date_only_history(db, dated_feed):
+    poll_feed(db, dated_feed, NOW, fetch=fetching(DATED))
+    db.commit()
+    water = db.get(Water, dated_feed.water_id)
+    water.default_reading_time = pd.Timestamp("09:00").time()
+    db.commit()
+    result = poll_feed(db, dated_feed, NOW, fetch=fetching(DATED))
+    db.commit()
+    assert (result.new, result.corrected) == (0, 0)
+    assert len(standing(db, dated_feed)) == 2
+
+
+def test_a_date_only_value_change_is_a_correction_at_the_current_reading_time(db, dated_feed):
+    poll_feed(db, dated_feed, NOW, fetch=fetching(DATED))
+    db.commit()
+    db.get(Water, dated_feed.water_id).default_reading_time = pd.Timestamp("09:00").time()
+    db.commit()
+    changed = [DATED[0], DATED[1], ["17-Oct-2026", "12.9"]]
+    result = poll_feed(db, dated_feed, NOW, fetch=fetching(changed))
+    db.commit()
+    assert (result.new, result.corrected) == (0, 1)
+    rows = standing(db, dated_feed)
+    assert [(r.measured_at, float(r.temp_c)) for r in rows] == [
+        (pd.Timestamp("2026-10-16 06:00", tz="UTC"), 12.5), (pd.Timestamp("2026-10-17 08:00", tz="UTC"), 12.9)]

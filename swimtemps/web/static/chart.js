@@ -11,9 +11,11 @@
     var fmtFull = new Intl.DateTimeFormat("en-GB", { timeZone: d.timezone, weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
     var t = function (iso) { return new Date(iso).getTime(); };
 
-    // Readings are [time, °C, reason]: reason is null for a usable reading and
-    // says why for one the cleaning flagged or an admin marked wrong.
-    var usable = d.readings.filter(function (r) { return r[2] == null; }).map(function (r) { return [r[0], r[1]]; });
+    // Readings are [time, °C, reason, note]: reason is null for a usable
+    // reading and says why for one the cleaning flagged or an admin marked
+    // wrong; note says when an admin accepted a flagged one.
+    var usable = d.readings.filter(function (r) { return r[2] == null && r[3] == null; }).map(function (r) { return [r[0], r[1]]; });
+    var accepted = d.readings.filter(function (r) { return r[2] == null && r[3] != null; }).map(function (r) { return [r[0], r[1], r[3]]; });
     var flagged = d.readings.filter(function (r) { return r[2] != null; });
     var points = d.forecast.map(function (f) { return { x: t(f.at), temp: f.temp, lower: f.lower, upper: f.upper }; });
     var lower = [], width = [];
@@ -31,7 +33,7 @@
       backgroundColor: "transparent",
       animation: false,
       grid: { left: 40, right: 12, top: 28, bottom: 56 },
-      legend: { top: 0, data: ["Readings"].concat(flagged.length ? ["Flagged"] : [], ["Forecast", "Air"]), textStyle: { fontSize: 11 } },
+      legend: { top: 0, data: ["Readings"].concat(accepted.length ? ["Accepted"] : [], flagged.length ? ["Flagged"] : [], ["Forecast", "Air"]), textStyle: { fontSize: 11 } },
       tooltip: {
         trigger: "axis",
         axisPointer: { label: { formatter: function (p) { return fmtFull.format(new Date(p.value)); } } },
@@ -42,7 +44,7 @@
             var v = Array.isArray(it.value) ? it.value[1] : it.value;
             if (v == null) return;
             var line = it.marker + esc(it.seriesName) + " " + (+v).toFixed(1) + " °C";
-            if (it.seriesName === "Flagged") line += "<br><span style=\"opacity:.8\">" + esc(it.value[2]) + "</span>";
+            if (it.seriesName === "Flagged" || it.seriesName === "Accepted") line += "<br><span style=\"opacity:.8\">" + esc(it.value[2]) + "</span>";
             lines.push(line);
           });
           return lines.join("<br>");
@@ -58,6 +60,7 @@
         { name: "Forecast", type: "line", data: d.trajectory, showSymbol: false, lineStyle: { type: "dashed", width: 2 }, itemStyle: { color: "#0b6e99" },
           markLine: { silent: true, symbol: "none", label: { formatter: "now", position: "insideEndTop" }, lineStyle: { color: "#e3b341" }, data: [{ xAxis: nowMs }] } },
         { name: "Flagged", type: "scatter", data: flagged, symbolSize: 7, itemStyle: { color: "#9aa5ad", opacity: 0.7 }, z: 2 },
+        { name: "Accepted", type: "scatter", data: accepted, symbol: "emptyCircle", symbolSize: 8, itemStyle: { color: dark ? "#e6edf2" : "#13202b", borderWidth: 2 }, z: 3 },
         { name: "Readings", type: "scatter", data: usable, symbolSize: 7, itemStyle: { color: dark ? "#e6edf2" : "#13202b" }, z: 3 }
       ]
     });

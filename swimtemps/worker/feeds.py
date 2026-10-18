@@ -18,6 +18,7 @@ the others.
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from sqlalchemy import select, text, update
@@ -27,7 +28,7 @@ from db import queries
 from db.models import Feed, Reading, Water
 from feeds.clean import clean
 from feeds.fetch import FetchError, fetch_json
-from feeds.recipe import RecipeError, read_feed
+from feeds.recipe import RecipeError, date_only, read_feed
 from feeds.thin import thin_hourly
 from web.paste import EARLIEST, MAX_TEMP, MIN_TEMP
 
@@ -98,21 +99,32 @@ def last_good_reading_at(session: Session, feed_id: int) -> datetime | None:
     """), {"feed": feed_id}).scalar()
 
 
-def store(session: Session, feed: Feed, rows: list[tuple[datetime, float]], now: datetime) -> tuple[list[Reading], int]:
-    """Insert or correct thinned rows. Returns the readings written, and how many were corrections."""
+def store(session: Session, feed: Feed, rows: list[tuple[datetime, float]], now: datetime,
+          dates_in: str | None = None) -> tuple[list[Reading], int]:
+    """
+    Insert or correct thinned rows. Returns the readings written, and how
+    many were corrections. With `dates_in` (a timezone), the feed publishes
+    dates alone, so rows match stored ones on their local date there: a
+    change of the water's reading time then moves no history.
+    """
     if not rows:
         return [], 0
+    margin = timedelta(days=1) if dates_in else timedelta(0)
     existing = session.scalars(select(Reading).where(
         Reading.feed_id == feed.id, Reading.deleted_at.is_(None),
-        Reading.measured_at >= _hour(rows[0][0]), Reading.measured_at < _hour(rows[-1][0]) + HOUR,
+        Reading.measured_at >= _hour(rows[0][0]) - margin, Reading.measured_at < _hour(rows[-1][0]) + HOUR + margin,
     )).all()
-    by_time = {_utc(r.measured_at): r for r in existing}
+
+    def key(at: datetime):
+        return at.astimezone(ZoneInfo(dates_in)).date() if dates_in else _utc(at)
+
+    stored = {key(r.measured_at): r for r in existing}
     taken_hours = {_hour(r.measured_at) for r in existing}
 
     written, corrected = [], 0
     for at, temp in rows:
-        old = by_time.get(at)
-        if old is None and _hour(at) in taken_hours:
+        old = stored.get(key(at))
+        if old is None and not dates_in and _hour(at) in taken_hours:
             continue
         if old is not None and abs(float(old.temp_c) - temp) < 0.05:
             continue
@@ -150,7 +162,8 @@ def poll_feed(session: Session, feed: Feed, now: datetime, fetch=fetch_json) -> 
                            else "The feed returned no readings.")
         log.warning("feed %s for water %s: %s", feed.id, water.id, feed.last_error)
         return PollResult(errors=problems, ok=False)
-    written, corrected = store(session, feed, thin_hourly(rows), now)
+    dates_in = (feed.config.get("timezone") or water.timezone) if date_only(feed.config) else None
+    written, corrected = store(session, feed, thin_hourly(rows), now, dates_in=dates_in)
     flagged = 0
     if written:
         session.flush()

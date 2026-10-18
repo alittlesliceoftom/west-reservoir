@@ -134,7 +134,7 @@ def test_chart_readings_return_every_standing_row_with_its_usability(db, feed_wa
     gone.deleted_at = NOW
     db.commit()
     frame = queries.chart_readings(db, water.id, since=None)
-    assert list(frame.columns) == ["measured_at", "temp_c", "usable", "reason"]
+    assert list(frame.columns) == ["measured_at", "temp_c", "usable", "reason", "note"]
     assert frame["temp_c"].tolist() == [13.5, 9.1, 13.4]
     assert frame["usable"].tolist() == [True, False, False]
     assert frame["reason"].iloc[0] is None
@@ -160,3 +160,14 @@ def test_an_overrule_counts_as_a_reading_change(db, feed_water):
     reading.flag_override, reading.override_at = "accept", NOW
     db.commit()
     assert queries.readings_changed_since(db, water.id, since)
+
+
+def test_chart_readings_note_a_flag_an_admin_accepted(db, feed_water):
+    _, water, feed = feed_water
+    add_feed_reading(db, feed, "2026-10-18 04:00", 13.5)
+    add_feed_reading(db, feed, "2026-10-18 05:00", 9.1, flagged=True, flag_reason="Jumped 4.4 °C.",
+                     flag_override="accept")
+    frame = queries.chart_readings(db, water.id, since=None)
+    assert frame["usable"].tolist() == [True, True]
+    assert frame["note"].iloc[0] is None
+    assert frame["note"].iloc[1] == "Flagged (Jumped 4.4 °C.), accepted by the water's admin"

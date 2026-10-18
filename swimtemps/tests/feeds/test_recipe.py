@@ -118,3 +118,10 @@ def test_a_numeric_field_also_finds_a_record_key():
     payload = [{"0": "2026-10-18T07:00Z", "1": 12.5}]
     config = {"orientation": "rows", "time_field": 0, "value_field": 1, "time_format": "iso"}
     assert len(read_json_table(payload, config, LONDON, SEVEN).rows) == 1
+
+
+def test_date_only_formats():
+    from feeds.recipe import date_only
+    assert date_only({"time_format": "%d-%b-%Y"}) and date_only({"time_format": "%Y/%m/%d"})
+    assert not date_only({"time_format": "%d-%b-%Y %H:%M"})
+    assert not date_only({"time_format": "epoch_ms"}) and not date_only({"time_format": "iso"})

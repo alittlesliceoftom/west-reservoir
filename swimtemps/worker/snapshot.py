@@ -42,11 +42,13 @@ def build_payload(
     """
     `readings` are the usable readings the model ran on; `chart` is every
     standing reading for the chart, each with the reason it is not usable
-    (None when it is). Without `chart`, the usable readings are charted.
+    (None when it is) and a note for a flag an admin accepted. Without
+    `chart`, the usable readings are charted. Chart readings are
+    [time, °C, reason, note].
     `feed` is the feed block for a feed water, or None.
     """
     if chart is None:
-        chart = readings.assign(reason=None)
+        chart = readings.assign(reason=None, note=None)
     recent = chart[chart.measured_at >= pd.Timestamp(now) - timedelta(days=READINGS_DAYS)]
     air = weather["air_temp"] if not weather.empty else pd.Series(dtype=float, index=pd.DatetimeIndex([], tz="UTC"))
     air = air[air.index >= pd.Timestamp(now) - timedelta(days=AIR_PAST_DAYS)]
@@ -71,7 +73,7 @@ def build_payload(
         },
         "forecast": points,
         "trajectory": [] if trajectory is None else _series(trajectory),
-        "readings": [[iso(r.measured_at), round(float(r.temp_c), 1), r.reason] for r in recent.itertuples()],
+        "readings": [[iso(r.measured_at), round(float(r.temp_c), 1), r.reason, r.note] for r in recent.itertuples()],
         "air": _series(air, digits=1),
         "calibration": {
             "method": fit.method,
