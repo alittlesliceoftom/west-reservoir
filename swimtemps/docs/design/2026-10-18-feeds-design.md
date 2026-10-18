@@ -50,7 +50,7 @@ handful of venues whose data is already automated.
 | The Lake, Cromhall (Bristol) | Google Apps Script URL returning `[["What date…","What was the temperature"],["12-Sep-2024","10.60"],…]`: rows with a header, `d-Mon-YYYY` dates, no time, full history every call | **Not a feed by the rule above** (staff type it into a Google Form), but it is the clearest example of the row-shaped JSON the recipe must read, so use it as a test fixture |
 | Clevedon Marine Lake | `GET /wp-json/cml/v1/temps?sensor=<id>&hours=168`: `{"labels":[epoch ms…],"datasets":[{"data":[°C…]}]}`, half-hourly, 7 days of history | Parked (two sensors). Still the example of the column-shaped JSON (parallel arrays) the recipe must read, and of real sensor faults: on 2026-10-18 both sensors dropped ~4 °C in 30 minutes to the overnight air temperature |
 
-The builder records one response from each as a test fixture.
+Recorded responses are in `tests/fixtures/feeds/` (see its README for the URLs and sensor ids). They are the only copies of the Clevedon fault, because that API keeps 7 days.
 
 ## 3. The recipe
 
@@ -111,10 +111,25 @@ and never stops other feeds or waters.
 
 Fetched rows pass the same checks as manual readings (−2 to 40 °C, not in
 the future, not before 2000). A row that fails is not stored but counts in
-the feed's last-fetch summary. Valid rows are upserted on (feed, measured
-time): re-fetching a full history adds nothing new, and a value the venue
-later corrects replaces the stored one. New or changed rows flag the water
-for recompute.
+the feed's last-fetch summary.
+
+Valid rows are matched to stored ones on (feed, measured time) among rows
+that stand (`deleted_at IS NULL`):
+
+- No match: insert.
+- Same value: nothing happens, so re-fetching a full history adds nothing.
+- Different value: the venue corrected it. Store it as a correction, the
+  same way an admin correction works now: the old row is soft-deleted, a new
+  row is inserted, and `replaced_by` points to it. Nothing is destroyed, and
+  refit detection keeps working off `created_at` and `deleted_at`.
+
+New or corrected rows flag the water for recompute.
+
+*(Design call.)* On a feed water, admins do not delete or correct feed
+readings, because the next poll would bring them back. The tool for a bad
+feed reading is the flag overrule. An overrule belongs to the value it was
+made on: if the venue later corrects that reading, the new row is cleaned
+afresh.
 
 ### Cleaning
 
@@ -136,22 +151,42 @@ shows it.
 ### What the model uses
 
 The chart shows every stored reading. The fit, the estimate and scoring use
-unflagged readings only, thinned to one per local day (the one nearest the
-water's reading time). Half-hourly sensor data would otherwise make training
-legs dominated by sensor noise. The anchor for "now" is the latest
-unflagged reading.
+unflagged readings only (an overrule decides for the row it is on).
+
+*(Design call.)* Readings with `source = feed` are thinned to one per local
+day, the one nearest the water's reading time, before fitting; half-hourly
+sensor data would otherwise make training legs dominated by sensor noise.
+Manual readings are never thinned, whatever the water's mode, so manual
+waters fit exactly as now. A day with both keeps both; the fit already
+merges readings in the same hour.
+
+The anchor for "now" is the latest unflagged reading of either source,
+unthinned.
 
 ### Quiet feeds
 
-- **Any gap:** the page shows "Feed quiet since <date of last new reading>"
-  and keeps forecasting from the last good reading, the band widening with
-  the anchor's age as it already does.
+*(Design call.)* Every clock here measures time since the feed's latest
+**unflagged** reading, its last good reading. A sensor lying out of the
+water still publishes, but everything it sends is flagged, so it counts as
+quiet. Without this the page would keep forecasting from an ever-older
+anchor while looking live.
+
+- **12 hours without a good reading** *(design call: long enough that
+  hourly polling of a half-hourly feed never shows it)*: the page shows
+  "Feed quiet since <time of last good reading>" and keeps forecasting from
+  that reading, the band widening with the anchor's age as it already does.
 - **3 days without a new reading:** `/healthz` fails, naming the water.
   The water's admins see the feed as quiet on `/me`, with a button to switch
   the water to manual.
-- **5 days without data:** no forecast and no estimate. The page shows the
-  readings and "Forecast paused: no data from <source_name> since <date>".
-  Forecasting resumes on the next good reading.
+- **5 days without a good reading:** no forecast and no estimate. The page
+  shows the readings and "Forecast paused: no data from <source_name> since
+  <date>". Forecasting resumes on the next good reading.
+- **Paused by an admin** *(design call)*: a water's admins can pause its
+  feed, for example while the sensor is out for winter. A paused feed is
+  not polled and does not fail `/healthz`; the page says "Feed paused by the
+  venue" over the last readings, with no forecast. Without this, one
+  seasonal sensor would keep the site's only uptime monitor red for months
+  and hide real outages.
 
 Manual waters are unchanged: they keep estimating from an old reading.
 
@@ -166,15 +201,17 @@ configuration is kept so the water can switch back.
 
 - `waters.feed_mode`: `manual` (default) or `feed`.
 - `feeds`: one per water. Recipe name, configuration (JSONB), source name and
-  link, cleaning thresholds, enabled flag, `attested_by`, `attested_at`, the
-  statement text attested, `last_polled_at`, `last_success_at`,
-  `last_new_reading_at`, `last_error`, `created_by`, `created_at`.
+  link, cleaning thresholds, state (`on`, `paused`, `off`), `attested_by`,
+  `attested_at`, the statement text attested, `last_polled_at`,
+  `last_success_at`, `last_good_reading_at`, `last_error`, `created_by`,
+  `created_at`.
 - `feed_requests`: page URL, notes, pasted AI summary, requester, water (if
   one exists yet), status (`open`, `done`, `declined`), timestamps.
 - `readings`:
   - `submitted_by` becomes nullable;
   - `source` is `manual` or `feed`, plus `feed_id`;
-  - a unique key on (`feed_id`, `measured_at`) for feed rows;
+  - a unique key on (`feed_id`, `measured_at`) among standing feed rows
+    (a partial index, `WHERE deleted_at IS NULL`);
   - `flagged` and `flag_reason`;
   - `flag_override` (`accept` or `reject`), with `override_by` and
     `override_at`.
@@ -206,5 +243,14 @@ configuration is kept so the water can switch back.
   at render time from `feeds` (the page must still never fetch).
 - Request-handling UI for superusers: a plain list is enough.
 - Tests: the recipe against both recorded fixtures; the cleaning rules
-  against the recorded Clevedon fault; upsert of a corrected value; the
-  3-day and 5-day transitions; switching modes both ways.
+  against the recorded Clevedon fault; a venue correction becoming a
+  soft-delete plus a new row; the 12-hour, 3-day and 5-day transitions,
+  including a feed that keeps sending only flagged rows; pausing; switching
+  modes both ways.
+
+Also settled, as the builder proposed: setting up a feed is for the water's
+admins and superusers, and any signed-in user can submit a feed request.
+Feed URLs are refused if they resolve to private or internal addresses. The
+setup page's Test button fetches on a POST, and the test that pages never
+call the network is extended to cover it. Date-only feed rows are matched on
+local date. Cleaning compares against unflagged neighbours.
