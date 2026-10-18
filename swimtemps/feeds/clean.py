@@ -9,8 +9,10 @@ becomes the reference for what follows it:
 - far from the day: further than `day_limit` from the median of good readings
   in the previous 24 hours (skipped when there are none, so after a day the
   growing jump allowance accepts a genuine shift);
-- flatline: the same value as a run of good readings lasting more than
-  `flatline_hours`.
+- flatline: the same value as an unbroken run of good readings lasting
+  more than `flatline_hours` and holding at least `flatline_hours` + 1
+  readings, so a stuck sensor is caught but two equal readings across a
+  gap, or a slow daily source, are not.
 
 A flagged value within `air_margin` of the air temperature says so.
 """
@@ -46,12 +48,13 @@ def _reason(at: datetime, temp: float, good: list[tuple[datetime, float]], limit
         if abs(temp - reference) > limits["day_limit"]:
             return f"{abs(temp - reference):.1f} °C from the previous day's typical reading ({reference:.1f} °C)."
 
-    run_start = None
+    run_start, run_length = None, 1
     for when, value in reversed(good):
         if value != temp:
             break
-        run_start = when
-    if run_start is not None and at - run_start > timedelta(hours=limits["flatline_hours"]):
+        run_start, run_length = when, run_length + 1
+    if (run_start is not None and at - run_start > timedelta(hours=limits["flatline_hours"])
+            and run_length > limits["flatline_hours"]):
         return f"Flatline: the same value ({temp:.1f} °C) for {(at - run_start) / timedelta(hours=1):.0f} hours."
     return None
 

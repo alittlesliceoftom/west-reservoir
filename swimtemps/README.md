@@ -99,8 +99,8 @@ from people typing them in. Design: [`docs/design/2026-10-18-feeds-design.md`](d
   value is stored as the venue's correction. Nothing is destroyed.
 - **Cleaning.** A reading is flagged, with its reason, when it jumps more than
   2.0 °C + 0.1 °C an hour from the last good reading, sits more than 2.5 °C
-  from the previous day's good readings, or repeats one value for more than
-  a day. Flagged readings are stored and shown in grey on the chart, and kept
+  from the previous day's good readings, or repeats one value through more than
+  a day of hourly readings in a row. Flagged readings are stored and shown in grey on the chart, and kept
   out of the fit, the estimate and scoring. Admins can overrule a flag either
   way from the admin page.
 - **Model.** Feed readings pair into day-long legs: each to the feed reading

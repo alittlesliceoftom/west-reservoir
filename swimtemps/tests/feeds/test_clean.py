@@ -107,3 +107,14 @@ def test_stored_good_readings_between_new_rows_are_the_reference():
     reasons = clean([(t0 - timedelta(hours=50), 13.3), (t0, 9.0)], history, NO_AIR)
     assert reasons[0] is None
     assert reasons[1] is not None and "Jumped" in reasons[1]
+
+
+def test_two_equal_readings_across_a_gap_are_not_a_flatline():
+    t0 = FAULT_DAY
+    assert clean([(t0, 13.5), (t0 + timedelta(hours=72), 13.5)], [], NO_AIR) == [None, None]
+
+
+def test_equal_daily_readings_are_not_a_flatline():
+    t0 = FAULT_DAY
+    rows = [(t0 + timedelta(days=d), 12.0) for d in range(5)]
+    assert clean(rows, [], NO_AIR) == [None] * 5
