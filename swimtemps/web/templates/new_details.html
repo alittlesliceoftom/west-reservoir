@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}About your water - swimtemps{% endblock %}
+{% block main %}
+<p class="steps">Step 3 of 4 · About it</p>
+<h1>About your water</h1>
+{% for e in errors %}<p class="warning error-text" role="alert">{{ e }}</p>{% endfor %}
+<form method="post" action="/new" class="stack">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="lat" value="{{ v.lat }}">
+  <input type="hidden" name="lon" value="{{ v.lon }}">
+  <input type="hidden" name="timezone" value="{{ v.timezone }}">
+  <label>Name
+    <input name="name" value="{{ v.name or '' }}" maxlength="80" required autocomplete="off" placeholder="e.g. Clevedon Marine Lake">
+  </label>
+  <fieldset>
+    <legend>What kind of water is it?</legend>
+    {% for value, label in WATER_TYPES.items() %}
+    <label style="display:flex; gap:8px; font-weight:400"><input type="radio" name="water_type" value="{{ value }}" style="width:auto; min-height:0" {% if (v.water_type or 'still') == value %}checked{% endif %}> {{ label }}</label>
+    {% endfor %}
+    <p class="hint muted small">Forecasts for rivers and harbours are less reliable: the water there mixes with water from elsewhere.</p>
+  </fieldset>
+  <fieldset>
+    <legend>Roughly how deep is it where people swim?</legend>
+    {% for value, label in DEPTH_CLASSES.items() %}
+    <label style="display:flex; gap:8px; font-weight:400"><input type="radio" name="depth_class" value="{{ value }}" style="width:auto; min-height:0" {% if (v.depth_class or 'unknown') == value %}checked{% endif %}> {{ label }}</label>
+    {% endfor %}
+    <p class="hint muted small">Shallow water warms and cools faster. This is a starting guess; readings correct it.</p>
+  </fieldset>
+  <label>Usual reading time
+    <input type="time" name="reading_time" value="{{ v.reading_time.strftime('%H:%M') if v.reading_time is not string else v.reading_time }}" required>
+    <span class="hint">Forecasts are for this time each day. Readings can still be taken at any time.</span>
+  </label>
+  <button class="primary" type="submit">Create water</button>
+</form>
+{% endblock %}

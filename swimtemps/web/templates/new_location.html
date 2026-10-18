@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Add your water - swimtemps{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" defer></script>
+<script src="/static/map.js" defer></script>
+{% endblock %}
+{% block main %}
+<p class="steps">Step 2 of 4 · Where is it?</p>
+<h1>Where is your water?</h1>
+{% for e in errors or [] %}<p class="warning error-text" role="alert">{{ e }}</p>{% endfor %}
+
+<form id="search" class="stack" role="search">
+  <label>Search for a place
+    <input name="q" type="search" placeholder="Town, lake or landmark" autocomplete="off" minlength="2">
+  </label>
+  <div style="display:flex; gap:8px; flex-wrap:wrap">
+    <button type="submit">Search</button>
+    <button type="button" id="locate">Use my location</button>
+  </div>
+</form>
+<ul id="results" class="results" aria-live="polite"></ul>
+
+<p class="muted">Drag the pin, or tap the map, to mark where people swim.</p>
+<div id="map" class="map"></div>
+<p id="preview" class="flash" aria-live="polite" hidden></p>
+<div id="nearby" class="warning" hidden></div>
+
+<form method="post" action="/new/details" id="location-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="lat">
+  <input type="hidden" name="lon">
+  <input type="hidden" name="timezone">
+  <p><button class="primary" type="submit" id="continue" disabled>Continue</button></p>
+</form>
+{% endblock %}

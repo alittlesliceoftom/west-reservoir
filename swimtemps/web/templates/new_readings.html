@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}First readings - {{ water.name }} - swimtemps{% endblock %}
+{% block main %}
+<p class="steps">Step 4 of 4 · First readings</p>
+<h1>{{ water.name }} is on the map</h1>
+<p>Add any readings you already have. The more there are, the sooner the forecast is calibrated to this water.</p>
+<p class="muted">One per line: a date (dd/mm/yyyy, day first), an optional time, then the temperature. Lines without a time use {{ water.default_reading_time.strftime("%H:%M") }}.</p>
+<form method="post" action="/w/{{ water.slug }}/readings/preview" class="stack"
+      hx-post="/w/{{ water.slug }}/readings/preview" hx-target="#paste-preview" hx-swap="innerHTML">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <textarea name="rows" placeholder="14/10/2026 14.1&#10;15/10 07:30, 14.0&#10;16/10/2026 13.9" spellcheck="false">{{ rows }}</textarea>
+  <button type="submit">Preview</button>
+</form>
+<div id="paste-preview">{% if preview %}{% include "_paste_preview.html" %}{% endif %}</div>
+<p><a href="/w/{{ water.slug }}/readings">Add a single reading instead</a></p>
+<p><a class="button" href="/w/{{ water.slug }}">Skip for now</a></p>
+{% endblock %}

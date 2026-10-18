@@ -182,3 +182,11 @@ def test_pages_render_well_under_a_second(client, db):
     start = datetime.now()
     client.get("/w/test-lake")
     assert datetime.now() - start < timedelta(milliseconds=300)
+
+
+def test_a_pending_update_does_not_claim_there_are_no_readings(client, db):
+    water = make_water(db, make_user(db), needs_recompute=True)
+    store_snapshot(db, water, payload(latest_reading=None, estimate_now=None, forecast=[], readings=[], trajectory=[]))
+    page = client.get("/w/test-lake").text
+    assert "Updating forecast..." in page
+    assert "No readings yet" not in page

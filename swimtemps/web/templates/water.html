@@ -19,7 +19,7 @@
       {% if p.estimate_now %}<p class="now">About {{ p.estimate_now.temp | temp }} now</p>{% endif %}
       <p class="last">Last reading {{ p.latest_reading.temp | temp }}, {{ p.latest_reading.at | localtime(water.timezone) }}</p>
     </section>
-  {% else %}
+  {% elif not updating %}
     <section class="headline">
       <p class="last">No readings yet. Add the first one to get a forecast.</p>
     </section>
