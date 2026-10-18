@@ -88,7 +88,10 @@ that adapter needs.
 
 1. In the water's admin (or the last step of creating a water), choose
    "Readings come from the venue's feed".
-2. Fill in the recipe. Above the form, the explainer and the AI prompt (§6).
+2. Fill in the recipe, either field by field or by pasting an AI's answer
+   into one box. The explainer and the AI prompt (§6) sit above it, with a
+   copy button. Pasting a `swimtemps-feed` block (§6) fills every field; the
+   person can still edit them before testing.
 3. **Test**: the server fetches once and shows the result in the same preview
    used for pasted readings: rows ready to store, rows that failed to parse
    (with why), and rows the cleaning would flag (with why).
@@ -271,19 +274,89 @@ configuration is kept so the water can switch back.
 - The snapshot payload gains each chart reading's flag state and reason, the
   feed credit, and the quiet/paused state.
 
-## 6. The AI prompt (draft copy for the setup page)
+## 6. The AI prompt and the paste-in format
 
-> I'm setting up an automatic water-temperature feed on swimtemps.
-> Here is my venue's page: <URL>. Please find out where the temperatures
-> on that page come from: open the page and look for a JSON or API request
-> behind any chart or live reading. If there is one, give me:
-> the endpoint URL; whether the data is a list of records (rows) or separate
-> lists of times and values (columns); where the list or lists sit in the
-> JSON; which field is the time and which the temperature; the time format
-> (epoch milliseconds, ISO, or a pattern like %d-%b-%Y); and the unit.
-> If the readings are typed in by staff rather than produced by a sensor or
-> logger, or there is no JSON or API, say so. If the site's terms forbid
-> automated access, say that too.
+### The prompt (copy for the setup page)
+
+> I'm setting up an automatic water-temperature feed on swimtemps, a site
+> that shows swimmers water temperatures. Here is my venue's page: **<PASTE
+> THE PAGE ADDRESS>**.
+>
+> Please find out where the temperatures on that page come from. Look for a
+> JSON or API request behind any chart or live reading, and open it.
+>
+> Then reply with **only** the block below, filled in. Keep the first and last
+> lines exactly as they are. Write `unknown` for anything you cannot find.
+> Use either the `rows` keys or the `columns` keys, not both.
+>
+> ```
+> swimtemps-feed v1
+> url: <the JSON or API address that returns the readings>
+> orientation: <rows | columns>
+> rows_path: <rows only: where the list of readings is, e.g. $ for the top level>
+> header_row: <rows only: yes if the first row is column names, else no>
+> time_field: <rows only: the key or position of the time in each reading>
+> value_field: <rows only: the key or position of the temperature>
+> time_path: <columns only: where the list of times is, e.g. labels>
+> value_path: <columns only: where the list of temperatures is, e.g. datasets[0].data>
+> time_format: <epoch_ms | epoch_s | iso | a pattern like %d-%b-%Y>
+> timezone: <e.g. Europe/London, if the times have no offset>
+> unit: <C | F>
+> source_name: <the venue's name as it should be credited>
+> source_link: <the venue's own page about the temperatures, not the API>
+> automated: <yes if a sensor or logger produces the readings, no if staff type them in>
+> terms: <ok | forbids automated access | unknown>
+> notes: <anything else, on one line>
+> end
+> ```
+>
+> For example, a page whose chart loads
+> `{"labels":[1792229401000,…],"datasets":[{"data":[13.5,…]}]}` would give:
+>
+> ```
+> swimtemps-feed v1
+> url: https://example-lake.org/wp-json/lake/v1/temps?hours=168
+> orientation: columns
+> time_path: labels
+> value_path: datasets[0].data
+> time_format: epoch_ms
+> timezone: Europe/London
+> unit: C
+> source_name: Example Lake
+> source_link: https://example-lake.org/live-temperature/
+> automated: yes
+> terms: unknown
+> notes: half-hourly sensor; the API keeps 7 days
+> end
+> ```
+
+### Reading the pasted block
+
+The paste box accepts the whole AI reply. The parser:
+
+- **Finds the block.** It takes the text from the line `swimtemps-feed v1`
+  to the next line `end`. Anything around it is ignored: the AI's chat,
+  markdown code fences, or `>` quote marks.
+- **Reads `key: value` lines.**
+  - A value may itself contain `:`, as in URLs.
+  - Blank values and `unknown` count as not given.
+  - Keys are case-insensitive.
+  - Lines inside the block that are not `key: value` are ignored.
+- **Fills the form** with what it found, then lists, in plain words:
+  - required fields that are missing;
+  - keys it did not recognise;
+  - values that are not allowed (for example `orientation: sideways`).
+- **Stops on `automated: no`.** The page says this looks like a manually
+  updated source, which should be a manual water, and offers the feed
+  request form in case the reading is wrong.
+- **Stops on `terms: forbids automated access`.** The page says the feed
+  cannot be set up without the venue's or vendor's agreement, and offers
+  the request form.
+- **Rejects a missing block, or a version other than `v1`,** with a message
+  saying to paste the block that starts with `swimtemps-feed v1`.
+
+`swimtemps-feed v1` is the contract between the prompt and the parser. A new
+recipe field means `v2`, and the parser keeps accepting `v1`.
 
 ## 7. Left to the builder
 
@@ -293,7 +366,10 @@ configuration is kept so the water can switch back.
 - Whether quiet-feed and paused states live in the snapshot or are computed
   at render time from `feeds` (the page must still never fetch).
 - Request-handling UI for superusers: a plain list is enough.
-- Tests: the recipe against both recorded fixtures; hourly thinning
+- Tests: the paste-in parser (§6) against the prompt's own example, a reply
+  wrapped in chat text and a code fence, `unknown` values, a missing block,
+  `automated: no`, and `terms: forbids automated access`; the recipe against
+  both recorded fixtures; hourly thinning
   (nearest the top of the hour, deterministic on re-fetch); day-long leg
   pairing, including a gap with no partner in 21–27 h and a mixed
   manual-and-feed water; the cleaning rules against the recorded Clevedon
