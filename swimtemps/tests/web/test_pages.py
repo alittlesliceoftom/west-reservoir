@@ -196,3 +196,83 @@ def test_a_reading_without_an_estimate_says_why(client, db):
     water = make_water(db, make_user(db), needs_recompute=False)
     store_snapshot(db, water, payload(estimate_now=None))
     assert "No current estimate" in client.get("/w/test-lake").text
+
+
+# --- feed waters -------------------------------------------------------------
+
+def feed_block(**overrides):
+    return {"source_name": "Example Lake", "source_link": "https://example-lake.org/live/", "state": "on",
+            "last_good_reading_at": "2026-10-18T11:00:00+00:00", "quiet": False, "paused_forecast": False,
+            **overrides}
+
+
+def feed_water(db, data=None):
+    from tests.factories import make_feed
+    owner = make_user(db)
+    water = make_water(db, owner, needs_recompute=False, feed_mode="feed")
+    make_feed(db, water, owner)
+    store_snapshot(db, water, data or payload(feed=feed_block()))
+    return water
+
+
+def test_a_feed_water_credits_its_source(client, db):
+    feed_water(db)
+    page = client.get("/w/test-lake").text
+    assert re.search(r'Readings from <a href="https://example-lake.org/live/"[^>]*>Example Lake</a>', page)
+
+
+def test_a_feed_water_has_no_add_a_reading_button(client, db):
+    feed_water(db)
+    page = client.get("/w/test-lake").text
+    assert "/w/test-lake/readings" not in page and "Add a reading" not in page
+
+
+def test_a_manual_water_keeps_its_add_a_reading_button(client, db):
+    water = make_water(db, make_user(db), needs_recompute=False)
+    store_snapshot(db, water)
+    assert "/w/test-lake/readings" in client.get("/w/test-lake").text
+
+
+def test_a_quiet_feed_says_since_when(client, db):
+    feed_water(db, payload(feed=feed_block(quiet=True, last_good_reading_at="2026-10-17T23:00:00+00:00")))
+    assert "Feed quiet since Sun 18 Oct 00:00" in visible(client.get("/w/test-lake").text)
+
+
+def test_a_feed_silent_for_five_days_pauses_the_forecast(client, db):
+    data = payload(feed=feed_block(quiet=True, paused_forecast=True, last_good_reading_at="2026-10-12T09:00:00+00:00"),
+                   estimate_now=None, forecast=[], trajectory=[])
+    feed_water(db, data)
+    page = visible(client.get("/w/test-lake").text)
+    assert "Forecast paused: no data from Example Lake since Mon 12 Oct" in page
+    assert "Feed quiet since" not in page
+    assert "weather data" not in page
+    assert "Next 5 days" not in page
+
+
+def test_a_feed_paused_by_its_admin_says_so(client, db):
+    data = payload(feed=feed_block(state="paused", paused_forecast=True), estimate_now=None, forecast=[], trajectory=[])
+    feed_water(db, data)
+    page = visible(client.get("/w/test-lake").text)
+    assert "Feed paused by the venue" in page
+    assert "Forecast paused: no data" not in page
+
+
+def test_a_feed_with_no_good_reading_yet(client, db):
+    data = payload(feed=feed_block(quiet=True, paused_forecast=True, last_good_reading_at=None),
+                   latest_reading=None, estimate_now=None, forecast=[], trajectory=[],
+                   readings=[["2026-10-18T06:00:00+00:00", 8.4, "Jumped 4.3 °C from the last good reading (12.7 °C)."]])
+    feed_water(db, data)
+    page = visible(client.get("/w/test-lake").text)
+    assert "No good readings from Example Lake yet" in page
+    assert "Add the first one" not in page
+    assert 'id="chart-data"' in client.get("/w/test-lake").text
+
+
+def test_chart_data_carries_flag_reasons(client, db):
+    readings = [["2026-10-18T05:00:00+00:00", 13.6, None],
+                ["2026-10-18T06:00:00+00:00", 8.4, "Jumped 4.3 °C from the last good reading (12.7 °C)."]]
+    feed_water(db, payload(feed=feed_block(), readings=readings))
+    html = client.get("/w/test-lake").text
+    data = re.search(r'<script id="chart-data" type="application/json">(.*?)</script>', html, re.S).group(1)
+    import json
+    assert json.loads(data)["readings"] == readings

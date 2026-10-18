@@ -57,3 +57,36 @@ def test_no_waters_only_needs_the_worker(client, db):
     db.add(Heartbeat(at=NOW))
     db.commit()
     assert client.get("/healthz").status_code == 200
+
+
+def feed_water(db, last_good, state="on"):
+    from tests.factories import make_feed
+    water = healthy_water(db)
+    water.feed_mode = "feed"
+    make_feed(db, water, make_user(db, email="f@example.com"), state=state, last_good_reading_at=last_good)
+    db.commit()
+    return water
+
+
+def test_a_feed_without_a_good_reading_for_three_days_fails(client, db):
+    feed_water(db, NOW - timedelta(days=3, minutes=1))
+    response = client.get("/healthz")
+    assert response.status_code == 503
+    assert "feed for Test Lake has had no good reading for 3 days" in response.json()["failures"]
+
+
+def test_a_feed_with_a_recent_good_reading_is_healthy(client, db):
+    feed_water(db, NOW - timedelta(days=2, hours=23))
+    assert client.get("/healthz").status_code == 200
+
+
+def test_a_paused_feed_does_not_fail(client, db):
+    feed_water(db, NOW - timedelta(days=30), state="paused")
+    assert client.get("/healthz").status_code == 200
+
+
+def test_a_feed_water_switched_to_manual_does_not_fail(client, db):
+    water = feed_water(db, NOW - timedelta(days=30), state="off")
+    water.feed_mode = "manual"
+    db.commit()
+    assert client.get("/healthz").status_code == 200

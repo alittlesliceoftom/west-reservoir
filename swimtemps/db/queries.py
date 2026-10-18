@@ -213,6 +213,10 @@ def home_listing(session: Session) -> list:
 
 
 def health(session: Session) -> dict:
+    """
+    The figures /healthz judges, plus each polled feed's name and the time of
+    its last good reading (its creation, before it has one).
+    """
     sql = text("""
         SELECT
             (SELECT count(*) FROM waters WHERE archived_at IS NULL) AS active_waters,
@@ -225,5 +229,12 @@ def health(session: Session) -> dict:
             (SELECT max(fetched_at) FROM weather_hourly) AS last_weather,
             (SELECT max(at) FROM heartbeat) AS last_heartbeat
     """)
-    return dict(session.execute(sql).mappings().one())
+    state = dict(session.execute(sql).mappings().one())
+    state["feeds"] = session.execute(text("""
+        SELECT w.name, COALESCE(f.last_good_reading_at, f.created_at) AS since
+        FROM feeds f JOIN waters w ON w.id = f.water_id
+        WHERE f.state = 'on' AND w.feed_mode = 'feed' AND w.archived_at IS NULL
+        ORDER BY w.name
+    """)).all()
+    return state
 

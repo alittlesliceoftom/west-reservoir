@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db import queries
-from db.models import Snapshot, Water
+from db.models import Feed, Snapshot, Water
 from web.deps import get_db
 from web.permissions import can_admin
 from web.templating import render
@@ -34,14 +34,17 @@ def water_page(request: Request, slug: str, db: Session = Depends(get_db)):
     snapshot = db.get(Snapshot, water.id)
     payload = snapshot.payload if snapshot else None
     chart = None
-    if payload and payload["latest_reading"]:
+    if payload and (payload["latest_reading"] or payload["readings"]):
         chart = {k: payload[k] for k in ("readings", "air", "forecast", "trajectory", "latest_reading", "estimate_now")}
         chart["timezone"] = water.timezone
         chart["now"] = request.app.state.clock().isoformat()
+    feed = db.scalar(select(Feed).where(Feed.water_id == water.id)) if water.feed_mode == "feed" else None
     return render(request, "water.html", {
         "water": water,
         "p": payload,
         "chart": chart,
+        "feed": feed,
+        "feed_state": (payload or {}).get("feed") if feed else None,
         "updating": water.needs_recompute or snapshot is None,
         "first": snapshot is None,
         "is_admin": can_admin(db, request.state.user, water),

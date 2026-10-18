@@ -13,20 +13,38 @@
 
 {% if updating %}{% include "_status.html" with context %}{% endif %}
 
+{% if feed %}
+<p class="credit">Readings from <a href="{{ feed.source_link }}" rel="noopener nofollow">{{ feed.source_name }}</a>, updated automatically.</p>
+{% if feed_state %}
+  {% if feed_state.state == "paused" %}
+  <p class="note" role="status">Feed paused by the venue. The last readings are below; there is no forecast while it is paused.</p>
+  {% elif feed_state.paused_forecast and feed_state.last_good_reading_at %}
+  <p class="note" role="status">Forecast paused: no data from {{ feed.source_name }} since {{ feed_state.last_good_reading_at | localtime(water.timezone, "%a {day} %b") }}. It resumes with the next good reading.</p>
+  {% elif feed_state.paused_forecast %}
+  <p class="note" role="status">No good readings from {{ feed.source_name }} yet. The forecast starts with the first one.</p>
+  {% elif feed_state.quiet %}
+  <p class="note" role="status">Feed quiet since {{ feed_state.last_good_reading_at | localtime(water.timezone) }}. The estimate is from that reading, so it is less certain.</p>
+  {% endif %}
+{% endif %}
+{% endif %}
+
+{% set forecast_paused = feed_state and feed_state.paused_forecast %}
 {% if p and p.latest_reading %}
   <section class="headline">
     {% if p.estimate_now %}<p class="now">About {{ p.estimate_now.temp | temp }} now</p>
-    {% else %}<p class="muted">No current estimate: the weather data for this spot has a gap. It will return when the weather service catches up.</p>{% endif %}
+    {% elif not forecast_paused %}<p class="muted">No current estimate: the weather data for this spot has a gap. It will return when the weather service catches up.</p>{% endif %}
     <p class="last">Last reading {{ p.latest_reading.temp | temp }}, {{ p.latest_reading.at | localtime(water.timezone) }}</p>
   </section>
-{% elif not updating %}
+{% elif not updating and not feed %}
   <section class="headline">
     <p class="last">No readings yet. Add the first one to get a forecast.</p>
   </section>
 {% endif %}
 
-<p><a class="button primary" href="/w/{{ water.slug }}/readings">Add a reading</a>
+{% if not feed or is_admin %}
+<p>{% if not feed %}<a class="button primary" href="/w/{{ water.slug }}/readings">Add a reading</a>{% endif %}
   {% if is_admin %}<a class="button" href="/w/{{ water.slug }}/admin">Manage</a>{% endif %}</p>
+{% endif %}
 
 {% if p %}
   {% if chart %}

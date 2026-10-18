@@ -11,10 +11,18 @@
     var fmtFull = new Intl.DateTimeFormat("en-GB", { timeZone: d.timezone, weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
     var t = function (iso) { return new Date(iso).getTime(); };
 
-    var anchor = [t(d.latest_reading.at), d.latest_reading.temp];
+    // Readings are [time, °C, reason]: reason is null for a usable reading and
+    // says why for one the cleaning flagged or an admin marked wrong.
+    var usable = d.readings.filter(function (r) { return r[2] == null; }).map(function (r) { return [r[0], r[1]]; });
+    var flagged = d.readings.filter(function (r) { return r[2] != null; });
     var points = d.forecast.map(function (f) { return { x: t(f.at), temp: f.temp, lower: f.lower, upper: f.upper }; });
-    var lower = [[anchor[0], anchor[1]]].concat(points.map(function (p) { return [p.x, p.lower]; }));
-    var width = [[anchor[0], 0]].concat(points.map(function (p) { return [p.x, +(p.upper - p.lower).toFixed(2)]; }));
+    var lower = [], width = [];
+    if (d.latest_reading && points.length) {
+      var anchor = [t(d.latest_reading.at), d.latest_reading.temp];
+      lower = [[anchor[0], anchor[1]]].concat(points.map(function (p) { return [p.x, p.lower]; }));
+      width = [[anchor[0], 0]].concat(points.map(function (p) { return [p.x, +(p.upper - p.lower).toFixed(2)]; }));
+    }
+    var esc = function (s) { return window.echarts.format.encodeHTML(String(s)); };
     var nowMs = t(d.now);
     var start = nowMs - 30 * 24 * 3600 * 1000;
 
@@ -23,11 +31,22 @@
       backgroundColor: "transparent",
       animation: false,
       grid: { left: 40, right: 12, top: 28, bottom: 56 },
-      legend: { top: 0, data: ["Readings", "Forecast", "Air"], textStyle: { fontSize: 11 } },
+      legend: { top: 0, data: ["Readings"].concat(flagged.length ? ["Flagged"] : [], ["Forecast", "Air"]), textStyle: { fontSize: 11 } },
       tooltip: {
         trigger: "axis",
-        valueFormatter: function (v) { return v == null ? "" : (+v).toFixed(1) + " °C"; },
-        axisPointer: { label: { formatter: function (p) { return fmtFull.format(new Date(p.value)); } } }
+        axisPointer: { label: { formatter: function (p) { return fmtFull.format(new Date(p.value)); } } },
+        formatter: function (items) {
+          var lines = [esc(fmtFull.format(new Date(items[0].axisValue)))];
+          items.forEach(function (it) {
+            if (it.seriesName.indexOf("band") === 0 || it.seriesName === "80% range") return;
+            var v = Array.isArray(it.value) ? it.value[1] : it.value;
+            if (v == null) return;
+            var line = it.marker + esc(it.seriesName) + " " + (+v).toFixed(1) + " °C";
+            if (it.seriesName === "Flagged") line += "<br><span style=\"opacity:.8\">" + esc(it.value[2]) + "</span>";
+            lines.push(line);
+          });
+          return lines.join("<br>");
+        }
       },
       xAxis: { type: "time", axisLabel: { formatter: function (v) { return fmt.format(new Date(v)); }, hideOverlap: true } },
       yAxis: { type: "value", scale: true, name: "°C", nameGap: 8 },
@@ -38,7 +57,8 @@
         { name: "80% range", type: "line", data: width, stack: "band", showSymbol: false, lineStyle: { opacity: 0 }, areaStyle: { color: "#0b6e99", opacity: 0.18 }, tooltip: { show: false }, silent: true },
         { name: "Forecast", type: "line", data: d.trajectory, showSymbol: false, lineStyle: { type: "dashed", width: 2 }, itemStyle: { color: "#0b6e99" },
           markLine: { silent: true, symbol: "none", label: { formatter: "now", position: "insideEndTop" }, lineStyle: { color: "#e3b341" }, data: [{ xAxis: nowMs }] } },
-        { name: "Readings", type: "scatter", data: d.readings, symbolSize: 7, itemStyle: { color: dark ? "#e6edf2" : "#13202b" }, z: 3 }
+        { name: "Flagged", type: "scatter", data: flagged, symbolSize: 7, itemStyle: { color: "#9aa5ad", opacity: 0.7 }, z: 2 },
+        { name: "Readings", type: "scatter", data: usable, symbolSize: 7, itemStyle: { color: dark ? "#e6edf2" : "#13202b" }, z: 3 }
       ]
     });
     window.addEventListener("resize", function () { chart.resize(); });
