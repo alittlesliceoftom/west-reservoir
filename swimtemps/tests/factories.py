@@ -42,3 +42,30 @@ def add_reading(db, water, user, at, temp, **extra) -> Reading:
     db.add(reading)
     db.commit()
     return reading
+
+
+def make_feed(db, water, user, state="on", config=None, **extra):
+    from db.models import Feed
+
+    feed = Feed(
+        water_id=water.id, recipe="json_table",
+        config=config or {"url": "https://example-lake.org/temps", "orientation": "columns",
+                          "time_path": "labels", "value_path": "datasets[0].data", "time_format": "epoch_ms"},
+        source_name="Example Lake", source_link="https://example-lake.org/live/",
+        state=state, attested_by=user.id, attested_at=pd.Timestamp("2026-10-01", tz="UTC").to_pydatetime(),
+        attested_statement="I have the venue's permission to share this data, or it is publicly published.",
+        created_by=user.id, **extra,
+    )
+    db.add(feed)
+    db.commit()
+    return feed
+
+
+def add_feed_reading(db, feed, at, temp, **extra) -> Reading:
+    reading = Reading(
+        water_id=feed.water_id, measured_at=pd.Timestamp(at, tz="UTC").to_pydatetime() if isinstance(at, str) else at,
+        temp_c=temp, **{"source": "feed", "feed_id": feed.id, **extra},
+    )
+    db.add(reading)
+    db.commit()
+    return reading

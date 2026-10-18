@@ -70,7 +70,8 @@ def reading_in_same_hour(db: Session, water: Water, at: datetime) -> Reading | N
 
 
 def save(db: Session, water: Water, user: User, rows: list[tuple[datetime, float]]) -> None:
-    db.add_all(Reading(water_id=water.id, measured_at=at, temp_c=temp, submitted_by=user.id) for at, temp in rows)
+    db.add_all(Reading(water_id=water.id, measured_at=at, temp_c=temp, submitted_by=user.id, source="manual")
+               for at, temp in rows)
     queries.mark_dirty(db, water.id)
     db.commit()
 

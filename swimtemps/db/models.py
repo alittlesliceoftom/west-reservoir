@@ -32,6 +32,11 @@ DEPTH_CLASSES = ("shallow", "lake", "deep", "unknown")
 ROLES = ("admin", "contributor")
 FIT_METHODS = ("prior", "scale", "full")
 WEATHER_SOURCES = ("archive", "forecast")
+FEED_MODES = ("manual", "feed")
+READING_SOURCES = ("manual", "feed")
+FLAG_OVERRIDES = ("accept", "reject")
+FEED_STATES = ("on", "paused", "off")
+REQUEST_STATUSES = ("open", "done", "declined")
 
 
 def _one_of(column: str, values: tuple[str, ...]) -> CheckConstraint:
@@ -64,6 +69,7 @@ class Water(Base):
     __table_args__ = (
         _one_of("water_type", WATER_TYPES),
         _one_of("depth_class", DEPTH_CLASSES),
+        _one_of("feed_mode", FEED_MODES),
         CheckConstraint("lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180", name="lat_lon_valid"),
     )
 
@@ -80,6 +86,8 @@ class Water(Base):
     created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(Timestamp, server_default=func.now())
     archived_at: Mapped[datetime | None] = mapped_column(Timestamp)
+    # Where readings come from: people (`manual`) or the water's feed (`feed`).
+    feed_mode: Mapped[str] = mapped_column(Text, server_default="manual")
 
 
 class WaterMember(Base):
@@ -92,22 +100,89 @@ class WaterMember(Base):
 
 
 class Reading(Base):
+    """
+    A water temperature, typed by a person (`manual`) or fetched from the
+    water's feed (`feed`). Flagged readings are kept and shown, but only
+    usable ones (see `db.queries.USABLE_SQL`) feed the fit, the estimate and
+    scoring. An admin's overrule decides for the row it is on.
+    """
     __tablename__ = "readings"
     __table_args__ = (
         CheckConstraint("temp_c BETWEEN -2 AND 40", name="temp_c_in_range"),
+        _one_of("source", READING_SOURCES),
+        _one_of("flag_override", FLAG_OVERRIDES),
+        CheckConstraint(
+            "(source = 'manual' AND submitted_by IS NOT NULL) OR (source = 'feed' AND feed_id IS NOT NULL)",
+            name="reading_origin_valid",
+        ),
         Index("readings_water_measured", "water_id", "measured_at", postgresql_where=text("deleted_at IS NULL")),
         Index("readings_submitter_recent", "submitted_by", "water_id", "created_at"),
+        Index("readings_feed_time", "feed_id", "measured_at", unique=True,
+              postgresql_where=text("feed_id IS NOT NULL AND deleted_at IS NULL")),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     water_id: Mapped[int] = mapped_column(ForeignKey("waters.id"))
     measured_at: Mapped[datetime] = mapped_column(Timestamp)
     temp_c: Mapped[float] = mapped_column(Numeric(4, 1, asdecimal=False))
-    submitted_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    submitted_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    source: Mapped[str] = mapped_column(Text, server_default="manual")
+    feed_id: Mapped[int | None] = mapped_column(ForeignKey("feeds.id"))
     created_at: Mapped[datetime] = mapped_column(Timestamp, server_default=func.now())
     deleted_at: Mapped[datetime | None] = mapped_column(Timestamp)
     deleted_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     replaced_by: Mapped[int | None] = mapped_column(ForeignKey("readings.id"))
+    flagged: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    flag_reason: Mapped[str | None] = mapped_column(Text)
+    flag_override: Mapped[str | None] = mapped_column(Text)
+    override_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    override_at: Mapped[datetime | None] = mapped_column(Timestamp)
+
+
+class Feed(Base):
+    """
+    A water's automated source: a recipe (`json_table`, or the name of a
+    hand-written adapter) and its configuration. One per water. `state` is
+    `on` (polled), `paused` (by an admin, not polled) or `off` (the water went
+    back to manual; the configuration is kept so it can switch back).
+    """
+    __tablename__ = "feeds"
+    __table_args__ = (_one_of("state", FEED_STATES),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    water_id: Mapped[int] = mapped_column(ForeignKey("waters.id"), unique=True)
+    recipe: Mapped[str] = mapped_column(Text)
+    config: Mapped[dict] = mapped_column(JSONB)
+    source_name: Mapped[str] = mapped_column(Text)
+    source_link: Mapped[str] = mapped_column(Text)
+    # Overrides of feeds.clean.DEFAULT_THRESHOLDS; empty means the defaults.
+    thresholds: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    state: Mapped[str] = mapped_column(Text, server_default="on")
+    attested_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    attested_at: Mapped[datetime] = mapped_column(Timestamp)
+    attested_statement: Mapped[str] = mapped_column(Text)
+    last_polled_at: Mapped[datetime | None] = mapped_column(Timestamp)
+    last_success_at: Mapped[datetime | None] = mapped_column(Timestamp)
+    last_good_reading_at: Mapped[datetime | None] = mapped_column(Timestamp)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(Timestamp, server_default=func.now())
+
+
+class FeedRequest(Base):
+    """Someone asking us to set up a feed the generic recipe cannot express."""
+    __tablename__ = "feed_requests"
+    __table_args__ = (_one_of("status", REQUEST_STATUSES),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    page_url: Mapped[str] = mapped_column(Text)
+    notes: Mapped[str | None] = mapped_column(Text)
+    ai_block: Mapped[str | None] = mapped_column(Text)
+    requested_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    water_id: Mapped[int | None] = mapped_column(ForeignKey("waters.id"))
+    status: Mapped[str] = mapped_column(Text, server_default="open")
+    created_at: Mapped[datetime] = mapped_column(Timestamp, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(Timestamp, server_default=func.now())
 
 
 class WeatherHourly(Base):

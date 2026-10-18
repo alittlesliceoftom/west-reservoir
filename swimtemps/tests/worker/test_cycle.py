@@ -39,7 +39,8 @@ class FakeOpenMeteo:
 def daily_readings(db, water, user, temps, last="2026-10-17 06:00"):
     end = pd.Timestamp(last, tz="UTC")
     for i, temp in enumerate(temps):
-        add_reading(db, water, user, (end - pd.Timedelta(days=len(temps) - 1 - i)).to_pydatetime(), temp)
+        at = (end - pd.Timedelta(days=len(temps) - 1 - i)).to_pydatetime()
+        add_reading(db, water, user, at, temp, created_at=at + pd.Timedelta(minutes=5))
 
 
 @pytest.fixture

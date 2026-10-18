@@ -16,7 +16,7 @@
     <tr>
       <td>{{ r.measured_at | localtime(water.timezone) }}</td>
       <td>{{ "%.1f" | format(r.temp_c) }}</td>
-      <td>{{ name or email }}</td>
+      <td>{% if r.source == "feed" %}Feed{% else %}{{ name or email }}{% endif %}</td>
       <td>
         <details>
           <summary>Correct</summary>

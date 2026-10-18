@@ -53,7 +53,7 @@ def standing_reading(db: Session, water: Water, reading_id: int) -> Reading:
 def admin_page(request, db, water, *, status_code=200, error=None, form=None):
     rows = db.execute(
         select(Reading, User.display_name, User.email)
-        .join(User, User.id == Reading.submitted_by)
+        .outerjoin(User, User.id == Reading.submitted_by)
         .where(Reading.water_id == water.id, Reading.deleted_at.is_(None))
         .order_by(Reading.measured_at.desc()).limit(SHOWN_READINGS)
     ).all()

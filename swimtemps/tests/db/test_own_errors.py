@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 
 from db import queries
-from db.models import ForecastPoint, ForecastRun, ModelFit
+from db.models import ForecastPoint, ForecastRun, ModelFit, Reading
 from tests.factories import add_reading, make_user, make_water
 
 DAY0 = pd.Timestamp("2026-06-01 06:00", tz="UTC")
@@ -67,3 +67,10 @@ def test_a_horizon_with_fewer_than_ten_points_falls_back_to_the_base(db):
 def test_a_water_with_no_runs_gives_none(db):
     water = make_water(db, make_user(db), name="Empty")
     assert queries.own_errors(db, water.id, min_points=20) is None
+
+
+def test_flagged_readings_are_not_scored(db):
+    water = scored_water(db)
+    db.query(Reading).filter(Reading.water_id == water.id).update({"flagged": True})
+    db.commit()
+    assert queries.own_errors(db, water.id, min_points=1) is None

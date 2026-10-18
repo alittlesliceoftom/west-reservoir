@@ -9,6 +9,11 @@ from sqlalchemy.orm import Session
 MEASURES = ("air_temp", "shortwave", "cloud_cover")
 MIN_POINTS_PER_HORIZON = 10
 
+# A reading the fit, the estimate and scoring may use: unflagged, or flagged
+# and accepted by an admin, and not marked wrong. Expects the alias `r`.
+USABLE_SQL = "(r.flag_override = 'accept' OR (r.flag_override IS NULL AND NOT r.flagged))"
+REJECTED_REASON = "Marked as wrong by the water's admin"
+
 # Archive values overwrite forecast values; a forecast never overwrites an
 # archive value. A null in the incoming row keeps what is stored.
 UPSERT_WEATHER = text("""
@@ -61,17 +66,42 @@ def weather_frame(session: Session, water_id: int, since: datetime | None = None
 
 
 def active_readings(session: Session, water_id: int) -> pd.DataFrame:
-    """Readings that stand, oldest first: id, measured_at (UTC), temp_c (float)."""
-    sql = text("""
-        SELECT id, measured_at, temp_c::float8 AS temp_c
-        FROM readings
-        WHERE water_id = :water_id AND deleted_at IS NULL
-        ORDER BY measured_at, id
+    """
+    Usable readings that stand, oldest first: id, measured_at (UTC),
+    temp_c (float), source ('manual' | 'feed').
+    """
+    sql = text(f"""
+        SELECT r.id, r.measured_at, r.temp_c::float8 AS temp_c, r.source
+        FROM readings r
+        WHERE r.water_id = :water_id AND r.deleted_at IS NULL AND {USABLE_SQL}
+        ORDER BY r.measured_at, r.id
     """)
     rows = session.execute(sql, {"water_id": water_id}).all()
-    frame = pd.DataFrame(rows, columns=["id", "measured_at", "temp_c"])
+    frame = pd.DataFrame(rows, columns=["id", "measured_at", "temp_c", "source"])
     frame["measured_at"] = pd.to_datetime(frame["measured_at"], utc=True)
-    return frame.astype({"temp_c": float})
+    return frame.astype({"temp_c": float, "source": str})
+
+
+def chart_readings(session: Session, water_id: int, since: datetime | None) -> pd.DataFrame:
+    """
+    Every standing reading from `since`, usable or not, oldest first:
+    measured_at (UTC), temp_c, usable (bool), and reason (None when usable).
+    """
+    sql = text(f"""
+        SELECT r.measured_at, r.temp_c::float8 AS temp_c, {USABLE_SQL} AS usable,
+               CASE WHEN {USABLE_SQL} THEN NULL
+                    ELSE COALESCE(r.flag_reason, :rejected) END AS reason
+        FROM readings r
+        WHERE r.water_id = :water_id AND r.deleted_at IS NULL
+          AND (CAST(:since AS timestamptz) IS NULL OR r.measured_at >= :since)
+        ORDER BY r.measured_at, r.id
+    """)
+    rows = session.execute(sql, {"water_id": water_id, "since": since, "rejected": REJECTED_REASON}).all()
+    frame = pd.DataFrame(rows, columns=["measured_at", "temp_c", "usable", "reason"])
+    frame["measured_at"] = pd.to_datetime(frame["measured_at"], utc=True)
+    frame = frame.astype({"temp_c": float, "usable": bool, "reason": object})
+    frame["reason"] = frame["reason"].where(frame["reason"].notna(), None)
+    return frame
 
 
 def mark_dirty(session: Session, water_id: int) -> None:
@@ -84,11 +114,12 @@ def mark_dirty(session: Session, water_id: int) -> None:
 
 
 def readings_changed_since(session: Session, water_id: int, since: datetime) -> bool:
-    """Whether any reading was added, deleted or corrected after `since`."""
+    """Whether any reading was added, deleted, corrected or overruled after `since`."""
     sql = text("""
         SELECT EXISTS (
             SELECT 1 FROM readings
-            WHERE water_id = :water_id AND (created_at > :since OR deleted_at > :since)
+            WHERE water_id = :water_id
+              AND (created_at > :since OR deleted_at > :since OR override_at > :since)
         )
     """)
     return bool(session.execute(sql, {"water_id": water_id, "since": since}).scalar())
@@ -113,12 +144,12 @@ def own_errors(session: Session, water_id: int, min_points: int) -> dict[int, fl
     until it has `min_points` scored points. A horizon with fewer than
     MIN_POINTS_PER_HORIZON of its own is left out, so the base band is used there.
 
-    A point is scored against a reading in the same hour. Each anchor's
+    A point is scored against a usable reading in the same hour. Each anchor's
     forecast is scored as first issued: hourly re-runs from the same anchor
     have seen more of the real weather, and scoring them would make the band
     look tighter than the forecasts people actually read.
     """
-    sql = text("""
+    sql = text(f"""
         WITH scored AS (
             SELECT DISTINCT ON (r.id, fr.anchor_reading_id)
                 r.id AS reading_id,
@@ -129,6 +160,7 @@ def own_errors(session: Session, water_id: int, min_points: int) -> dict[int, fl
             JOIN readings r
               ON r.water_id = fr.water_id
              AND r.deleted_at IS NULL
+             AND {USABLE_SQL}
              AND date_trunc('hour', r.measured_at + interval '30 minutes') = p.valid_at
             WHERE fr.water_id = :water_id AND fr.created_at < r.measured_at
             ORDER BY r.id, fr.anchor_reading_id, fr.created_at

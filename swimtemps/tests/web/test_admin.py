@@ -206,3 +206,14 @@ def test_a_water_name_cannot_inject_script_into_the_admin_page(client, db, admin
     assert "confirm('Archive Lido'+alert" not in page
     assert "onsubmit" not in page
     assert 'data-confirm="Archive Lido' in client.get("/w/lido/admin").text.replace("&#39;", "'")
+
+
+def test_a_feed_reading_with_no_submitter_is_listed(client, db, water, admin):
+    from tests.factories import add_feed_reading, make_feed
+    feed = make_feed(db, water, admin)
+    add_feed_reading(db, feed, "2026-10-18 05:00", 13.7)
+    sign_in(client, admin)
+    page = client.get("/w/test-lake/admin")
+    assert page.status_code == 200
+    assert "13.7" in page.text
+    assert "None" not in page.text
