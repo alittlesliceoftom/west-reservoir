@@ -1,0 +1,46 @@
+# Push to main -> test, build and push the image, then on the VPS: pull,
+# migrate, restart. Needs repository secrets VPS_HOST, VPS_USER, VPS_SSH_KEY
+# and VPS_KNOWN_HOSTS (output of `ssh-keyscan VPS_HOST`), and the repository
+# variable DEPLOY_ENABLED=true once the box is ready.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency: deploy
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: test
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/swimtemps
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and push the image
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" .
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
+      - name: Ship the compose files
+        run: |
+          install -m 600 /dev/null key && echo "${{ secrets.VPS_SSH_KEY }}" > key
+          echo "${{ secrets.VPS_KNOWN_HOSTS }}" > known_hosts
+          scp -i key -o UserKnownHostsFile=known_hosts deploy/docker-compose.yml deploy/Caddyfile \
+            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/opt/swimtemps/"
+      - name: Migrate and restart
+        run: |
+          ssh -i key -o UserKnownHostsFile=known_hosts "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "cd /opt/swimtemps && docker compose pull && docker compose run --rm migrate && docker compose up -d --remove-orphans"
+      - if: always()
+        run: rm -f key

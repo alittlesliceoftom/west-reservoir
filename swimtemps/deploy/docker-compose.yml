@@ -1,0 +1,47 @@
+# Production stack on the VPS. Lives at /opt/swimtemps/docker-compose.yml next
+# to a .env built from .env.example. The deploy workflow runs:
+#
+#   docker compose pull
+#   docker compose run --rm migrate
+#   docker compose up -d
+#
+name: swimtemps
+
+x-app: &app
+  image: ${IMAGE:-ghcr.io/alittlesliceoftom/swimtemps:latest}
+  env_file: .env
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  caddy:
+    image: caddy:2.10
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [web]
+
+  web:
+    <<: *app
+    expose: ["8000"]
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "worker.main"]
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    profiles: ["migrate"]
+
+volumes:
+  caddy_data:
+  caddy_config:
