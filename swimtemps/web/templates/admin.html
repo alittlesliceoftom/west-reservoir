@@ -6,6 +6,13 @@
 {% if message %}<p class="flash" role="status">{{ message }}</p>{% endif %}
 {% if error %}<p class="warning error-text" role="alert">{{ error }}</p>{% endif %}
 
+<h2>Where readings come from</h2>
+{% if water.feed_mode == "feed" and feed %}
+<p>From {{ feed.source_name }}'s feed{% if feed.state == "paused" %}, paused{% endif %}. <a href="/w/{{ water.slug }}/feed">Manage the feed</a></p>
+{% else %}
+<p>Typed in by people. If the venue publishes live readings from a sensor, <a href="/w/{{ water.slug }}/feed">set up a feed</a>.</p>
+{% endif %}
+
 <h2>Readings</h2>
 <p class="muted small">{{ total }} reading{{ "" if total == 1 else "s" }}{% if total > rows|length %}, newest {{ rows|length }} shown{% endif %}. Corrections and deletions keep the original, so nothing is lost.</p>
 <div class="table-wrap">
@@ -18,6 +25,21 @@
       <td>{{ "%.1f" | format(r.temp_c) }}</td>
       <td>{% if r.source == "feed" %}Feed{% else %}{{ name or email }}{% endif %}</td>
       <td>
+      {% if r.source == "feed" %}
+        {% if r.flag_override == "accept" %}<span class="small">Accepted by an admin{% if r.flag_reason %} (flagged: {{ r.flag_reason }}){% endif %}</span>
+        {% elif r.flag_override == "reject" %}<span class="small">Marked as wrong by an admin</span>
+        {% elif r.flagged %}<span class="small">Flagged: {{ r.flag_reason }}</span>{% endif %}
+        <form method="post" action="/w/{{ water.slug }}/admin/readings/{{ r.id }}/override" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {% if r.flag_override %}
+            <button class="link" type="submit" name="decision" value="clear">Undo</button>
+          {% elif r.flagged %}
+            <button class="link" type="submit" name="decision" value="accept">This was real</button>
+          {% else %}
+            <button class="link" type="submit" name="decision" value="reject">This is wrong</button>
+          {% endif %}
+        </form>
+      {% else %}
         <details>
           <summary>Correct</summary>
           <form method="post" action="/w/{{ water.slug }}/admin/readings/{{ r.id }}/correct" class="stack">
@@ -32,6 +54,7 @@
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button class="link danger" type="submit">Delete</button>
         </form>
+      {% endif %}
       </td>
     </tr>
   {% else %}

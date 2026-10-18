@@ -123,3 +123,9 @@ def test_bad_values_are_invalid():
     invalid = " ".join(parse_block(text).invalid)
     for word in ("unit", "timezone", "time_format", "url"):
         assert word in invalid
+
+
+def test_the_prompts_example_is_the_example_tested_here():
+    from feeds.block import PROMPT
+    example = PROMPT[PROMPT.index("would give:"):]
+    assert parse_block(example).config == EXPECTED

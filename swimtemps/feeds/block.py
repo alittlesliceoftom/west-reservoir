@@ -23,6 +23,51 @@ REQUIRED_FOR = {"rows": ("time_field", "value_field"), "columns": ("time_path", 
 TIME_FORMATS = ("epoch_ms", "epoch_s", "iso")
 TERMS = ("ok", "forbids automated access")
 
+# The prompt the setup page offers. Its reply format is the contract with
+# `parse_block`: a new field means a new version, and v1 stays readable.
+PROMPT = """I'm setting up an automatic water-temperature feed on swimtemps, a site that shows swimmers water temperatures. Here is my venue's page: <PASTE THE PAGE ADDRESS>.
+
+Please find out where the temperatures on that page come from. Look for a JSON or API request behind any chart or live reading, and open it.
+
+Then reply with only the block below, filled in. Keep the first and last lines exactly as they are. Write unknown for anything you cannot find. Use either the rows keys or the columns keys, not both.
+
+swimtemps-feed v1
+url: <the JSON or API address that returns the readings>
+orientation: <rows | columns>
+rows_path: <rows only: where the list of readings is, e.g. $ for the top level>
+header_row: <rows only: yes if the first row is column names, else no>
+time_field: <rows only: the key or position of the time in each reading>
+value_field: <rows only: the key or position of the temperature>
+time_path: <columns only: where the list of times is, e.g. labels>
+value_path: <columns only: where the list of temperatures is, e.g. datasets[0].data>
+time_format: <epoch_ms | epoch_s | iso | a pattern like %d-%b-%Y>
+timezone: <e.g. Europe/London, if the times have no offset>
+unit: <C | F>
+source_name: <the venue's name as it should be credited>
+source_link: <the venue's own page about the temperatures, not the API>
+automated: <yes if a sensor or logger produces the readings, no if staff type them in>
+terms: <ok | forbids automated access | unknown>
+notes: <anything else, on one line>
+end
+
+For example, a page whose chart loads {"labels":[1792229401000,...],"datasets":[{"data":[13.5,...]}]} would give:
+
+swimtemps-feed v1
+url: https://example-lake.org/wp-json/lake/v1/temps?hours=168
+orientation: columns
+time_path: labels
+value_path: datasets[0].data
+time_format: epoch_ms
+timezone: Europe/London
+unit: C
+source_name: Example Lake
+source_link: https://example-lake.org/live-temperature/
+automated: yes
+terms: unknown
+notes: half-hourly sensor; the API keeps 7 days
+end
+"""
+
 _HEADER = re.compile(r"^swimtemps-feed\s+(\S+)$", re.IGNORECASE)
 _LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$")
 _QUOTE = re.compile(r"^(\s*>)+\s?")

@@ -15,7 +15,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from db import queries
-from db.models import Reading, User, Water, WaterMember
+from db.models import Feed, Reading, User, Water, WaterMember
 from web.auth import require_user, verify_csrf
 from web.deps import get_db
 from web.paste import EARLIEST, MAX_TEMP, MIN_TEMP
@@ -32,6 +32,7 @@ MESSAGES = {
     "deleted": "Reading deleted. The forecast is updating.",
     "details": "Details saved. The forecast is updating.",
     "promoted": "Admin added.",
+    "overruled": "Saved. The forecast is updating.",
 }
 SHOWN_READINGS = 200
 
@@ -50,6 +51,15 @@ def standing_reading(db: Session, water: Water, reading_id: int) -> Reading:
     return reading
 
 
+def typed_reading(db: Session, water: Water, reading_id: int) -> Reading:
+    """A standing reading a person typed. Feed readings would come back on the next poll: overrule them instead."""
+    reading = standing_reading(db, water, reading_id)
+    if reading.source == "feed":
+        raise HTTPException(422, "Feed readings cannot be corrected or deleted, because the next check of the "
+                                 "feed would bring them back. Mark them as wrong instead.")
+    return reading
+
+
 def admin_page(request, db, water, *, status_code=200, error=None, form=None):
     rows = db.execute(
         select(Reading, User.display_name, User.email)
@@ -64,8 +74,9 @@ def admin_page(request, db, water, *, status_code=200, error=None, form=None):
         .join(WaterMember, WaterMember.user_id == User.id)
         .where(WaterMember.water_id == water.id).order_by(User.display_name)
     ).all()
+    feed = db.scalar(select(Feed).where(Feed.water_id == water.id))
     return render(request, "admin.html", {
-        "water": water, "rows": rows, "total": total, "members": members, "error": error,
+        "water": water, "rows": rows, "total": total, "members": members, "error": error, "feed": feed,
         "message": MESSAGES.get(request.query_params.get("done", "")),
         "form": form or {}, "input_value": lambda at: local_input_value(at, water.timezone),
     }, status_code=status_code)
@@ -84,7 +95,7 @@ def admin(request: Request, slug: str, db: Session = Depends(get_db), user: User
 def correct(request: Request, slug: str, reading_id: int, temp: str = Form(""), measured_at: str = Form(""),
             db: Session = Depends(get_db), user: User = Depends(require_user)):
     water = admin_water(db, slug, user)
-    old = standing_reading(db, water, reading_id)
+    old = typed_reading(db, water, reading_id)
     now = request.app.state.clock()
     try:
         value = float(temp.replace(",", "."))
@@ -113,7 +124,7 @@ def correct(request: Request, slug: str, reading_id: int, temp: str = Form(""), 
 @router.post("/w/{slug}/admin/readings/{reading_id}/delete", dependencies=[Depends(verify_csrf)])
 def delete(request: Request, slug: str, reading_id: int, db: Session = Depends(get_db), user: User = Depends(require_user)):
     water = admin_water(db, slug, user)
-    reading = standing_reading(db, water, reading_id)
+    reading = typed_reading(db, water, reading_id)
     reading.deleted_at, reading.deleted_by = request.app.state.clock(), user.id
     queries.mark_dirty(db, water.id)
     db.commit()
@@ -164,10 +175,14 @@ def me(request: Request, db: Session = Depends(get_db), user: User = Depends(req
             | Water.id.in_(select(WaterMember.water_id).where(WaterMember.user_id == user.id))
         ).order_by(Water.name)
     ).all()
+    feeds = db.execute(
+        select(Feed, Water).join(Water, Water.id == Feed.water_id)
+        .where(Water.id.in_([w.id for w in waters]), Water.feed_mode == "feed").order_by(Water.name)
+    ).all()
     readings = db.execute(
         select(Reading, Water.name, Water.slug, Water.timezone)
         .join(Water, Water.id == Reading.water_id)
         .where(Reading.submitted_by == user.id, Reading.deleted_at.is_(None))
         .order_by(Reading.created_at.desc()).limit(50)
     ).all()
-    return render(request, "me.html", {"waters": waters, "readings": readings})
+    return render(request, "me.html", {"waters": waters, "readings": readings, "feeds": feeds})

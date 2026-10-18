@@ -16,8 +16,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from db.session import session_factory as default_session_factory
 from web.auth import AuthMiddleware, LoginRequired, SupabaseAuth, TokenVerifier, login_redirect
 from web.config import Settings
+from feeds.fetch import fetch_json
 from forecast.openmeteo import OpenMeteoClient
-from web.routes import admin, auth, create, health, pages, readings
+from web.routes import admin, auth, create, feeds, health, pages, readings
 from web.templating import render
 
 
@@ -35,6 +36,8 @@ def create_app(settings: Settings | None = None, session_factory=None, clock=Non
     app.state.verifier = TokenVerifier(settings)
     app.state.supabase = supabase or SupabaseAuth(settings)
     app.state.openmeteo = OpenMeteoClient()
+    # Only the feed setup's Test and Turn-on POSTs call it.
+    app.state.feed_fetch = fetch_json
     app.add_middleware(AuthMiddleware)
 
     app.mount("/static", StaticFiles(directory=str(Path(__file__).with_name("static"))), name="static")
@@ -44,6 +47,7 @@ def create_app(settings: Settings | None = None, session_factory=None, clock=Non
     app.include_router(readings.router)
     app.include_router(create.router)
     app.include_router(admin.router)
+    app.include_router(feeds.router)
 
     @app.exception_handler(LoginRequired)
     async def login_required(request: Request, exc: LoginRequired):

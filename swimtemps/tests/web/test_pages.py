@@ -276,3 +276,13 @@ def test_chart_data_carries_flag_reasons(client, db):
     data = re.search(r'<script id="chart-data" type="application/json">(.*?)</script>', html, re.S).group(1)
     import json
     assert json.loads(data)["readings"] == readings
+
+
+def test_feed_water_pages_never_call_the_feed(client, app, db):
+    def refuse(*args, **kwargs):
+        raise AssertionError("a page load contacted a feed")
+
+    app.state.feed_fetch = refuse
+    feed_water(db)
+    for path in ("/w/test-lake", "/", "/w/test-lake/status"):
+        assert client.get(path).status_code == 200, path

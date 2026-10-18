@@ -96,3 +96,8 @@ tr.invalid td { color: var(--error); }
 .results button { width: 100%; text-align: left; }
 .steps { color: var(--muted); font-size: 0.9rem; margin: 0 0 8px; }
 .flash { background: var(--surface); border-left: 4px solid var(--accent); padding: 10px 14px; margin: 12px 0; }
+pre.prompt { white-space: pre-wrap; word-break: break-word; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; font-size: 0.85rem; max-height: 320px; overflow: auto; }
+label.check { display: flex; gap: 8px; align-items: flex-start; font-weight: 400; }
+label.check input { width: auto; margin-top: 4px; }
+.actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+.credit { margin: 0 0 12px; }

@@ -1,0 +1,41 @@
+<section id="feed-preview">
+<h2>3. Test result</h2>
+{% if test.failure %}
+  <p class="warning error-text" role="alert">{{ test.failure }}</p>
+{% else %}
+  <p>{{ test.read }} rows read: {{ test.rows | length }} hourly readings ready to store,
+    {{ test.flagged | length }} would be flagged{% if test.errors %}, {{ test.errors | length }} could not be used{% endif %}.</p>
+  {% if test.rows %}
+  <p class="muted">First {{ test.rows[0][0] | localtime(water.timezone) }}, {{ test.rows[0][1] | temp }}.
+    Last {{ test.rows[-1][0] | localtime(water.timezone) }}, {{ test.rows[-1][1] | temp }}.</p>
+  {% endif %}
+  {% if test.flagged %}
+  <h3>Would be flagged</h3>
+  <p class="muted small">Flagged readings are stored and shown in grey, but kept out of the forecast. You can overrule them later.</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Taken</th><th>°C</th><th>Why</th></tr></thead>
+    <tbody>{% for at, value, reason in test.flagged[:shown] %}
+      <tr class="flagged"><td>{{ at | localtime(water.timezone) }}</td><td>{{ "%.1f" | format(value) }}</td><td>{{ reason }}</td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+  {% endif %}
+  {% if test.errors %}
+  <h3>Could not be used</h3>
+  <ul class="small">{% for e in test.errors[:shown] %}<li>{{ e }}</li>{% endfor %}</ul>
+  {% if test.errors | length > shown %}<p class="muted small">and {{ test.errors | length - shown }} more.</p>{% endif %}
+  {% endif %}
+
+  {% if test.rows and token %}
+  <form method="post" action="/w/{{ water.slug }}/feed/enable" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="tested" value="{{ token }}">
+    {% for name, value in fields.items() if name not in ("csrf_token", "tested", "attest") %}
+    <input type="hidden" name="{{ name }}" value="{{ value }}">
+    {% endfor %}
+    <label class="check"><input type="checkbox" name="attest" value="yes" checked> {{ attestation }}</label>
+    <p class="muted small">The water page will credit {{ fields.source_name }} with a link to {{ fields.source_link }}.</p>
+    <button class="primary" type="submit">Turn on the feed</button>
+  </form>
+  {% endif %}
+{% endif %}
+</section>

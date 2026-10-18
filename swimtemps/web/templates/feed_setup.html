@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}Feed - {{ water.name }} - swimtemps{% endblock %}
+{% macro field(name, label, hint="") %}
+  <label>{{ label }} <input name="{{ name }}" value="{{ fields.get(name, '') }}" autocomplete="off" spellcheck="false">
+    {% if hint %}<span class="hint">{{ hint }}</span>{% endif %}
+  </label>
+{% endmacro %}
+{% block main %}
+<p class="steps"><a href="/w/{{ water.slug }}">{{ water.name }}</a> · <a href="/w/{{ water.slug }}/admin">Admin</a> · Feed</p>
+<h1>Readings from a feed</h1>
+{% if message %}<p class="flash" role="status">{{ message }}</p>{% endif %}
+
+{% if feed %}
+<section class="note">
+  {% if water.feed_mode == "feed" %}
+  <p><strong>Feed {{ "paused" if feed.state == "paused" else "on" }}</strong>: readings from
+    <a href="{{ feed.source_link }}" rel="noopener nofollow">{{ feed.source_name }}</a>.
+    {% if feed.last_good_reading_at %}Last good reading {{ feed.last_good_reading_at | localtime(water.timezone) }}.{% endif %}
+    {% if feed.last_polled_at %}Last checked {{ ago(feed.last_polled_at) }}.{% else %}Not checked yet.{% endif %}</p>
+  {% if feed.last_error %}<p class="error-text">Last check failed: {{ feed.last_error }}</p>{% endif %}
+  <div class="actions">
+    {% if feed.state == "paused" %}
+    <form method="post" action="/w/{{ water.slug }}/feed/resume" class="inline"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit">Resume</button></form>
+    {% else %}
+    <form method="post" action="/w/{{ water.slug }}/feed/pause" class="inline"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit">Pause</button></form>
+    {% endif %}
+    <form method="post" action="/w/{{ water.slug }}/feed/disable" class="inline"
+          data-confirm="Switch {{ water.name }} to manual readings? Feed readings are kept.">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit">Switch to manual readings</button></form>
+  </div>
+  <p class="muted small">Pause while the sensor is out of the water, for example over winter: a paused feed is not checked and shows no forecast.</p>
+  {% else %}
+  <p>This water takes typed readings. Its earlier feed from {{ feed.source_name }} is kept below: test it and turn it on to switch back.</p>
+  {% endif %}
+</section>
+{% endif %}
+
+<p>Only for venues whose temperatures come from a <strong>sensor or logger</strong> and are published as JSON or an API.
+  Readings that staff type in, even onto a web page, belong in a manual water, where anyone can add them.</p>
+
+<h2>1. Ask an AI where the readings come from</h2>
+<p>If your venue's website shows live temperatures, give this prompt and the page's address to an AI assistant,
+  then paste its whole answer below.</p>
+<pre class="prompt" id="feed-prompt">{{ prompt }}</pre>
+<p><button type="button" data-copy="feed-prompt">Copy the prompt</button></p>
+
+<form method="post" action="/w/{{ water.slug }}/feed/paste" class="stack">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label>The AI's answer <textarea name="block" placeholder="swimtemps-feed v1&#10;url: ...&#10;end">{{ block }}</textarea></label>
+  <button type="submit">Fill in the fields</button>
+</form>
+
+{% if stop %}
+<p class="warning" role="alert">{{ stop }} <a href="/feeds/request?water={{ water.slug }}">Request a feed</a>.</p>
+{% endif %}
+{% if parsed %}
+  {% if parsed.missing or parsed.unknown or parsed.invalid %}
+  <div class="warning" role="status">
+    {% if parsed.missing %}<p>Still needed: {{ parsed.missing | join(", ") }}.</p>{% endif %}
+    {% if parsed.invalid %}<p>Not allowed: {{ parsed.invalid | join("; ") }}.</p>{% endif %}
+    {% if parsed.unknown %}<p>Ignored, not recognised: {{ parsed.unknown | join(", ") }}.</p>{% endif %}
+  </div>
+  {% else %}
+  <p class="flash" role="status">All fields filled in. Check them, then Test.</p>
+  {% endif %}
+{% endif %}
+
+<h2>2. Check the fields and test</h2>
+<form method="post" action="/w/{{ water.slug }}/feed/test" class="stack" id="feed-fields">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {{ field("url", "Feed address", "The JSON or API address, not the page people read.") }}
+  <label>Shape
+    <select name="orientation">
+      <option value="">Choose</option>
+      <option value="columns" {% if fields.get("orientation") == "columns" %}selected{% endif %}>columns: a list of times and a list of temperatures</option>
+      <option value="rows" {% if fields.get("orientation") == "rows" %}selected{% endif %}>rows: one record per reading</option>
+    </select>
+  </label>
+  <fieldset class="stack">
+    <legend>For columns</legend>
+    {{ field("time_path", "Where the times are", "For example labels") }}
+    {{ field("value_path", "Where the temperatures are", "For example datasets[0].data") }}
+  </fieldset>
+  <fieldset class="stack">
+    <legend>For rows</legend>
+    {{ field("rows_path", "Where the list is", "$ for the top level") }}
+    <label>First row is column names
+      <select name="header_row">
+        <option value="no" {% if fields.get("header_row") != "yes" %}selected{% endif %}>No</option>
+        <option value="yes" {% if fields.get("header_row") == "yes" %}selected{% endif %}>Yes</option>
+      </select>
+    </label>
+    {{ field("time_field", "Time in each record", "A key, or a position counting from 0") }}
+    {{ field("value_field", "Temperature in each record", "A key, or a position counting from 0") }}
+  </fieldset>
+  {{ field("time_format", "Time format", "epoch_ms, epoch_s, iso, or a pattern like %d-%b-%Y") }}
+  {{ field("timezone", "Timezone of times without an offset", "Leave blank for " ~ water.timezone) }}
+  <label>Unit
+    <select name="unit">
+      <option value="C" {% if fields.get("unit", "C") != "F" %}selected{% endif %}>°C</option>
+      <option value="F" {% if fields.get("unit") == "F" %}selected{% endif %}>°F</option>
+    </select>
+  </label>
+  {{ field("source_name", "Credit readings to", "The venue's name") }}
+  {{ field("source_link", "Credit link", "The venue's own page about the temperatures") }}
+  {% if errors %}<div class="warning error-text" role="alert">{% for e in errors %}<p>{{ e }}</p>{% endfor %}</div>{% endif %}
+  <button class="primary" type="submit">Test</button>
+  <p class="muted small">Test fetches the feed once and shows what would be stored. Nothing is saved.</p>
+</form>
+
+{% if test %}{% include "_feed_preview.html" %}{% endif %}
+
+<h2>Doesn't fit?</h2>
+<p><a href="/feeds/request?water={{ water.slug }}">Request a feed</a> and we will look at it.</p>
+{% endblock %}

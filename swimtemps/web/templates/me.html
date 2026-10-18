@@ -13,6 +13,24 @@
   {% endfor %}
 </ul>
 
+{% if feeds %}
+<h2>Your feeds</h2>
+<ul class="waters">
+  {% for f, w in feeds %}
+  <li class="feed-row">
+    <p><a href="/w/{{ w.slug }}/feed"><span class="name">{{ w.name }}</span></a>: {{ f.source_name }}, {{ f.state }}.
+      {% if f.last_good_reading_at %}Last good reading {{ ago(f.last_good_reading_at) }}.{% else %}No good reading yet.{% endif %}
+      {% if f.last_error %}<span class="error-text">Last check failed: {{ f.last_error }}</span>{% endif %}</p>
+    <form method="post" action="/w/{{ w.slug }}/feed/disable" class="inline"
+          data-confirm="Switch {{ w.name }} to manual readings? Feed readings are kept.">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">Switch to manual</button>
+    </form>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+
 <h2>Your recent readings</h2>
 <div class="table-wrap">
 <table>

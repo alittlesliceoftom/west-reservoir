@@ -5,13 +5,13 @@ from datetime import datetime, timedelta, timezone
 from statistics import median
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db import queries
-from db.models import Reading, Snapshot, User, Water
+from db.models import Feed, Reading, Snapshot, User, Water
 from web.auth import require_user, verify_csrf
 from web.deps import get_db
 from web.paste import EARLIEST, MAX_TEMP, MIN_TEMP, ParsedRow, parse_paste
@@ -26,6 +26,15 @@ SOFT_LIMIT = 3.0                      # °C from the estimate before asking "are
 ESTIMATE_WINDOW = timedelta(hours=12) # only readings this close to now are compared with "now"
 NEIGHBOUR_WINDOW = timedelta(days=3)  # pasted rows are compared with readings this close
 FUTURE_SLACK = timedelta(minutes=10)
+
+
+def manual_water(db: Session, slug: str) -> Water:
+    """The water, if people type its readings; a feed water refuses them with 409."""
+    water = active_water(db, slug)
+    if water.feed_mode == "feed":
+        source = db.scalar(select(Feed.source_name).where(Feed.water_id == water.id)) or "its feed"
+        raise HTTPException(409, f"This water's readings come from {source}, so readings cannot be added by hand.")
+    return water
 
 
 def local_input_value(at: datetime, tz: str) -> str:
@@ -93,7 +102,7 @@ def form_page(request, water, *, status_code=200, **context):
 
 @router.get("/w/{slug}/readings", response_class=HTMLResponse)
 def reading_form(request: Request, slug: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
-    water = active_water(db, slug)
+    water = manual_water(db, slug)
     return form_page(request, water, estimate=current_estimate(db, water))
 
 
@@ -102,7 +111,7 @@ def add_reading(
     request: Request, slug: str, temp: str = Form(""), measured_at: str = Form(""), confirm: str = Form(""),
     db: Session = Depends(get_db), user: User = Depends(require_user),
 ):
-    water = active_water(db, slug)
+    water = manual_water(db, slug)
     now = request.app.state.clock()
     estimate = current_estimate(db, water)
     page = dict(estimate=estimate, temp=temp, measured_at=measured_at or default_reading_time(water, now))
@@ -219,14 +228,14 @@ def preview_response(request, water, preview, rows_text, status_code=200, error=
 @router.post("/w/{slug}/readings/preview", response_class=HTMLResponse, dependencies=[Depends(verify_csrf)])
 def preview_paste(request: Request, slug: str, rows: str = Form(""), db: Session = Depends(get_db),
                   user: User = Depends(require_user)):
-    water = active_water(db, slug)
+    water = manual_water(db, slug)
     return preview_response(request, water, analyse_paste(db, water, rows, request.app.state.clock()), rows)
 
 
 @router.post("/w/{slug}/readings/paste", response_class=HTMLResponse, dependencies=[Depends(verify_csrf)])
 def save_paste(request: Request, slug: str, rows: str = Form(""), db: Session = Depends(get_db),
                user: User = Depends(require_user)):
-    water = active_water(db, slug)
+    water = manual_water(db, slug)
     now = request.app.state.clock()
     preview = analyse_paste(db, water, rows, now)
     if preview.errors:
