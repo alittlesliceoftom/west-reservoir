@@ -100,8 +100,9 @@ def test_columns_keys_are_required_for_columns():
     assert result.missing == ["value_path"]
 
 
-def test_a_manually_updated_source_stops_setup():
-    assert parse_block(EXAMPLE.replace("automated: yes", "automated: no")).stop == "not_automated"
+def test_a_source_kept_up_to_date_by_hand_is_accepted():
+    result = parse_block(EXAMPLE.replace("automated: yes", "automated: no"))
+    assert result.stop is None and result.config["automated"] is False
 
 
 def test_terms_that_forbid_automated_access_stop_setup():
@@ -128,4 +129,9 @@ def test_bad_values_are_invalid():
 def test_the_prompts_example_is_the_example_tested_here():
     from feeds.block import PROMPT
     example = PROMPT[PROMPT.index("would give:"):]
-    assert parse_block(example).config == EXPECTED
+    assert parse_block(example).config == {k: v for k, v in EXPECTED.items() if k != "automated"}
+
+
+def test_the_prompt_no_longer_asks_whether_a_sensor_produces_the_readings():
+    from feeds.block import PROMPT
+    assert "automated:" not in PROMPT

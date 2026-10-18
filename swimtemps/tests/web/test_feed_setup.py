@@ -137,11 +137,17 @@ def test_a_paste_lists_what_is_missing_unknown_and_invalid(client, water, admin)
     assert "time_format" in page and "depth" in page and "unit: &#39;K&#39; is not C or F" in page
 
 
-def test_pasting_a_manually_updated_source_explains_it_should_stay_manual(client, water, admin):
+def test_pasting_a_source_kept_up_by_hand_fills_the_fields(client, water, admin):
     sign_in(client, admin)
     page = post(client, "/w/test-lake/feed/paste", {"block": EXAMPLE.replace("automated: yes", "automated: no")}).text
-    assert "updated by hand" in page and "manual water" in page
-    assert "/feeds/request?water=test-lake" in page
+    assert 'value="https://example-lake.org/wp-json/lake/v1/temps?hours=168"' in page
+    assert "updated by hand" not in page
+
+
+def test_the_setup_page_does_not_say_sensors_only(client, water, admin):
+    sign_in(client, admin)
+    page = client.get("/w/test-lake/feed").text
+    assert "sensor or logger</strong>" not in page and "belong in a manual water" not in page
 
 
 def test_pasting_terms_that_forbid_access_explains_why_not(client, water, admin):
@@ -356,16 +362,63 @@ def test_a_bad_decision_is_refused(client, db, water, admin, flagged):
     assert post(client, f"/w/test-lake/admin/readings/{flagged.id}/override", {"decision": "maybe"}).status_code == 422
 
 
-def test_feed_readings_offer_overrules_not_corrections(client, db, water, admin, flagged):
+def test_feed_readings_offer_overrules_corrections_and_deletion(client, db, water, admin, flagged):
     sign_in(client, admin)
     page = client.get("/w/test-lake/admin").text
-    assert f"/admin/readings/{flagged.id}/override" in page
-    assert f"/admin/readings/{flagged.id}/correct" not in page and f"/admin/readings/{flagged.id}/delete" not in page
+    for action in ("override", "correct", "delete"):
+        assert f"/admin/readings/{flagged.id}/{action}" in page
     assert "Jumped 4.4 °C." in page
-    assert post(client, f"/w/test-lake/admin/readings/{flagged.id}/delete").status_code == 422
-    assert post(client, f"/w/test-lake/admin/readings/{flagged.id}/correct",
-                {"temp": "13.0", "measured_at": "2026-10-18T07:00"}).status_code == 422
-    assert fresh(db, Reading, flagged.id).deleted_at is None
+
+
+def venue(*rows):
+    """The feed's payload: the venue still publishing its original values."""
+    import pandas as pd
+    return lambda url: {"labels": [int(pd.Timestamp(at, tz="UTC").timestamp() * 1000) for at, _ in rows],
+                        "datasets": [{"data": [t for _, t in rows]}]}
+
+
+ORIGINAL = (("2026-10-18 05:00", 13.5), ("2026-10-18 06:00", 9.1))
+
+
+def standing_feed_rows(db, water):
+    db.expire_all()
+    rows = db.scalars(select(Reading).where(Reading.water_id == water.id, Reading.deleted_at.is_(None))
+                      .order_by(Reading.measured_at)).all()
+    return [(r.measured_at.astimezone(NOW.tzinfo).strftime("%H:%M"), float(r.temp_c)) for r in rows]
+
+
+def test_an_admins_correction_of_a_feed_reading_survives_the_next_poll(client, db, water, admin, flagged):
+    from worker.feeds import poll_feed
+    sign_in(client, admin)
+    response = post(client, f"/w/test-lake/admin/readings/{flagged.id}/correct",
+                    {"temp": "13.4", "measured_at": "2026-10-18T07:00"})
+    assert response.status_code == 303
+    new = db.scalar(select(Reading).where(Reading.deleted_at.is_(None), Reading.temp_c == 13.4))
+    assert (new.source, new.feed_id, new.submitted_by, new.flagged) == ("feed", flagged.feed_id, admin.id, False)
+    result = poll_feed(db, db.get(Feed, flagged.feed_id), NOW, fetch=venue(*ORIGINAL))
+    db.commit()
+    assert (result.new, result.corrected) == (0, 0)
+    assert standing_feed_rows(db, water) == [("05:00", 13.5), ("06:00", 13.4)]
+
+
+def test_an_admins_deletion_of_a_feed_reading_survives_the_next_poll(client, db, water, admin, flagged):
+    from worker.feeds import poll_feed
+    sign_in(client, admin)
+    assert post(client, f"/w/test-lake/admin/readings/{flagged.id}/delete").status_code == 303
+    result = poll_feed(db, db.get(Feed, flagged.feed_id), NOW, fetch=venue(*ORIGINAL))
+    db.commit()
+    assert result.new == 0
+    assert standing_feed_rows(db, water) == [("05:00", 13.5)]
+
+
+def test_a_feed_reading_moved_by_an_admin_is_not_fetched_again_at_its_old_time(client, db, water, admin, flagged):
+    from worker.feeds import poll_feed
+    sign_in(client, admin)
+    post(client, f"/w/test-lake/admin/readings/{flagged.id}/correct", {"temp": "9.1", "measured_at": "2026-10-18T09:00"})
+    result = poll_feed(db, db.get(Feed, flagged.feed_id), NOW, fetch=venue(*ORIGINAL))
+    db.commit()
+    assert result.new == 0
+    assert standing_feed_rows(db, water) == [("05:00", 13.5), ("08:00", 9.1)]
 
 
 def test_the_admin_page_links_to_feed_setup(client, water, admin):

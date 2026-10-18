@@ -49,10 +49,9 @@ A few venues publish water temperatures automatically from a sensor or
 logger. Such a water can take its readings from the venue's feed instead of
 from people typing them in. Design: [`docs/design/2026-10-18-feeds-design.md`](docs/design/2026-10-18-feeds-design.md).
 
-- **What qualifies.** Only automated, machine-readable sources: a sensor or
-  logger publishing JSON or an API. Sources staff update by hand (a Google
-  Form, a sentence on a web page) stay manual waters, even when they are
-  machine-readable. One measurement point per water.
+- **What qualifies.** Any public, machine-readable source: a sensor or
+  logger's API, or a sheet that staff keep up to date, so long as it is
+  published as JSON. One measurement point per water.
 - **Mode.** Each water is `manual` or `feed`, never both. Its admins switch
   either way from Admin, then "set up a feed" (`/w/<slug>/feed`); history is
   kept both ways. A feed water refuses typed readings with 409.
@@ -78,7 +77,7 @@ from people typing them in. Design: [`docs/design/2026-10-18-feeds-design.md`](d
   ```
 
   `orientation: rows` uses `rows_path`, `header_row`, `time_field` and
-  `value_field` instead. `automated: no` or `terms: forbids automated access`
+  `value_field` instead. `terms: forbids automated access`
   stops setup and points to the request form. **Test** fetches once and shows
   what would be stored and flagged, storing nothing. **Turn on** needs that
   test, and the permission box (ticked by default): "I have the venue's
@@ -102,12 +101,15 @@ from people typing them in. Design: [`docs/design/2026-10-18-feeds-design.md`](d
   from the previous day's good readings, or repeats one value through more than
   a day of hourly readings in a row. Flagged readings are stored and shown in grey on the chart, and kept
   out of the fit, the estimate and scoring. Admins can overrule a flag either
-  way from the admin page.
+  way from the admin page, and correct or delete any feed reading by hand:
+  later polls leave that reading as the admin left it.
 - **Model.** Feed readings pair into day-long legs: each to the feed reading
   closest to 24 hours later, within 21 to 27 hours. Typed readings pair as
   before.
 - **Quiet and paused.** Clocks run from the feed's last good reading: the
-  page says "Feed quiet since ..." after 12 hours; `/healthz` fails after 3
+  page says "Feed quiet since ..." after 12 hours (or 1.5 times the feed's
+  usual gap between readings, if longer: a daily sheet is quiet after a day
+  and a half); `/healthz` fails after 3
   days; the forecast stops after 5 days and resumes with the next good
   reading. Admins can pause a feed (a sensor out for winter): a paused feed is
   not polled, shows no forecast, and does not fail `/healthz`. `/me` lists a

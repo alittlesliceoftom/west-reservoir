@@ -7,6 +7,7 @@ history adds nothing; a different value is the venue's correction and is
 stored the way an admin correction is (old row soft-deleted, new row, old
 `replaced_by` new). A standing row already in the same clock hour wins over
 a new row at another minute, so thinning stays stable from poll to poll.
+A reading an admin corrected or deleted is left as the admin left it.
 
 New and corrected rows are cleaned against the feed's good readings and
 the stored air temperature. A poll with no usable row (the venue renamed a
@@ -92,6 +93,19 @@ def _air(session: Session, water_id: int, since: datetime) -> pd.Series:
     return pd.Series(weather["air_temp"].to_numpy(), index=pd.DatetimeIndex(weather["valid_at"]))
 
 
+def typical_gap(session: Session, feed_id: int) -> timedelta | None:
+    """The median spacing of the feed's last 20 good readings: how often it usually publishes."""
+    gap = session.execute(text(f"""
+        SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY gap) FROM (
+            SELECT r.measured_at - lag(r.measured_at) OVER (ORDER BY r.measured_at) AS gap
+            FROM (SELECT r.measured_at FROM readings r
+                  WHERE r.feed_id = :feed AND r.deleted_at IS NULL AND {queries.USABLE_SQL}
+                  ORDER BY r.measured_at DESC LIMIT 20) r
+        ) gaps WHERE gap IS NOT NULL
+    """), {"feed": feed_id}).scalar()
+    return gap
+
+
 def last_good_reading_at(session: Session, feed_id: int) -> datetime | None:
     return session.execute(text(f"""
         SELECT max(r.measured_at) FROM readings r
@@ -118,12 +132,20 @@ def store(session: Session, feed: Feed, rows: list[tuple[datetime, float]], now:
     def key(at: datetime):
         return at.astimezone(ZoneInfo(dates_in)).date() if dates_in else _utc(at)
 
+    # Times an admin deleted or corrected stay as the admin left them.
+    held = session.scalars(select(Reading.measured_at).where(
+        Reading.feed_id == feed.id, Reading.deleted_at.is_not(None), Reading.deleted_by.is_not(None),
+        Reading.measured_at >= _hour(rows[0][0]) - margin, Reading.measured_at < _hour(rows[-1][0]) + HOUR + margin,
+    )).all()
     stored = {key(r.measured_at): r for r in existing}
-    taken_hours = {_hour(r.measured_at) for r in existing}
+    taken_hours = {_hour(r.measured_at) for r in existing} | {_hour(at) for at in held}
+    held_keys = {key(at) for at in held}
 
     written, corrected = [], 0
     for at, temp in rows:
         old = stored.get(key(at))
+        if key(at) in held_keys or (old is not None and old.submitted_by is not None):
+            continue
         if old is None and not dates_in and _hour(at) in taken_hours:
             continue
         if old is not None and abs(float(old.temp_c) - temp) < 0.05:

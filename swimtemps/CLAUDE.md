@@ -10,8 +10,9 @@ architecture, local setup and launch checklist, and the design spec it links.
   `/api/point` are the only web-side weather calls. A test enforces this.
 - **Readings are never destroyed.** Delete sets `deleted_at`; a correction also
   sets `replaced_by`. Every read filters `deleted_at IS NULL`. That holds for
-  feed readings too: a venue's changed value is a correction, and admins
-  overrule a feed reading's flag rather than deleting it.
+  feed readings too: a venue's changed value is a correction. An admin's
+  correction or deletion of a feed reading is held: polls skip feed times a
+  person deleted and standing feed rows a person submitted.
 - **Only usable readings reach the model.** Fits, estimates and scoring use
   `queries.active_readings` (filtered by `USABLE_SQL`); the chart uses
   `chart_readings`, which keeps flagged ones with their reason.

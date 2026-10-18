@@ -426,3 +426,26 @@ def test_a_date_only_value_change_is_a_correction_at_the_current_reading_time(db
     rows = standing(db, dated_feed)
     assert [(r.measured_at, float(r.temp_c)) for r in rows] == [
         (pd.Timestamp("2026-10-16 06:00", tz="UTC"), 12.5), (pd.Timestamp("2026-10-17 08:00", tz="UTC"), 12.9)]
+
+
+# --- quiet follows the feed's own rhythm ----------------------------------------
+
+def daily_feed(db, owner, days=10):
+    water = make_water(db, owner, name="Daily Lake", feed_mode="feed")
+    feed = make_feed(db, water, owner)
+    last = pd.Timestamp("2026-10-18 06:00", tz="UTC")
+    for d in range(days):
+        add_feed_reading(db, feed, (last - timedelta(days=days - 1 - d)).to_pydatetime(), 15.0 + 0.1 * d)
+    feed.last_good_reading_at = last.to_pydatetime()
+    db.commit()
+    return feed, last
+
+
+def test_a_daily_feed_is_not_quiet_a_day_after_its_last_reading(db, owner):
+    feed, last = daily_feed(db, owner)
+    assert compute(db, feed, (last + timedelta(hours=30)).to_pydatetime())["feed"]["quiet"] is False
+
+
+def test_a_daily_feed_is_quiet_after_a_day_and_a_half(db, owner):
+    feed, last = daily_feed(db, owner)
+    assert compute(db, feed, (last + timedelta(hours=37)).to_pydatetime())["feed"]["quiet"] is True

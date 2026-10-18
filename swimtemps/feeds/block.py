@@ -17,6 +17,8 @@ RECIPE_KEYS = (
     "url", "orientation", "rows_path", "header_row", "time_field", "value_field", "time_path", "value_path",
     "time_format", "timezone", "unit", "source_name", "source_link",
 )
+# `automated` is accepted but not asked for: a public sheet that staff keep up
+# to date is as welcome as a sensor.
 KEYS = (*RECIPE_KEYS, "automated", "terms", "notes")
 REQUIRED = ("url", "orientation", "time_format", "source_name", "source_link")
 REQUIRED_FOR = {"rows": ("time_field", "value_field"), "columns": ("time_path", "value_path")}
@@ -45,7 +47,6 @@ timezone: <e.g. Europe/London, if the times have no offset>
 unit: <C | F>
 source_name: <the venue's name as it should be credited>
 source_link: <the venue's own page about the temperatures, not the API>
-automated: <yes if a sensor or logger produces the readings, no if staff type them in>
 terms: <ok | forbids automated access | unknown>
 notes: <anything else, on one line>
 end
@@ -62,7 +63,6 @@ timezone: Europe/London
 unit: C
 source_name: Example Lake
 source_link: https://example-lake.org/live-temperature/
-automated: yes
 terms: unknown
 notes: half-hourly sensor; the API keeps 7 days
 end
@@ -79,7 +79,7 @@ class BlockResult:
     missing: list[str] = field(default_factory=list)
     unknown: list[str] = field(default_factory=list)
     invalid: list[str] = field(default_factory=list)
-    # 'not_automated' | 'terms_forbid' | 'no_block' | 'bad_version', or None
+    # 'terms_forbid' | 'no_block' | 'bad_version', or None
     stop: str | None = None
 
 
@@ -175,8 +175,6 @@ def parse_block(text: str) -> BlockResult:
             result.invalid.append(str(error))
 
     result.missing = missing_keys(result.config)
-    if result.config.get("automated") is False:
-        result.stop = "not_automated"
-    elif result.config.get("terms") == "forbids automated access":
+    if result.config.get("terms") == "forbids automated access":
         result.stop = "terms_forbid"
     return result

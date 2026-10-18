@@ -1,6 +1,6 @@
 """
-Water admin: correct and delete readings, edit details, promote admins,
-archive. Open to the water's admins and to superusers. Nothing is destroyed:
+Water admin: correct and delete readings (a feed's too: polls then leave
+that reading alone), edit details, promote admins, archive. Open to the water's admins and to superusers. Nothing is destroyed:
 deletion is a timestamp, and a correction is a deletion plus a new reading
 that the old one points to.
 """
@@ -51,15 +51,6 @@ def standing_reading(db: Session, water: Water, reading_id: int) -> Reading:
     return reading
 
 
-def typed_reading(db: Session, water: Water, reading_id: int) -> Reading:
-    """A standing reading a person typed. Feed readings would come back on the next poll: overrule them instead."""
-    reading = standing_reading(db, water, reading_id)
-    if reading.source == "feed":
-        raise HTTPException(422, "Feed readings cannot be corrected or deleted, because the next check of the "
-                                 "feed would bring them back. Mark them as wrong instead.")
-    return reading
-
-
 def admin_page(request, db, water, *, status_code=200, error=None, form=None):
     rows = db.execute(
         select(Reading, User.display_name, User.email)
@@ -95,7 +86,7 @@ def admin(request: Request, slug: str, db: Session = Depends(get_db), user: User
 def correct(request: Request, slug: str, reading_id: int, temp: str = Form(""), measured_at: str = Form(""),
             db: Session = Depends(get_db), user: User = Depends(require_user)):
     water = admin_water(db, slug, user)
-    old = typed_reading(db, water, reading_id)
+    old = standing_reading(db, water, reading_id)
     now = request.app.state.clock()
     try:
         value = float(temp.replace(",", "."))
@@ -112,10 +103,15 @@ def correct(request: Request, slug: str, reading_id: int, temp: str = Form(""), 
     if at.date() < EARLIEST:
         return admin_page(request, db, water, status_code=422, error="That date is before 2000. Check the year.")
 
-    new = Reading(water_id=water.id, measured_at=at, temp_c=value, submitted_by=user.id)
+    # A corrected feed reading stays the feed's, with the admin as its
+    # submitter: polls leave it alone, and it trains with the feed's legs.
+    old.deleted_at, old.deleted_by = now, user.id
+    db.flush()   # one standing feed reading per time
+    new = Reading(water_id=water.id, measured_at=at, temp_c=value, submitted_by=user.id,
+                  source=old.source, feed_id=old.feed_id)
     db.add(new)
     db.flush()
-    old.deleted_at, old.deleted_by, old.replaced_by = now, user.id, new.id
+    old.replaced_by = new.id
     queries.mark_dirty(db, water.id)
     db.commit()
     return back(water, "corrected")
@@ -124,7 +120,7 @@ def correct(request: Request, slug: str, reading_id: int, temp: str = Form(""), 
 @router.post("/w/{slug}/admin/readings/{reading_id}/delete", dependencies=[Depends(verify_csrf)])
 def delete(request: Request, slug: str, reading_id: int, db: Session = Depends(get_db), user: User = Depends(require_user)):
     water = admin_water(db, slug, user)
-    reading = typed_reading(db, water, reading_id)
+    reading = standing_reading(db, water, reading_id)
     reading.deleted_at, reading.deleted_by = request.app.state.clock(), user.id
     queries.mark_dirty(db, water.id)
     db.commit()

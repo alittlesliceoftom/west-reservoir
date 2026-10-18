@@ -38,10 +38,6 @@ ATTESTATION = "I have the venue's permission to share this data, or it is public
 CREDIT_KEYS = ("source_name", "source_link")
 SHOWN_ROWS = 20
 STOPS = {
-    "not_automated": (
-        "This looks like a source that is updated by hand. swimtemps takes feeds only from sensors and "
-        "loggers, so this should stay a manual water, where anyone can add readings. If the AI got that "
-        "wrong, request a feed and tell us why."),
     "terms_forbid": (
         "The venue's or vendor's terms forbid automated access, so swimtemps cannot fetch this feed without "
         "their agreement. Request a feed and we can ask them."),

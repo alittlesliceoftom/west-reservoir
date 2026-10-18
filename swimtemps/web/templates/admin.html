@@ -23,7 +23,7 @@
     <tr>
       <td>{{ r.measured_at | localtime(water.timezone) }}</td>
       <td>{{ "%.1f" | format(r.temp_c) }}</td>
-      <td>{% if r.source == "feed" %}Feed{% else %}{{ name or email }}{% endif %}</td>
+      <td>{% if r.source == "feed" and not r.submitted_by %}Feed{% elif r.source == "feed" %}{{ name or email }} (corrected){% else %}{{ name or email }}{% endif %}</td>
       <td>
       {% if r.source == "feed" %}
         {% if r.flag_override == "accept" %}<span class="small">Accepted by an admin{% if r.flag_reason %} (flagged: {{ r.flag_reason }}){% endif %}</span>
@@ -39,7 +39,7 @@
             <button class="link" type="submit" name="decision" value="reject">This is wrong</button>
           {% endif %}
         </form>
-      {% else %}
+      {% endif %}
         <details>
           <summary>Correct</summary>
           <form method="post" action="/w/{{ water.slug }}/admin/readings/{{ r.id }}/correct" class="stack">
@@ -54,7 +54,6 @@
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button class="link danger" type="submit">Delete</button>
         </form>
-      {% endif %}
       </td>
     </tr>
   {% else %}

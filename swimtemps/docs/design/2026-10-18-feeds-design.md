@@ -1,6 +1,19 @@
 # swimtemps: automated feeds — design
 
-Status: draft for review. Extends `2026-10-18-platform-design.md`.
+Status: approved and built. Extends `2026-10-18-platform-design.md`.
+
+**Amended 2026-10-18 by the product owner, after testing the setup with
+Cromhall:**
+- *What qualifies* is now any public, machine-readable source, including a
+  sheet that staff keep up to date. The prompt no longer asks `automated:`,
+  and the parser no longer stops on `automated: no` (it still accepts the
+  key). `terms: forbids automated access` still stops setup.
+- Admins may correct or delete feed readings by hand, and later polls keep
+  the admin's change (this replaces "admins do not delete or correct feed
+  readings" under Storing).
+- *(Builder's call)* The quiet banner waits for 1.5 times the feed's usual
+  gap between readings when that is longer than 12 hours, so a daily source
+  is not "quiet" every morning. The 3-day and 5-day clocks are unchanged.
 
 ## 1. Intent
 

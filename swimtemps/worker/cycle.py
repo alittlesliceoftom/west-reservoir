@@ -33,7 +33,7 @@ from forecast.model import (
 )
 from forecast.openmeteo import PAST_DAYS, OpenMeteoError
 from forecast.physics import Coefficients, load_params
-from worker.feeds import poll_feeds
+from worker.feeds import poll_feeds, typical_gap
 from worker.snapshot import READINGS_DAYS, build_payload, iso
 
 log = logging.getLogger("swimtemps.worker")
@@ -142,19 +142,22 @@ def _fit(session: Session, water: Water, readings, weather, now, params) -> FitR
     return fit
 
 
-def feed_status(feed: Feed, now: datetime) -> dict:
+def feed_status(feed: Feed, now: datetime, gap: timedelta | None = None) -> dict:
     """
     The feed block of a feed water's payload. Quiet after 12 hours without a
-    good reading; no forecast after 5 days without one, or while paused.
+    good reading, or 1.5 times the feed's usual `gap` if that is longer (a
+    daily sheet is not quiet the morning after); no forecast after 5 days
+    without one, or while paused.
     """
     last = feed.last_good_reading_at
     age = None if last is None else now - last
+    quiet_after = max(FEED_QUIET_AFTER, 1.5 * gap) if gap else FEED_QUIET_AFTER
     return {
         "source_name": feed.source_name,
         "source_link": feed.source_link,
         "state": feed.state,
         "last_good_reading_at": None if last is None else iso(last),
-        "quiet": age is None or age > FEED_QUIET_AFTER,
+        "quiet": age is None or age > quiet_after,
         "paused_forecast": feed.state == "paused" or age is None or age > FEED_FORECAST_PAUSED_AFTER,
     }
 
@@ -174,7 +177,7 @@ def compute_water(session: Session, water: Water, client, now: datetime, refresh
     feed = None
     if water.feed_mode == "feed":
         row = session.scalar(select(Feed).where(Feed.water_id == water.id))
-        feed = feed_status(row, now) if row is not None else None
+        feed = feed_status(row, now, typical_gap(session, row.id)) if row is not None else None
     paused = feed is not None and feed["paused_forecast"]
 
     anchor = readings.iloc[-1] if len(readings) else None
