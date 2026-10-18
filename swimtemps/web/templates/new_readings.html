@@ -3,7 +3,12 @@
 {% block main %}
 <p class="steps">Step 4 of 4 · First readings</p>
 <h1>{{ water.name }} is on the map</h1>
-<p>Add any readings you already have. The more there are, the sooner the forecast is calibrated to this water.</p>
+<section class="note">
+  <p><strong>Does the venue publish its readings online?</strong> If a live chart, a sheet or an API on its website
+    has them, <a href="/w/{{ water.slug }}/feed">load them from the venue's feed</a> instead, and new readings arrive
+    automatically.</p>
+</section>
+<p>Or add any readings you already have. The more there are, the sooner the forecast is calibrated to this water.</p>
 <p class="muted">One per line: a date (dd/mm/yyyy, day first), an optional time, then the temperature. Lines without a time use {{ water.default_reading_time.strftime("%H:%M") }}.</p>
 <form method="post" action="/w/{{ water.slug }}/readings/preview" class="stack"
       hx-post="/w/{{ water.slug }}/readings/preview" hx-target="#paste-preview" hx-swap="innerHTML">

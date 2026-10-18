@@ -168,3 +168,10 @@ def test_after_skipping_the_water_page_is_computing(client, db, creator):
 def test_the_new_water_appears_on_the_home_page(client, db, creator):
     post(client, "/new", DETAILS)
     assert "Bristol Harbourside Lido" in client.get("/").text
+
+
+def test_first_readings_page_offers_a_feed_instead(client, db, creator):
+    post(client, "/new", DETAILS)
+    page = client.get("/w/bristol-harbourside-lido/first-readings").text
+    assert 'href="/w/bristol-harbourside-lido/feed"' in page
+    assert "feed" in page.lower()
