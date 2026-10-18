@@ -1,0 +1,3 @@
+<div class="status" hx-get="/w/{{ water.slug }}/status?since={{ since | urlencode }}" hx-trigger="every 3s" hx-swap="outerHTML">
+  {% if first %}Computing your first forecast...{% else %}Updating forecast...{% endif %}
+</div>

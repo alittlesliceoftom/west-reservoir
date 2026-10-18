@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}{{ water.name }} water temperature - swimtemps{% endblock %}
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js" defer></script>
+<script src="/static/chart.js" defer></script>
+{% endblock %}
+{% block main %}
+<h1>{{ water.name }}</h1>
+
+{% if water.water_type in ("river", "harbour") %}
+<p class="note">This is a {{ "river" if water.water_type == "river" else "harbour" }}. Flowing and tidal water mixes with water from elsewhere, so forecasts here are less reliable than for still water.</p>
+{% endif %}
+
+{% if updating %}{% include "_status.html" with context %}{% endif %}
+
+{% if p %}
+  {% if p.latest_reading %}
+    <section class="headline">
+      {% if p.estimate_now %}<p class="now">About {{ p.estimate_now.temp | temp }} now</p>{% endif %}
+      <p class="last">Last reading {{ p.latest_reading.temp | temp }}, {{ p.latest_reading.at | localtime(water.timezone) }}</p>
+    </section>
+  {% else %}
+    <section class="headline">
+      <p class="last">No readings yet. Add the first one to get a forecast.</p>
+    </section>
+  {% endif %}
+
+  <p><a class="button primary" href="/w/{{ water.slug }}/readings">Add a reading</a></p>
+
+  {% if chart %}
+  <section class="chart">
+    <div id="chart" aria-label="Readings, air temperature and the 5-day forecast"></div>
+    <script id="chart-data" type="application/json">{{ chart | json_script }}</script>
+  </section>
+  {% endif %}
+
+  {% if p.forecast %}
+  <section>
+    <h2>Next 5 days</h2>
+    <ul class="strip">
+      {% for f in p.forecast %}
+      <li>{{ f.at | localtime(water.timezone, "%a %H:%M") }} — {{ f.temp | temp }} <span class="range">({{ "%.1f" | format(f.lower) }}–{{ "%.1f" | format(f.upper) }})</span></li>
+      {% endfor %}
+    </ul>
+    <p class="muted small">Ranges are where the temperature should land 8 times in 10.</p>
+  </section>
+  {% endif %}
+
+  <p class="calibration">
+    {% if p.calibration.method == "prior" %}
+      Using default parameters — forecasts tighten as readings are added.
+    {% else %}
+      Calibrated from {{ p.calibration.n_readings }} readings.
+    {% endif %}
+  </p>
+{% endif %}
+{% endblock %}
+{% block footer %}
+{% if p %}<p>Forecast updated {{ ago(p.built_at) }}{% if p.latest_reading %} · readings at {{ p.water.reading_time }} {{ water.timezone }} by default{% endif %}.</p>{% endif %}
+{% endblock %}

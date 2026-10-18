@@ -171,9 +171,12 @@ def health(session: Session) -> dict:
     sql = text("""
         SELECT
             (SELECT count(*) FROM waters WHERE archived_at IS NULL) AS active_waters,
-            (SELECT min(coalesce(s.built_at, '-infinity'))
-               FROM waters w LEFT JOIN snapshots s ON s.water_id = w.id
+            (SELECT min(s.built_at)
+               FROM waters w JOIN snapshots s ON s.water_id = w.id
               WHERE w.archived_at IS NULL) AS oldest_snapshot,
+            (SELECT count(*)
+               FROM waters w LEFT JOIN snapshots s ON s.water_id = w.id
+              WHERE w.archived_at IS NULL AND s.water_id IS NULL) AS missing_snapshots,
             (SELECT max(fetched_at) FROM weather_hourly) AS last_weather,
             (SELECT max(at) FROM heartbeat) AS last_heartbeat
     """)

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}swimtemps{% endblock %}</title>
+  <meta name="description" content="Water temperature readings and 5-day forecasts for open-water swimming spots.">
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js" defer></script>
+  {% block head %}{% endblock %}
+</head>
+<body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+  <header class="site">
+    <a class="brand" href="/">swimtemps</a>
+    <nav>
+      {% if user %}
+        <a href="/me">{{ user.display_name or user.email }}</a>
+        <form method="post" action="/auth/logout" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="link" type="submit">Sign out</button>
+        </form>
+      {% else %}
+        <a href="/auth/login?next={{ request.url.path }}">Sign in</a>
+      {% endif %}
+    </nav>
+  </header>
+  <main>
+    {% block main %}{% endblock %}
+  </main>
+  <footer class="site">
+    {% block footer %}{% endblock %}
+    <p>Weather data by <a href="https://open-meteo.com/">Open-Meteo.com</a> (CC BY 4.0). Map data &copy; OpenStreetMap contributors.</p>
+  </footer>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

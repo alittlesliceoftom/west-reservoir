@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block main %}
+<section class="intro">
+  <h1>Water temperatures</h1>
+  <p>Readings from swimmers, and a 5-day forecast for each spot.</p>
+  <a class="button primary" href="/new">Add your water</a>
+</section>
+
+<ul class="waters">
+  {% for w in waters %}
+  <li>
+    <a href="/w/{{ w.slug }}">
+      <span class="name">{{ w.name }}</span>
+      {% if w.payload is none %}
+        <span class="muted">Computing first forecast</span>
+      {% else %}
+        {% if w.payload.estimate_now %}
+          <span class="temp">{{ w.payload.estimate_now.temp | temp }}</span>
+        {% endif %}
+        {% if w.payload.latest_reading %}
+          <span class="muted">Last reading {{ w.payload.latest_reading.at | localtime(w.timezone, "%a {day} %b") }}</span>
+        {% else %}
+          <span class="muted">No readings yet</span>
+        {% endif %}
+      {% endif %}
+    </a>
+  </li>
+  {% else %}
+  <li class="empty">No waters yet. Be the first to add one.</li>
+  {% endfor %}
+</ul>
+{% endblock %}

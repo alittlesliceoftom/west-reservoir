@@ -10,6 +10,10 @@ markers = [
     "slow: long-running replay over the West Res record (deselect with -m 'not slow')",
 ]
 addopts = "-m 'not slow'"
+filterwarnings = [
+    # Starlette's TestClient wants httpx2; httpx works and is what the app uses.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
 
 [tool.ruff.lint]
 # Bugs only: pyflakes and syntax errors. No style rules.
