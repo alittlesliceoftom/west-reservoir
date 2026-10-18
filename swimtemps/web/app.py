@@ -14,8 +14,9 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from db.session import session_factory as default_session_factory
+from web.auth import AuthMiddleware, LoginRequired, SupabaseAuth, TokenVerifier, login_redirect
 from web.config import Settings
-from web.routes import health, pages
+from web.routes import auth, health, pages, readings
 from web.templating import render
 
 
@@ -23,17 +24,26 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def create_app(settings: Settings | None = None, session_factory=None, clock=None) -> FastAPI:
+def create_app(settings: Settings | None = None, session_factory=None, clock=None, supabase=None) -> FastAPI:
     settings = settings or Settings.from_env()
     settings.validate()
     app = FastAPI(title="swimtemps", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = settings
     app.state.session_factory = session_factory or default_session_factory()
     app.state.clock = clock or utcnow
+    app.state.verifier = TokenVerifier(settings)
+    app.state.supabase = supabase or SupabaseAuth(settings)
+    app.add_middleware(AuthMiddleware)
 
     app.mount("/static", StaticFiles(directory=str(Path(__file__).with_name("static"))), name="static")
     app.include_router(pages.router)
     app.include_router(health.router)
+    app.include_router(auth.router)
+    app.include_router(readings.router)
+
+    @app.exception_handler(LoginRequired)
+    async def login_required(request: Request, exc: LoginRequired):
+        return login_redirect(request)
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, exc: HTTPException):

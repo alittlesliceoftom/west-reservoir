@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Add a reading - {{ water.name }} - swimtemps{% endblock %}
+{% block main %}
+<p class="steps"><a href="/w/{{ water.slug }}">{{ water.name }}</a></p>
+<h1>Add a reading</h1>
+{% if estimate is not none %}<p class="muted">Current estimate: about {{ estimate | temp }}.</p>{% endif %}
+
+{% if error %}<p class="warning error-text" role="alert">{{ error }}</p>{% endif %}
+
+<form method="post" action="/w/{{ water.slug }}/readings" class="stack">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label>Water temperature (°C)
+    <input class="big" name="temp" value="{{ temp }}" inputmode="decimal" autocomplete="off" required autofocus
+           pattern="-?[0-9]+([.,][0-9])?" aria-describedby="temp-hint">
+    <span class="hint" id="temp-hint">One decimal place is plenty, e.g. 13.5</span>
+  </label>
+  <details {% if warnings or error %}open{% endif %}>
+    <summary>Edit time</summary>
+    <label>Taken at ({{ water.timezone }})
+      <input type="datetime-local" name="measured_at" value="{{ measured_at }}">
+    </label>
+  </details>
+  {% if warnings %}
+    <div class="warning" role="alert">
+      {% for w in warnings %}<p>{{ w }}</p>{% endfor %}
+      <input type="hidden" name="confirm" value="1">
+      <p>Check the number, then save again to keep it.</p>
+    </div>
+    <button class="primary" type="submit">Save anyway</button>
+  {% else %}
+    <button class="primary" type="submit">Save reading</button>
+  {% endif %}
+</form>
+
+<h2>Paste several</h2>
+<p class="muted">One reading per line: a date (dd/mm/yyyy, day first), an optional time, then the temperature. Lines without a time use {{ water.default_reading_time.strftime("%H:%M") }}.</p>
+<form method="post" action="/w/{{ water.slug }}/readings/preview" class="stack"
+      hx-post="/w/{{ water.slug }}/readings/preview" hx-target="#paste-preview" hx-swap="innerHTML">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <textarea name="rows" placeholder="14/10/2026 14.1&#10;15/10 07:30, 14.0&#10;16/10/2026 13.9" spellcheck="false">{{ rows }}</textarea>
+  <button type="submit">Preview</button>
+</form>
+<div id="paste-preview">{% if preview %}{% include "_paste_preview.html" %}{% endif %}</div>
+{% endblock %}

@@ -1,0 +1,35 @@
+{% set ready = preview.to_save | length %}
+{% if paste_error %}<p class="warning error-text" role="alert">{{ paste_error }}</p>{% endif %}
+{% if preview.rows %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Line</th><th>Taken</th><th>°C</th><th></th></tr></thead>
+  <tbody>
+  {% for r in preview.rows %}
+    <tr class="{% if r.status == 'error' %}invalid{% elif r.status != 'ok' %}flagged{% endif %}">
+      <td>{{ r.row.line }}</td>
+      {% if r.status == "error" %}
+        <td colspan="2">{{ r.row.raw }}</td><td>Line {{ r.row.line }}: {{ r.note }}</td>
+      {% else %}
+        <td>{{ r.row.measured_at | localtime(water.timezone) }}</td>
+        <td>{{ "%.1f" | format(r.row.temp) }}</td>
+        <td>{{ r.note }}</td>
+      {% endif %}
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% if preview.errors %}
+  <p class="error-text">Fix the lines above marked in red, or delete them, then preview again.</p>
+{% elif ready %}
+  <p>{{ ready }} reading{{ "" if ready == 1 else "s" }} ready to save{% if preview.skipped %}, {{ preview.skipped }} skipped (already recorded){% endif %}.</p>
+  <form method="post" action="/w/{{ water.slug }}/readings/paste">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <textarea name="rows" hidden>{{ rows }}</textarea>
+    <button class="primary" type="submit" name="confirm_paste" value="1">Save {{ ready }} reading{{ "" if ready == 1 else "s" }}</button>
+  </form>
+{% else %}
+  <p class="muted">Nothing new to save.</p>
+{% endif %}
