@@ -113,6 +113,13 @@ Fetched rows pass the same checks as manual readings (−2 to 40 °C, not in
 the future, not before 2000). A row that fails is not stored but counts in
 the feed's last-fetch summary.
 
+A source that publishes more often than hourly is thinned to hourly on
+arrival: of the valid rows in each clock hour, only the one nearest the top
+of the hour is kept (the earlier one on a tie, so a re-fetch picks the same
+row). *(Design call: thinning on arrival rather than at fit time halves
+storage for half-hourly feeds on a free-tier database, and the chart then
+shows exactly what the model sees.)*
+
 Valid rows are matched to stored ones on (feed, measured time) among rows
 that stand (`deleted_at IS NULL`):
 
@@ -133,14 +140,42 @@ afresh.
 
 ### Cleaning
 
-Applied to feed readings on arrival. Each rule sets `flagged` with a
-plain-English reason:
+Applied to feed readings on arrival, in time order, after hourly thinning.
+Each rule sets `flagged` with a plain-English reason. **Every comparison is
+against good (unflagged) readings only.** That is what stops a fault from
+becoming the new normal: compared with raw neighbours, a sensor stuck in air
+is accepted after a few hours, and the good reading that ends the fault gets
+flagged instead.
 
 | Rule | Default | Catches |
 |---|---|---|
-| Rate of change | more than 1.0 °C per 30 minutes, scaled by the actual interval | step faults |
-| Tracking air | within 1 °C of the stored air temperature for that hour **and** more than 2 °C from the reading's own trailing 6-hour median | a sensor out of the water |
+| Jump | more than 2.0 °C, plus 0.1 °C per hour since the last good reading, away from that reading | step faults |
+| Far from the day | more than 2.5 °C from the median of good readings in the previous 24 hours | the plateau after a fault, and gradual drifts towards air temperature |
 | Flatline | the same value for more than 24 hours | a stuck sensor |
+
+When a flagged value is also within 1 °C of the stored air temperature, the
+reason says so ("matches the air temperature: the sensor is probably out of
+the water").
+
+The rules heal themselves. With no good reading in the last 24 hours, the
+reference falls back to the last good reading, whose jump allowance keeps
+growing, so a genuine shift is accepted within about a day. An admin
+overrule settles it sooner.
+
+**Evidence.** Run over the recorded Clevedon week, thinned to hourly, these
+defaults:
+- flag nothing in the six clean days, on either sensor;
+- flag every faulty hour on 18 Oct, on both sensors;
+- accept the deep sensor's recovery at 09:00.
+
+Two simpler versions failed, which is why these exist:
+- comparing with raw neighbours flagged the recovery and missed the plateau;
+- a "2 °C per hour" allowance grew too fast to catch a slow slide.
+
+**Caveat:** this is one week of October data and one fault. A shallow
+sensor's afternoon peak in summer may sit more than 2.5 °C above its daily
+median, which the 24-hour rule would flag. Thresholds are per-feed settings
+for that reason, and should be rechecked once a feed has summer data.
 
 Thresholds are per-feed settings, with these defaults.
 
@@ -153,12 +188,28 @@ shows it.
 The chart shows every stored reading. The fit, the estimate and scoring use
 unflagged readings only (an overrule decides for the row it is on).
 
-*(Design call.)* Readings with `source = feed` are thinned to one per local
-day, the one nearest the water's reading time, before fitting; half-hourly
-sensor data would otherwise make training legs dominated by sensor noise.
-Manual readings are never thinned, whatever the water's mode, so manual
-waters fit exactly as now. A day with both keeps both; the fit already
-merges readings in the same hour.
+Feed readings are paired into **day-long training legs from every
+reading**: each feed reading's leg ends at the feed reading closest to 24
+hours later, if one falls between 21 and 27 hours later; otherwise that
+reading starts no leg. An hourly feed then gives about 24 overlapping
+one-day legs per day.
+
+The reason: pairing consecutive hourly readings would make 1-hour legs, so
+the fit would be tuned to predict the next hour. Two things follow from
+that:
+
+- the fit chases the near-surface daily swing (1–2 °C a day at a shallow
+  sensor) that a single well-mixed model cannot represent;
+- the multi-day trend we actually forecast gets worse.
+
+One-day legs test the same thing the forecast does, and still use every
+reading. Thinning to one reading a day would also match the timescale, but
+would discard about 95% of the data.
+
+Manual readings keep today's pairing (each reading to the next, up to the
+3-day cap), so manual waters fit exactly as now. A water with both kinds,
+from switching mode, pairs each kind among its own kind and fits on the
+union of legs.
 
 The anchor for "now" is the latest unflagged reading of either source,
 unthinned.
@@ -242,8 +293,11 @@ configuration is kept so the water can switch back.
 - Whether quiet-feed and paused states live in the snapshot or are computed
   at render time from `feeds` (the page must still never fetch).
 - Request-handling UI for superusers: a plain list is enough.
-- Tests: the recipe against both recorded fixtures; the cleaning rules
-  against the recorded Clevedon fault; a venue correction becoming a
+- Tests: the recipe against both recorded fixtures; hourly thinning
+  (nearest the top of the hour, deterministic on re-fetch); day-long leg
+  pairing, including a gap with no partner in 21–27 h and a mixed
+  manual-and-feed water; the cleaning rules against the recorded Clevedon
+  fault at hourly resolution (the three outcomes listed under Evidence); a venue correction becoming a
   soft-delete plus a new row; the 12-hour, 3-day and 5-day transitions,
   including a feed that keeps sending only flagged rows; pausing; switching
   modes both ways.
