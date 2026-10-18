@@ -25,7 +25,7 @@ jobs:
     env:
       IMAGE: ghcr.io/${{ github.repository_owner }}/swimtemps
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build and push the image
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
