@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Does the Model Damp Change?</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root{
+    --ground:#eaf0f4; --surface:#ffffff; --sunk:#f3f7f9;
+    --ink:#15242f; --muted:#5d7383; --line:#cfdbe3;
+    --pred:#1f7a9c; --actual:#c2683a; --flag:#a93f35; --ok:#2f7d5d;
+    --shadow:0 1px 2px rgba(21,36,47,.06),0 8px 24px rgba(21,36,47,.05);
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --ground:#0c151d; --surface:#132130; --sunk:#0f1b26;
+      --ink:#e4ecf2; --muted:#8ea3b3; --line:#24384a;
+      --pred:#4aa8ca; --actual:#e08a56; --flag:#e06a5e; --ok:#5fb78d;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.3);
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#0c151d; --surface:#132130; --sunk:#0f1b26;
+    --ink:#e4ecf2; --muted:#8ea3b3; --line:#24384a;
+    --pred:#4aa8ca; --actual:#e08a56; --flag:#e06a5e; --ok:#5fb78d;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.3);
+  }
+  *{box-sizing:border-box}
+  body{
+    background:var(--ground); color:var(--ink);
+    font-family:"IBM Plex Sans",system-ui,-apple-system,sans-serif;
+    line-height:1.55; margin:0; padding-block:40px; padding-left:20px; padding-right:20px;
+  }
+  .wrap{max-width:900px;margin:0 auto;display:flex;flex-direction:column;gap:34px}
+  .eyebrow{
+    font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--muted); margin:0 0 10px;
+  }
+  h1{
+    font-family:"Source Serif 4",Georgia,serif; font-weight:600; font-size:clamp(30px,5vw,46px);
+    line-height:1.1; margin:0 0 14px; text-wrap:balance; letter-spacing:-.015em;
+  }
+  .standfirst{font-size:17px;color:var(--muted);margin:0;max-width:62ch}
+  h2{
+    font-family:"Source Serif 4",Georgia,serif; font-weight:600; font-size:23px;
+    margin:0 0 6px; text-wrap:balance;
+  }
+  .sub{color:var(--muted);font-size:14.5px;margin:0 0 20px;max-width:64ch}
+  p{max-width:64ch}
+  .verdict{
+    display:flex;gap:16px;align-items:flex-start;
+    background:var(--surface); border-left:3px solid var(--ok);
+    padding:18px 22px; border-radius:3px; box-shadow:var(--shadow);
+  }
+  .verdict strong{font-weight:600}
+  .verdict p{margin:0;font-size:15.5px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:3px;overflow:hidden}
+  .stat{background:var(--surface);padding:16px 18px}
+  .stat .k{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);display:block;margin-bottom:6px}
+  .stat .v{font-family:"IBM Plex Mono",monospace;font-size:24px;font-weight:500;font-variant-numeric:tabular-nums;display:block;line-height:1.1}
+  .stat .n{font-size:12.5px;color:var(--muted);display:block;margin-top:4px}
+  .panels{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:20px}
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:3px;padding:20px;box-shadow:var(--shadow)}
+  .panel.flagged{border-top:3px solid var(--flag)}
+  .panel.clean{border-top:3px solid var(--ok)}
+  .panel h3{font-size:15px;margin:0 0 3px;font-weight:600}
+  .panel .tag{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;margin:0 0 4px}
+  .panel.flagged .tag{color:var(--flag)}
+  .panel.clean .tag{color:var(--ok)}
+  .panel .note{font-size:13px;color:var(--muted);margin:0 0 14px}
+  svg{display:block;width:100%;height:auto;overflow:visible}
+  .scatter-wrap{background:var(--surface);border:1px solid var(--line);border-radius:3px;padding:22px;box-shadow:var(--shadow)}
+  .legend{display:flex;flex-wrap:wrap;gap:18px;margin-top:14px;font-size:13px;color:var(--muted)}
+  .legend span{display:flex;align-items:center;gap:7px}
+  .sw{width:16px;height:2.5px;border-radius:2px;flex:none}
+  .dot{width:8px;height:8px;border-radius:50%;flex:none}
+  table{border-collapse:collapse;width:100%;font-size:13.5px}
+  .tscroll{overflow-x:auto}
+  th,td{text-align:right;padding:8px 12px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums;white-space:nowrap}
+  th:first-child,td:first-child{text-align:left;font-variant-numeric:normal}
+  th{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:500}
+  code{font-family:"IBM Plex Mono",monospace;font-size:.92em;background:var(--sunk);padding:1px 5px;border-radius:2px}
+  .caveat{background:var(--sunk);border:1px solid var(--line);border-radius:3px;padding:20px 22px}
+  .caveat h2{font-size:19px}
+  ul{margin:0;padding-left:20px;max-width:64ch}
+  li{margin-bottom:9px}
+  footer{color:var(--muted);font-size:12.5px;border-top:1px solid var(--line);padding-top:16px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">West Reservoir · model diagnostic · 19 Sep 2026</p>
+    <h1>Does the model damp change?</h1>
+    <p class="standfirst">Testing whether the three-term physics model under-predicts rises and over-predicts drops — and whether the bias you see first is real or an artefact of how you measure it.</p>
+  </header>
+
+  <div class="verdict">
+    <p><strong>No.</strong> The model tracks the scale of day-on-day change correctly. Regressing actual change on predicted change gives a slope of <strong>1.047 ± 0.041</strong> — statistically indistinguishable from the ideal 1.0 (<em>t</em> = +1.16). The strong damping that appears on first inspection is a measurement-noise artefact, not a model failure.</p>
+  </div>
+
+  <section class="stats">
+    <div class="stat"><span class="k">Slope</span><span class="v">1.047</span><span class="n">±0.041 · ideal is 1.000</span></div>
+    <div class="stat"><span class="k">Correlation</span><span class="v">0.826</span><span class="n">predicted vs actual change</span></div>
+    <div class="stat"><span class="k">1-day legs</span><span class="v">313</span><span class="n">of 380 total</span></div>
+    <div class="stat"><span class="k">RMSE</span><span class="v">0.382</span><span class="n">°C per leg</span></div>
+  </section>
+
+  <section>
+    <h2>The same residuals, bucketed two ways</h2>
+    <p class="sub">Positive residual means the model ran warm. The only difference between these panels is which variable defines the buckets — yet one shows severe damping and the other shows none.</p>
+    <div class="panels">
+      <div class="panel flagged">
+        <p class="tag">Misleading</p>
+        <h3>Bucketed by <em>actual</em> change</h3>
+        <p class="note">Looks like heavy damping at both extremes: −0.27 °C on big drops, +0.27 °C on big rises.</p>
+        <svg id="barActual" viewBox="0 0 400 268" role="img" aria-label="Residual by actual change bucket, showing large opposing bias at both extremes"></svg>
+      </div>
+      <div class="panel clean">
+        <p class="tag">Sound</p>
+        <h3>Bucketed by <em>predicted</em> change</h3>
+        <p class="note">The bias collapses. Extremes land at +0.03 and +0.00 °C — the model scales big moves correctly.</p>
+        <svg id="barPred" viewBox="0 0 400 268" role="img" aria-label="Residual by predicted change bucket, showing bias near zero across all buckets"></svg>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Why the first panel lies</h2>
+    <p>Residual is defined as <code>predicted_change − actual_change</code>. Bucketing by actual change therefore sorts on a quantity that appears, negated, inside the residual itself. Any measurement error in the day's reading pushes a leg into an extreme bucket <em>and</em> pushes its residual the opposite way, so the pattern appears even for a perfect model.</p>
+    <p>Predicted change carries no such shared term with the day's measurement. Bucketing on it is the honest test, and it clears the model.</p>
+  </section>
+
+  <section class="scatter-wrap">
+    <h2>Predicted against actual change</h2>
+    <p class="sub">Each point is one leg between consecutive measurements. If the model scaled changes correctly, points would centre on the 1:1 line — and they do.</p>
+    <svg id="scatter" viewBox="0 0 440 400" role="img" aria-label="Scatter of predicted versus actual day-on-day change with fitted line almost exactly on the 1 to 1 diagonal"></svg>
+    <div class="legend">
+      <span><span class="dot" style="background:var(--pred)"></span>313 one-day legs</span>
+      <span><span class="sw" style="background:var(--muted)"></span>1:1 (perfect scale)</span>
+      <span><span class="sw" style="background:var(--actual)"></span>fitted, slope 1.047</span>
+    </div>
+  </section>
+
+
+  <section>
+    <h2>Does training on longer gaps fix it?</h2>
+    <p class="sub">The idea: a 2- or 3-day leg carries the same thermometer error over a larger real change, so noise should matter less and the fit should stop hedging. Expanding the training set from 313 one-day legs to 933 legs across horizons 1&ndash;3 tests it. Both models are then scored on the <em>same</em> 313 one-day legs, so only the coefficients differ.</p>
+    <div class="panels">
+      <div class="panel clean">
+        <p class="tag">Better</p>
+        <h3>Trained on 1-day legs only</h3>
+        <p class="note">Slope <strong>1.010</strong> &middot; k_air 0.007696 &middot; RMSE 0.3575</p>
+        <svg id="sc1" viewBox="0 0 320 300" role="img" aria-label="Scatter for the one-day-trained model, slope 1.010, sitting on the 1 to 1 line"></svg>
+      </div>
+      <div class="panel flagged">
+        <p class="tag">Worse</p>
+        <h3>Trained on 1&ndash;3 day legs</h3>
+        <p class="note">Slope <strong>1.049</strong> &middot; k_air 0.007394 &middot; RMSE 0.3583</p>
+        <svg id="sc2" viewBox="0 0 320 300" role="img" aria-label="Scatter for the multi-horizon-trained model, slope 1.049, slightly shallower than the 1 to 1 line"></svg>
+      </div>
+    </div>
+    <p style="margin-top:20px"><strong>It makes calibration worse, not better.</strong> Adding the longer legs pulls <code>k_air</code> <em>down</em> (0.007696 &rarr; 0.007394), which makes the model less responsive, which lifts the slope further above 1.0. RMSE is flat &mdash; 0.3575 against 0.3583 &mdash; matching the earlier finding in PR #56 that multi-horizon training buys nothing on error.</p>
+    <p>The premise doesn&rsquo;t hold because a 3-day leg is not an average of three daily readings. It has exactly <em>one</em> endpoint measurement, carrying the full thermometer error, while the model must compound three days of weather to reach it. Longer legs add compounding misspecification faster than they add signal, and the fit compromises toward coefficients that are wrong for one day.</p>
+  </section>
+
+  <section>
+    <h2>Direction split</h2>
+    <p class="sub">The same reversal, stated as a mean. Split by what actually happened, the asymmetry looks damning; split by what the model said, it disappears.</p>
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>Split on</th><th>Case</th><th>n</th><th>Mean residual</th></tr></thead>
+        <tbody>
+          <tr><td>Actual change</td><td>rose</td><td>139</td><td style="color:var(--flag)">−0.127</td></tr>
+          <tr><td>Actual change</td><td>fell</td><td>143</td><td style="color:var(--flag)">+0.189</td></tr>
+          <tr><td>Predicted change</td><td>rise</td><td>143</td><td style="color:var(--ok)">+0.026</td></tr>
+          <tr><td>Predicted change</td><td>fall</td><td>139</td><td style="color:var(--ok)">+0.061</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="caveat">
+    <h2>What this does and doesn't settle</h2>
+    <ul>
+      <li><strong>Settled:</strong> the model is not systematically damping. Direction and scale of day-on-day change are right, and large moves are tracked as well as small ones.</li>
+      <li><strong>Unexplained spread:</strong> actual changes vary 27% more than predicted ones (sd 0.632 vs 0.499 °C). With the slope at 1.0, that is noise and missing physics — not shrinkage.</li>
+      <li><strong>One live oddity:</strong> legs where the model predicted a −0.2 to −0.4 °C drop actually fell −0.455 °C, a +0.159 °C bias on n=38. The only bucket that doesn't clear. Possibly noise; worth a second look.</li>
+      <li><strong>Ruled out:</strong> training on 2&ndash;3 day gaps. It lowers k_air and worsens the slope to 1.049, with RMSE flat.</li>
+      <li><strong>Still open:</strong> a December bias of +0.24 °C, and no wind or evaporation term in the model — the likeliest candidate for both that and the extra spread.</li>
+    </ul>
+  </section>
+
+  <footer>313 one-day legs from 380 total, Nov 2024 – Sep 2026. Fitted coefficients k_air 0.007396, k_solar 8.414e-05, k_cool 0.008217. Residual = predicted − actual, in °C.</footer>
+</div>
+
+<script>
+(function(){
+  var BUCKETS=["≤ −0.4","−0.4 to −0.2","−0.2 to −0.05","flat","+0.05 to +0.2","+0.2 to +0.4","≥ +0.4"];
+  var BY_ACTUAL=[{r:0.265,n:86},{r:0.066,n:30},{r:0.084,n:27},{r:0.028,n:31},{r:0.014,n:27},{r:0.028,n:40},{r:-0.265,n:72}];
+  var BY_PRED=[{r:0.032,n:56},{r:0.159,n:38},{r:0.016,n:45},{r:-0.064,n:31},{r:0.080,n:32},{r:0.022,n:39},{r:0.004,n:72}];
+
+  function el(tag,attrs,text){
+    var e=document.createElementNS("http://www.w3.org/2000/svg",tag);
+    for(var k in attrs){e.setAttribute(k,attrs[k]);}
+    if(text!=null){e.textContent=text;}
+    return e;
+  }
+  function bars(id,data,flagIdx){
+    var svg=document.getElementById(id); if(!svg)return;
+    var L=104,R=392,zero=(L+R)/2,SC=(R-L)/2/0.32,top=26,rowH=31,barH=17;
+    [-0.2,0,0.2].forEach(function(t){
+      var x=zero+t*SC;
+      svg.appendChild(el("line",{x1:x,y1:top-8,x2:x,y2:top+7*rowH,stroke:"var(--line)","stroke-width":t===0?1.4:1}));
+      svg.appendChild(el("text",{x:x,y:top+7*rowH+16,"text-anchor":"middle","font-size":10,"font-family":"IBM Plex Mono, monospace",fill:"var(--muted)"},t.toFixed(1)));
+    });
+    data.forEach(function(d,i){
+      var y=top+i*rowH+(rowH-barH)/2, w=Math.abs(d.r)*SC, x=d.r>=0?zero:zero-w;
+      var isFlag=(flagIdx.indexOf(i)>-1);
+      svg.appendChild(el("rect",{x:x,y:y,width:Math.max(w,1.2),height:barH,rx:1.5,
+        fill:isFlag?"var(--flag)":"var(--pred)","fill-opacity":isFlag?0.92:0.78}));
+      svg.appendChild(el("text",{x:98,y:y+barH-4.5,"text-anchor":"end","font-size":11,fill:"var(--ink)"},BUCKETS[i]));
+      var lx=d.r>=0?x+w+7:x-7;
+      svg.appendChild(el("text",{x:lx,y:y+barH-4.5,"text-anchor":d.r>=0?"start":"end","font-size":10.5,
+        "font-family":"IBM Plex Mono, monospace",fill:"var(--muted)"},(d.r>=0?"+":"−")+Math.abs(d.r).toFixed(3)+"  n="+d.n));
+    });
+    svg.appendChild(el("text",{x:zero,y:top+7*rowH+34,"text-anchor":"middle","font-size":10.5,fill:"var(--muted)"},"mean residual (°C)"));
+  }
+  bars("barActual",BY_ACTUAL,[0,6]);
+  bars("barPred",BY_PRED,[]);
+
+  var PTS=[[-0.12,0.0],[-0.17,-0.2],[-0.19,-0.4],[-0.08,0.0],[-0.49,-0.5],[-0.05,-0.2],[-0.14,0.0],[-0.26,0.0],[-1.22,-1.1],[-1.1,-0.8],[-1.01,-1.3],[-0.38,-0.2],[1.13,1.5],[1.22,1.3],[-0.03,-0.5],[-0.14,-0.2],[-0.71,-0.7],[-0.63,-0.6],[0.25,0.1],[0.9,0.6],[-0.52,-0.4],[0.02,-0.3],[-0.0,-0.1],[0.0,-0.3],[0.8,0.8],[0.37,0.0],[0.62,0.4],[0.83,0.7],[0.46,0.1],[0.13,-0.1],[0.02,0.0],[-0.14,0.0],[0.06,-0.2],[0.3,0.2],[0.75,0.6],[-0.88,-0.8],[-0.52,-0.4],[1.09,1.3],[-0.35,-0.5],[-0.62,-0.8],[-0.54,-0.3],[-0.71,-0.4],[-0.93,-0.5],[0.78,0.4],[0.56,0.2],[0.09,-0.1],[-0.22,-0.1],[-0.21,-0.3],[-0.1,0.1],[-0.13,-0.1],[-0.09,-0.1],[0.63,0.4],[0.48,0.4],[0.75,0.5],[-0.04,-0.4],[0.09,0.1],[0.52,1.1],[0.53,0.4],[0.74,1.3],[0.74,1.0],[-0.28,-1.0],[-0.45,-1.4],[-0.03,0.1],[0.46,0.7],[-0.24,-0.7],[0.58,1.5],[0.89,1.0],[0.61,0.5],[-1.12,-2.0],[-0.39,-0.4],[0.17,-0.2],[-0.44,-0.8],[-0.18,0.6],[0.18,0.6],[0.75,1.3],[0.78,1.1],[0.07,0.2],[0.2,0.0],[0.77,1.3],[-0.45,-0.8],[-0.65,-0.6],[-0.27,-0.3],[-0.19,-0.1],[-0.19,-0.2],[-0.44,0.2],[0.13,0.0],[-0.15,0.0],[-0.36,-1.0],[0.17,0.6],[0.75,0.4],[-0.36,-1.0],[-0.22,-0.4],[-0.12,-0.5],[0.03,0.1],[0.49,0.7],[-0.15,-0.5],[-0.75,-0.5],[-0.12,0.1],[-0.1,-0.1],[-0.38,-0.8],[0.02,1.0],[-0.07,0.4],[-0.4,-1.1],[0.1,-0.1],[-0.78,-0.8],[-0.38,-0.4],[-0.62,-0.6],[0.46,0.0],[0.43,0.4],[0.06,-0.1],[-0.07,-0.1],[-0.72,-0.9],[-1.26,-1.0],[-0.94,-0.7],[-1.24,-1.4],[-1.0,-0.8],[-0.77,-0.5],[0.03,-0.1],[0.0,0.2],[-0.21,-0.6],[-0.42,-0.3],[0.13,0.0],[0.99,0.9],[0.64,0.4],[-0.07,-0.2],[-0.11,-0.5],[0.65,0.6],[-0.03,0.0],[-0.02,-0.1],[-0.5,-0.3],[0.17,-0.3],[0.55,0.3],[0.81,0.3],[0.24,0.1],[0.34,-0.1],[0.08,0.0],[-0.3,-0.4],[0.33,-0.1],[0.51,0.2],[-0.13,-0.1],[0.16,-0.2],[0.52,0.5],[-0.26,-0.4],[-0.07,-0.3],[-0.37,-0.9],[0.23,0.0],[0.01,0.0],[0.1,-0.4],[-0.36,-0.3],[-0.66,0.0],[-0.15,-0.6],[-0.56,-0.4],[-0.71,-1.0],[-0.58,-0.4],[-0.73,-1.0],[0.03,0.6],[0.2,0.1],[0.39,0.5],[0.11,0.3],[-0.3,-0.5],[0.92,0.5],[1.22,0.9],[0.59,0.6],[0.39,1.1],[0.32,-0.6],[0.53,0.1],[0.5,0.5],[0.51,0.4],[0.59,0.2],[0.37,0.2],[0.53,0.3],[0.27,0.6],[0.05,-0.7],[0.22,0.1],[-0.0,-0.1],[-0.07,-0.1],[-0.01,-0.2],[-0.26,0.1],[-0.11,-0.3],[0.39,0.0],[0.29,0.3],[0.18,0.3],[0.17,0.0],[-0.4,-0.5],[0.34,0.4],[0.38,0.1],[0.41,0.3],[0.33,0.0],[0.5,0.3],[0.43,0.4],[0.02,0.0],[-0.3,-0.3],[-0.47,-0.6],[-0.17,-0.2],[-0.07,-0.3],[-0.27,-0.4],[-0.1,-0.3],[0.08,0.0],[0.7,0.4],[1.09,1.1],[0.72,0.4],[0.75,0.3],[0.65,1.0],[0.69,0.4],[0.48,0.4],[0.29,0.0],[0.28,0.6],[-0.03,0.0],[-0.22,-0.1],[-0.21,0.0],[-0.12,-0.5],[0.2,0.3],[0.24,0.3],[-0.05,-0.5],[0.24,0.3],[-0.67,-0.6],[0.28,0.2],[0.31,0.8],[0.04,0.6],[-0.26,-0.4],[-0.06,-0.4],[0.53,0.4],[-0.18,-1.0],[-0.33,-0.4],[-0.13,0.1],[0.23,-0.1],[0.43,0.7],[0.25,0.1],[-0.07,0.3],[-0.2,0.2],[-0.54,-0.4],[-0.39,-0.8],[0.08,0.6],[-0.07,0.3],[-0.08,0.5],[0.34,0.8],[0.02,0.4],[0.19,0.4],[-0.5,-1.2],[0.21,-0.4],[0.55,0.9],[0.76,1.3],[0.38,0.6],[-0.03,1.0],[-0.58,-0.8],[-0.53,-0.4],[-0.85,-0.8],[-0.49,-0.1],[-0.13,0.1],[0.3,0.4],[-0.02,1.0],[-0.55,-0.4],[-0.61,-0.2],[-0.28,-0.2],[-0.13,0.2],[-0.02,0.3],[0.36,0.4],[0.84,1.4],[1.56,1.8],[1.29,1.0],[1.27,2.3],[1.33,1.1],[1.18,1.0],[-0.14,-0.8],[0.71,0.6],[-0.02,-0.7],[0.5,0.6],[-0.42,-1.1],[-0.35,-0.6],[-0.69,-0.9],[-0.73,-1.3],[-0.54,-0.6],[-0.03,0.1],[-0.68,-0.7],[-0.28,-0.2],[0.25,0.7],[0.23,1.3],[0.18,0.1],[0.79,1.2],[0.25,0.5],[0.67,1.4],[0.61,1.5],[0.33,0.0],[0.78,0.2],[0.1,0.0],[-0.82,-2.3],[-0.22,-0.6],[-0.16,-0.6],[0.1,0.3],[0.22,0.4],[0.08,-0.6],[-0.09,0.0],[0.01,-0.2],[0.04,-0.3],[0.18,0.3],[0.27,0.3],[-0.0,0.0],[-0.2,-0.6],[-0.25,-0.7],[-0.3,-0.5],[0.5,0.4],[-0.53,-0.7],[-0.01,0.3],[0.52,0.1],[-0.49,-0.4],[-0.1,0.1],[-0.17,0.0],[0.19,0.1],[0.22,0.4],[0.17,0.4],[-0.4,-0.5],[-0.42,0.0],[-0.54,-0.9]];
+  (function(){
+    var svg=document.getElementById("scatter"); if(!svg)return;
+    var X0=62,Y0=336,LIM=2.4,k=320/(2*LIM);
+    function fx(v){return X0+(v+LIM)*k;}
+    function fy(v){return Y0-(v+LIM)*k;}
+    [-2,-1,0,1,2].forEach(function(t){
+      svg.appendChild(el("line",{x1:fx(t),y1:fy(-LIM),x2:fx(t),y2:fy(LIM),stroke:"var(--line)","stroke-width":t===0?1.3:0.7}));
+      svg.appendChild(el("line",{x1:fx(-LIM),y1:fy(t),x2:fx(LIM),y2:fy(t),stroke:"var(--line)","stroke-width":t===0?1.3:0.7}));
+      svg.appendChild(el("text",{x:fx(t),y:fy(-LIM)+16,"text-anchor":"middle","font-size":10,"font-family":"IBM Plex Mono, monospace",fill:"var(--muted)"},t>0?"+"+t:String(t)));
+      svg.appendChild(el("text",{x:fx(-LIM)-8,y:fy(t)+3.5,"text-anchor":"end","font-size":10,"font-family":"IBM Plex Mono, monospace",fill:"var(--muted)"},t>0?"+"+t:String(t)));
+    });
+    svg.appendChild(el("line",{x1:fx(-LIM),y1:fy(-LIM),x2:fx(LIM),y2:fy(LIM),stroke:"var(--muted)","stroke-width":1.6,"stroke-dasharray":"5 4"}));
+    PTS.forEach(function(p){
+      svg.appendChild(el("circle",{cx:fx(p[0]),cy:fy(p[1]),r:3,fill:"var(--pred)","fill-opacity":0.42}));
+    });
+    var a=1.047,b=-0.0347,x1=-1.45,x2=1.65;
+    svg.appendChild(el("line",{x1:fx(x1),y1:fy(a*x1+b),x2:fx(x2),y2:fy(a*x2+b),stroke:"var(--actual)","stroke-width":2.4}));
+    svg.appendChild(el("text",{x:fx(0),y:fy(-LIM)+34,"text-anchor":"middle","font-size":11,fill:"var(--muted)"},"predicted change (°C)"));
+    svg.appendChild(el("text",{x:16,y:fy(0),"text-anchor":"middle","font-size":11,fill:"var(--muted)",transform:"rotate(-90 16 "+fy(0)+")"},"actual change (°C)"));
+  })();
+
+  var B=[[-0.12,0.0],[-0.18,-0.2],[-0.19,-0.4],[-0.07,0.0],[-0.5,-0.5],[-0.04,-0.2],[-0.14,0.0],[-0.27,0.0],[-1.26,-1.1],[-1.13,-0.8],[-1.04,-1.3],[-0.39,-0.2],[1.17,1.5],[1.27,1.3],[-0.02,-0.5],[-0.14,-0.2],[-0.73,-0.7],[-0.65,-0.6],[0.27,0.1],[0.93,0.6],[-0.54,-0.4],[0.02,-0.3],[-0.0,-0.1],[0.01,-0.3],[0.83,0.8],[0.39,0.0],[0.64,0.4],[0.86,0.7],[0.47,0.1],[0.14,-0.1],[0.03,0.0],[-0.15,0.0],[0.07,-0.2],[0.32,0.2],[0.78,0.6],[-0.9,-0.8],[-0.54,-0.4],[1.13,1.3],[-0.36,-0.5],[-0.63,-0.8],[-0.56,-0.3],[-0.73,-0.4],[-0.96,-0.5],[0.81,0.4],[0.59,0.2],[0.09,-0.1],[-0.22,-0.1],[-0.22,-0.3],[-0.1,0.1],[-0.13,-0.1],[-0.09,-0.1],[0.66,0.4],[0.51,0.4],[0.79,0.5],[-0.04,-0.4],[0.13,0.1],[0.58,1.1],[0.59,0.4],[0.82,1.3],[0.81,1.0],[-0.26,-1.0],[-0.43,-1.4],[-0.0,0.1],[0.5,0.7],[-0.22,-0.7],[0.64,1.5],[0.97,1.0],[0.67,0.5],[-1.13,-2.0],[-0.37,-0.4],[0.22,-0.2],[-0.44,-0.8],[-0.15,0.6],[0.22,0.6],[0.82,1.3],[0.85,1.1],[0.11,0.2],[0.22,0.0],[0.83,1.3],[-0.45,-0.8],[-0.65,-0.6],[-0.25,-0.3],[-0.18,-0.1],[-0.17,-0.2],[-0.44,0.2],[0.17,0.0],[-0.13,0.0],[-0.35,-1.0],[0.2,0.6],[0.81,0.4],[-0.36,-1.0],[-0.22,-0.4],[-0.1,-0.5],[0.05,0.1],[0.54,0.7],[-0.14,-0.5],[-0.76,-0.5],[-0.11,0.1],[-0.09,-0.1],[-0.39,-0.8],[0.04,1.0],[-0.05,0.4],[-0.4,-1.1],[0.11,-0.1],[-0.8,-0.8],[-0.37,-0.4],[-0.63,-0.6],[0.48,0.0],[0.45,0.4],[0.07,-0.1],[-0.07,-0.1],[-0.75,-0.9],[-1.29,-1.0],[-0.97,-0.7],[-1.28,-1.4],[-1.02,-0.8],[-0.78,-0.5],[0.03,-0.1],[0.02,0.2],[-0.21,-0.6],[-0.42,-0.3],[0.15,0.0],[1.03,0.9],[0.67,0.4],[-0.07,-0.2],[-0.11,-0.5],[0.68,0.6],[-0.02,0.0],[-0.01,-0.1],[-0.52,-0.3],[0.18,-0.3],[0.58,0.3],[0.85,0.3],[0.26,0.1],[0.36,-0.1],[0.09,0.0],[-0.31,-0.4],[0.35,-0.1],[0.53,0.2],[-0.13,-0.1],[0.17,-0.2],[0.54,0.5],[-0.26,-0.4],[-0.07,-0.3],[-0.38,-0.9],[0.24,0.0],[0.02,0.0],[0.1,-0.4],[-0.37,-0.3],[-0.67,0.0],[-0.15,-0.6],[-0.57,-0.4],[-0.73,-1.0],[-0.59,-0.4],[-0.75,-1.0],[0.04,0.6],[0.22,0.1],[0.4,0.5],[0.12,0.3],[-0.31,-0.5],[0.96,0.5],[1.27,0.9],[0.62,0.6],[0.41,1.1],[0.34,-0.6],[0.56,0.1],[0.52,0.5],[0.53,0.4],[0.62,0.2],[0.39,0.2],[0.56,0.3],[0.28,0.6],[0.06,-0.7],[0.24,0.1],[0.0,-0.1],[-0.07,-0.1],[-0.01,-0.2],[-0.26,0.1],[-0.11,-0.3],[0.42,0.0],[0.31,0.3],[0.19,0.3],[0.18,0.0],[-0.42,-0.5],[0.36,0.4],[0.4,0.1],[0.43,0.3],[0.35,0.0],[0.52,0.3],[0.45,0.4],[0.03,0.0],[-0.3,-0.3],[-0.48,-0.6],[-0.17,-0.2],[-0.06,-0.3],[-0.27,-0.4],[-0.1,-0.3],[0.09,0.0],[0.73,0.4],[1.14,1.1],[0.75,0.4],[0.78,0.3],[0.69,1.0],[0.73,0.4],[0.5,0.4],[0.31,0.0],[0.31,0.6],[-0.02,0.0],[-0.23,-0.1],[-0.22,0.0],[-0.12,-0.5],[0.22,0.3],[0.26,0.3],[-0.03,-0.5],[0.25,0.3],[-0.69,-0.6],[0.32,0.2],[0.35,0.8],[0.07,0.6],[-0.26,-0.4],[-0.06,-0.4],[0.59,0.4],[-0.16,-1.0],[-0.32,-0.4],[-0.11,0.1],[0.26,-0.1],[0.46,0.7],[0.27,0.1],[-0.05,0.3],[-0.18,0.2],[-0.53,-0.4],[-0.38,-0.8],[0.12,0.6],[-0.04,0.3],[-0.04,0.5],[0.38,0.8],[0.05,0.4],[0.22,0.4],[-0.49,-1.2],[0.26,-0.4],[0.61,0.9],[0.83,1.3],[0.42,0.6],[-0.01,1.0],[-0.58,-0.8],[-0.54,-0.4],[-0.87,-0.8],[-0.49,-0.1],[-0.12,0.1],[0.35,0.4],[0.01,1.0],[-0.54,-0.4],[-0.6,-0.2],[-0.26,-0.2],[-0.12,0.2],[0.0,0.3],[0.4,0.4],[0.9,1.4],[1.65,1.8],[1.38,1.0],[1.37,2.3],[1.43,1.1],[1.26,1.0],[-0.1,-0.8],[0.77,0.6],[0.02,-0.7],[0.55,0.6],[-0.4,-1.1],[-0.34,-0.6],[-0.68,-0.9],[-0.74,-1.3],[-0.53,-0.6],[-0.01,0.1],[-0.69,-0.7],[-0.25,-0.2],[0.3,0.7],[0.27,1.3],[0.22,0.1],[0.86,1.2],[0.29,0.5],[0.73,1.4],[0.68,1.5],[0.38,0.0],[0.85,0.2],[0.14,0.0],[-0.82,-2.3],[-0.2,-0.6],[-0.12,-0.6],[0.15,0.3],[0.26,0.4],[0.11,-0.6],[-0.05,0.0],[0.04,-0.2],[0.08,-0.3],[0.22,0.3],[0.31,0.3],[0.03,0.0],[-0.18,-0.6],[-0.23,-0.7],[-0.3,-0.5],[0.54,0.4],[-0.54,-0.7],[0.02,0.3],[0.57,0.1],[-0.49,-0.4],[-0.08,0.1],[-0.15,0.0],[0.22,0.1],[0.24,0.4],[0.19,0.4],[-0.39,-0.5],[-0.41,0.0],[-0.54,-0.9]], M=[[-0.12,0.0],[-0.17,-0.2],[-0.19,-0.4],[-0.07,0.0],[-0.48,-0.5],[-0.05,-0.2],[-0.14,0.0],[-0.26,0.0],[-1.22,-1.1],[-1.09,-0.8],[-1.0,-1.3],[-0.38,-0.2],[1.13,1.5],[1.22,1.3],[-0.02,-0.5],[-0.14,-0.2],[-0.7,-0.7],[-0.63,-0.6],[0.25,0.1],[0.9,0.6],[-0.52,-0.4],[0.02,-0.3],[-0.0,-0.1],[0.01,-0.3],[0.8,0.8],[0.38,0.0],[0.62,0.4],[0.83,0.7],[0.46,0.1],[0.14,-0.1],[0.02,0.0],[-0.14,0.0],[0.06,-0.2],[0.3,0.2],[0.75,0.6],[-0.87,-0.8],[-0.52,-0.4],[1.09,1.3],[-0.34,-0.5],[-0.61,-0.8],[-0.54,-0.3],[-0.7,-0.4],[-0.92,-0.5],[0.78,0.4],[0.56,0.2],[0.09,-0.1],[-0.22,-0.1],[-0.21,-0.3],[-0.1,0.1],[-0.13,-0.1],[-0.09,-0.1],[0.63,0.4],[0.49,0.4],[0.75,0.5],[-0.04,-0.4],[0.1,0.1],[0.53,1.1],[0.54,0.4],[0.76,1.3],[0.75,1.0],[-0.27,-1.0],[-0.43,-1.4],[-0.02,0.1],[0.46,0.7],[-0.23,-0.7],[0.59,1.5],[0.91,1.0],[0.62,0.5],[-1.11,-2.0],[-0.38,-0.4],[0.18,-0.2],[-0.43,-0.8],[-0.17,0.6],[0.19,0.6],[0.76,1.3],[0.8,1.1],[0.08,0.2],[0.2,0.0],[0.77,1.3],[-0.45,-0.8],[-0.64,-0.6],[-0.26,-0.3],[-0.19,-0.1],[-0.18,-0.2],[-0.44,0.2],[0.15,0.0],[-0.14,0.0],[-0.35,-1.0],[0.18,0.6],[0.76,0.4],[-0.36,-1.0],[-0.22,-0.4],[-0.11,-0.5],[0.04,0.1],[0.5,0.7],[-0.15,-0.5],[-0.74,-0.5],[-0.12,0.1],[-0.09,-0.1],[-0.38,-0.8],[0.03,1.0],[-0.06,0.4],[-0.39,-1.1],[0.1,-0.1],[-0.77,-0.8],[-0.37,-0.4],[-0.61,-0.6],[0.46,0.0],[0.43,0.4],[0.07,-0.1],[-0.07,-0.1],[-0.72,-0.9],[-1.25,-1.0],[-0.94,-0.7],[-1.23,-1.4],[-0.99,-0.8],[-0.76,-0.5],[0.03,-0.1],[0.01,0.2],[-0.21,-0.6],[-0.41,-0.3],[0.14,0.0],[0.99,0.9],[0.65,0.4],[-0.06,-0.2],[-0.11,-0.5],[0.65,0.6],[-0.02,0.0],[-0.02,-0.1],[-0.5,-0.3],[0.17,-0.3],[0.56,0.3],[0.81,0.3],[0.25,0.1],[0.34,-0.1],[0.08,0.0],[-0.3,-0.4],[0.33,-0.1],[0.51,0.2],[-0.13,-0.1],[0.16,-0.2],[0.52,0.5],[-0.25,-0.4],[-0.07,-0.3],[-0.36,-0.9],[0.23,0.0],[0.02,0.0],[0.1,-0.4],[-0.35,-0.3],[-0.64,0.0],[-0.14,-0.6],[-0.55,-0.4],[-0.7,-1.0],[-0.57,-0.4],[-0.72,-1.0],[0.03,0.6],[0.21,0.1],[0.39,0.5],[0.12,0.3],[-0.3,-0.5],[0.92,0.5],[1.22,0.9],[0.6,0.6],[0.4,1.1],[0.33,-0.6],[0.54,0.1],[0.5,0.5],[0.51,0.4],[0.59,0.2],[0.38,0.2],[0.53,0.3],[0.27,0.6],[0.06,-0.7],[0.23,0.1],[-0.0,-0.1],[-0.07,-0.1],[-0.01,-0.2],[-0.26,0.1],[-0.11,-0.3],[0.4,0.0],[0.3,0.3],[0.18,0.3],[0.17,0.0],[-0.4,-0.5],[0.34,0.4],[0.39,0.1],[0.41,0.3],[0.33,0.0],[0.5,0.3],[0.43,0.4],[0.03,0.0],[-0.3,-0.3],[-0.47,-0.6],[-0.17,-0.2],[-0.06,-0.3],[-0.26,-0.4],[-0.1,-0.3],[0.08,0.0],[0.7,0.4],[1.09,1.1],[0.72,0.4],[0.75,0.3],[0.66,1.0],[0.7,0.4],[0.48,0.4],[0.29,0.0],[0.29,0.6],[-0.02,0.0],[-0.22,-0.1],[-0.21,0.0],[-0.12,-0.5],[0.2,0.3],[0.25,0.3],[-0.04,-0.5],[0.24,0.3],[-0.67,-0.6],[0.3,0.2],[0.32,0.8],[0.05,0.6],[-0.26,-0.4],[-0.06,-0.4],[0.55,0.4],[-0.17,-1.0],[-0.32,-0.4],[-0.12,0.1],[0.24,-0.1],[0.43,0.7],[0.25,0.1],[-0.06,0.3],[-0.19,0.2],[-0.53,-0.4],[-0.38,-0.8],[0.1,0.6],[-0.06,0.3],[-0.06,0.5],[0.35,0.8],[0.03,0.4],[0.2,0.4],[-0.49,-1.2],[0.23,-0.4],[0.57,0.9],[0.78,1.3],[0.38,0.6],[-0.02,1.0],[-0.57,-0.8],[-0.53,-0.4],[-0.85,-0.8],[-0.49,-0.1],[-0.12,0.1],[0.31,0.4],[-0.01,1.0],[-0.54,-0.4],[-0.6,-0.2],[-0.27,-0.2],[-0.13,0.2],[-0.02,0.3],[0.37,0.4],[0.85,1.4],[1.57,1.8],[1.3,1.0],[1.29,2.3],[1.35,1.1],[1.19,1.0],[-0.12,-0.8],[0.72,0.6],[-0.01,-0.7],[0.51,0.6],[-0.41,-1.1],[-0.34,-0.6],[-0.68,-0.9],[-0.72,-1.3],[-0.53,-0.6],[-0.03,0.1],[-0.67,-0.7],[-0.26,-0.2],[0.26,0.7],[0.23,1.3],[0.19,0.1],[0.81,1.2],[0.26,0.5],[0.68,1.4],[0.63,1.5],[0.34,0.0],[0.79,0.2],[0.11,0.0],[-0.81,-2.3],[-0.21,-0.6],[-0.14,-0.6],[0.11,0.3],[0.23,0.4],[0.09,-0.6],[-0.08,0.0],[0.02,-0.2],[0.06,-0.3],[0.19,0.3],[0.28,0.3],[0.0,0.0],[-0.19,-0.6],[-0.24,-0.7],[-0.29,-0.5],[0.51,0.4],[-0.52,-0.7],[-0.0,0.3],[0.53,0.1],[-0.48,-0.4],[-0.09,0.1],[-0.16,0.0],[0.2,0.1],[0.22,0.4],[0.18,0.4],[-0.39,-0.5],[-0.41,0.0],[-0.53,-0.9]];
+  function mini(id,pts,slope,inter){
+    var svg=document.getElementById(id); if(!svg)return;
+    var X0=44,Y0=248,LIM=2.4,k=232/(2*LIM);
+    function fx(v){return X0+(v+LIM)*k;} function fy(v){return Y0-(v+LIM)*k;}
+    [-2,-1,0,1,2].forEach(function(t){
+      svg.appendChild(el("line",{x1:fx(t),y1:fy(-LIM),x2:fx(t),y2:fy(LIM),stroke:"var(--line)","stroke-width":t===0?1.2:0.6}));
+      svg.appendChild(el("line",{x1:fx(-LIM),y1:fy(t),x2:fx(LIM),y2:fy(t),stroke:"var(--line)","stroke-width":t===0?1.2:0.6}));
+    });
+    [-2,0,2].forEach(function(t){
+      svg.appendChild(el("text",{x:fx(t),y:fy(-LIM)+14,"text-anchor":"middle","font-size":9,"font-family":"IBM Plex Mono, monospace",fill:"var(--muted)"},t>0?"+"+t:String(t)));
+      svg.appendChild(el("text",{x:fx(-LIM)-6,y:fy(t)+3,"text-anchor":"end","font-size":9,"font-family":"IBM Plex Mono, monospace",fill:"var(--muted)"},t>0?"+"+t:String(t)));
+    });
+    svg.appendChild(el("line",{x1:fx(-LIM),y1:fy(-LIM),x2:fx(LIM),y2:fy(LIM),stroke:"var(--muted)","stroke-width":1.3,"stroke-dasharray":"4 3"}));
+    pts.forEach(function(p){svg.appendChild(el("circle",{cx:fx(p[0]),cy:fy(p[1]),r:2.4,fill:"var(--pred)","fill-opacity":0.38}));});
+    var x1=-1.5,x2=1.7;
+    svg.appendChild(el("line",{x1:fx(x1),y1:fy(slope*x1+inter),x2:fx(x2),y2:fy(slope*x2+inter),stroke:"var(--actual)","stroke-width":2.2}));
+    svg.appendChild(el("text",{x:fx(0),y:fy(-LIM)+30,"text-anchor":"middle","font-size":10,fill:"var(--muted)"},"predicted change (°C)"));
+  }
+  mini("sc1",B,1.010,0.0436);
+  mini("sc2",M,1.049,-0.0324);
+})();
+</script>
+</body>
+</html>
