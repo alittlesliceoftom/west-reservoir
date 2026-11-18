@@ -8,9 +8,10 @@ from sqlalchemy import func, select
 
 from db import queries
 from db.models import Feed, ForecastRun, Reading, Snapshot, Water
-from feeds.fetch import FetchError
+from feeds.fetch import FetchError, fetch_json
 from feeds.recipe import read_json_table
 from feeds.thin import thin_hourly
+from tests.feeds.test_fetch import client_for, nested_json, resolver
 from tests.factories import add_feed_reading, make_feed, make_user, make_water
 from tests.worker.test_cycle import FakeOpenMeteo
 from worker import cycle
@@ -449,3 +450,18 @@ def test_a_daily_feed_is_not_quiet_a_day_after_its_last_reading(db, owner):
 def test_a_daily_feed_is_quiet_after_a_day_and_a_half(db, owner):
     feed, last = daily_feed(db, owner)
     assert compute(db, feed, (last + timedelta(hours=37)).to_pydatetime())["feed"]["quiet"] is True
+
+
+@pytest.mark.parametrize("url, reason", [
+    ("https://lake.example:99999/x", "port"),
+    ("https://lake.example/temps", "nested"),
+])
+def test_unreadable_feed_input_is_recorded_as_the_last_error(db, owner, url, reason):
+    water = make_water(db, owner, feed_mode="feed", needs_recompute=False)
+    odd = make_feed(db, water, owner, config={**CLEVEDON, "url": url})
+
+    def fetch(target):
+        return fetch_json(target, client_for(nested_json), resolver)
+
+    result = poll_feed(db, odd, NOW, fetch=fetch)
+    assert not result.ok and reason in odd.last_error

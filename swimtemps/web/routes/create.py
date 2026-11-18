@@ -1,7 +1,8 @@
 """
 Create a water, in steps: sign in, place it on the map, describe it, add its
 first readings. The location step is the only place the web app calls
-Open-Meteo, to show the weather at the chosen spot.
+Open-Meteo, to show the weather at the chosen spot; those lookups are
+rate-limited per user (`web.ratelimit`).
 """
 
 from datetime import time
@@ -17,6 +18,7 @@ from db.models import DEPTH_CLASSES, WATER_TYPES, User, Water, WaterMember
 from forecast.openmeteo import OpenMeteoError
 from web.auth import require_user, verify_csrf
 from web.deps import get_db
+from web.ratelimit import limited
 from web.routes.pages import active_water
 from web.slugs import slugify_unique
 from web.templating import render
@@ -75,7 +77,7 @@ def new_location(request: Request, user: User = Depends(require_user)):
     return render(request, "new_location.html")
 
 
-@router.get("/api/geocode")
+@router.get("/api/geocode", dependencies=[Depends(limited("geocode"))])
 async def geocode(request: Request, q: str = Query(min_length=2, max_length=80), user: User = Depends(require_user)):
     try:
         return await run_in_threadpool(request.app.state.openmeteo.geocode, q)
@@ -83,7 +85,7 @@ async def geocode(request: Request, q: str = Query(min_length=2, max_length=80),
         return JSONResponse({"detail": "Place search is not answering. Try again, or move the map by hand."}, 502)
 
 
-@router.get("/api/point")
+@router.get("/api/point", dependencies=[Depends(limited("point"))])
 async def point(
     request: Request,
     lat: float = Query(ge=-90, le=90),

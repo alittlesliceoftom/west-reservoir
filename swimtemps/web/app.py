@@ -16,6 +16,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from db.session import session_factory as default_session_factory
 from web.auth import AuthMiddleware, LoginRequired, SupabaseAuth, TokenVerifier, login_redirect
 from web.config import Settings
+from web.ratelimit import RateLimiter
 from feeds.fetch import fetch_json
 from forecast.openmeteo import OpenMeteoClient
 from web.routes import admin, auth, create, feeds, health, pages, readings
@@ -38,6 +39,7 @@ def create_app(settings: Settings | None = None, session_factory=None, clock=Non
     app.state.openmeteo = OpenMeteoClient()
     # Only the feed setup's Test and Turn-on POSTs call it.
     app.state.feed_fetch = fetch_json
+    app.state.rate_limiter = RateLimiter()
     app.add_middleware(AuthMiddleware)
 
     app.mount("/static", StaticFiles(directory=str(Path(__file__).with_name("static"))), name="static")

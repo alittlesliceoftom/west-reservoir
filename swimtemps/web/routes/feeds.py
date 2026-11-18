@@ -3,7 +3,8 @@ Feed setup for a water's admins: paste an AI's `swimtemps-feed v1` block or
 fill in the fields, Test (one fetch, nothing stored), confirm permission and
 Turn on. Also pause, resume, switching back to manual, and overruling the
 cleaning's flags. The Test and Turn-on POSTs are the only web requests that
-contact a feed; pages never do. Any signed-in user can request a feed the
+contact a feed; pages never do, and together they are rate-limited per
+user (`web.ratelimit`). Any signed-in user can request a feed the
 recipe cannot express; superusers handle the requests.
 """
 
@@ -28,6 +29,7 @@ from feeds.recipe import RecipeError, read_feed
 from feeds.thin import thin_hourly
 from web.auth import require_user, verify_csrf
 from web.deps import get_db
+from web.ratelimit import MESSAGES
 from web.routes.admin import admin_water, back, standing_reading
 from web.templating import render
 from worker.feeds import checked
@@ -158,6 +160,8 @@ async def test(request: Request, slug: str, db: Session = Depends(get_db), user:
     config, errors = form_config(form)
     if errors:
         return setup_page(request, db, water, status_code=422, fields=form, errors=errors)
+    if not request.app.state.rate_limiter.allow("feed_fetch", user.id):
+        return setup_page(request, db, water, status_code=429, fields=form, errors=[MESSAGES["feed_fetch"]])
     result = await run_in_threadpool(run_test, request, db, water, config)
     return setup_page(request, db, water, status_code=422 if result.failure else 200, fields=form,
                       test=result, config=config)
@@ -173,6 +177,8 @@ async def turn_on(request: Request, slug: str, db: Session = Depends(get_db), us
     if form.get("tested") != config_token(config):
         return setup_page(request, db, water, status_code=422, fields=form,
                           errors=["Press Test first, and turn the feed on from its result."])
+    if not request.app.state.rate_limiter.allow("feed_fetch", user.id):
+        return setup_page(request, db, water, status_code=429, fields=form, errors=[MESSAGES["feed_fetch"]])
     result = await run_in_threadpool(run_test, request, db, water, config)
     if form.get("attest") != "yes":
         return setup_page(request, db, water, status_code=422, fields=form, test=result, config=config,

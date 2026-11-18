@@ -9,6 +9,11 @@ body is capped at 5 MB. One 20-second deadline covers the whole fetch:
 name lookups, every hop's headers and the body, so a server that trickles
 bytes cannot hold the caller. The user-agent names the tool and nothing else.
 
+Every way a fetch can fail, including an address that cannot be requested
+(a port out of range) and JSON nested deeper than `MAX_DEPTH`, is a
+FetchError with a plain reason, so the setup's Test shows it and a poll
+records it as the feed's last error.
+
 `fetch_json` is synchronous: it runs its own event loop, so call it from a
 thread with no running loop (the worker, or the web's threadpool).
 """
@@ -27,6 +32,7 @@ USER_AGENT = "swimtemps/0.1"
 TIMEOUT_SECONDS = 20
 MAX_REDIRECTS = 3
 MAX_BYTES = 5 * 1024 * 1024
+MAX_DEPTH = 64   # nested lists and objects; real feeds use a handful
 
 # Lookups run here, not in the loop's default executor: asyncio.run waits for
 # that one at exit, and a lookup that outlives the deadline must not.
@@ -35,6 +41,10 @@ _LOOKUPS = ThreadPoolExecutor(max_workers=4, thread_name_prefix="feed-dns")
 
 class FetchError(Exception):
     pass
+
+
+def _too_deep() -> FetchError:
+    return FetchError(f"The feed's JSON is nested more than {MAX_DEPTH} levels deep, so it cannot be read.")
 
 
 def _refused(address: str) -> bool:
@@ -46,10 +56,17 @@ def _refused(address: str) -> bool:
 
 async def check_url(url: str, resolver=socket.getaddrinfo) -> None:
     """Raise FetchError unless `url` is http(s) on a host with only public addresses."""
-    parts = urlparse(url)
-    if parts.scheme not in ("http", "https") or not parts.hostname:
+    try:
+        parts = urlparse(url)
+        hostname = parts.hostname
+    except ValueError:
+        raise FetchError(f"'{url}' is not a web address that can be read.") from None
+    if parts.scheme not in ("http", "https") or not hostname:
         raise FetchError("The feed address must start with http:// or https://.")
-    port = parts.port or (443 if parts.scheme == "https" else 80)
+    try:
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        raise FetchError("The feed address has a port that is not a number from 1 to 65535.") from None
     lookup = partial(resolver, parts.hostname, port, type=socket.SOCK_STREAM)
     try:
         found = await asyncio.get_running_loop().run_in_executor(_LOOKUPS, lookup)
@@ -72,6 +89,22 @@ async def _read(response: httpx.Response) -> bytes:
     return bytes(body)
 
 
+def _depth(payload) -> int:
+    """How deeply lists and objects nest in `payload`, walked without recursion."""
+    deepest, stack = 0, [(payload, 1)]
+    while stack:
+        node, level = stack.pop()
+        if isinstance(node, dict):
+            node = node.values()
+        elif not isinstance(node, list):
+            continue
+        deepest = max(deepest, level)
+        if level > MAX_DEPTH:
+            break
+        stack.extend((child, level + 1) for child in node)
+    return deepest
+
+
 async def _get(client: httpx.AsyncClient, url: str, resolver) -> object:
     for _ in range(MAX_REDIRECTS + 1):
         await check_url(url, resolver)
@@ -79,16 +112,24 @@ async def _get(client: httpx.AsyncClient, url: str, resolver) -> object:
         async with client.stream("GET", url, headers=headers, follow_redirects=False,
                                  timeout=TIMEOUT_SECONDS) as response:
             if response.is_redirect and "location" in response.headers:
-                url = urljoin(url, response.headers["location"])
+                try:
+                    url = urljoin(url, response.headers["location"])
+                except ValueError:
+                    raise FetchError("The feed redirected to an address that cannot be read.") from None
                 continue
             if response.status_code != 200:
                 raise FetchError(f"The feed answered {response.status_code} instead of 200.")
             body = await _read(response)
         try:
-            return json.loads(body)
+            payload = json.loads(body)
+        except RecursionError:
+            raise _too_deep() from None
         except ValueError:
             looks_like = " (it looks like a web page)" if body.lstrip()[:1] == b"<" else ""
             raise FetchError(f"The feed did not return JSON{looks_like}.") from None
+        if _depth(payload) > MAX_DEPTH:
+            raise _too_deep()
+        return payload
     raise FetchError(f"The feed redirected more than {MAX_REDIRECTS} times.")
 
 
