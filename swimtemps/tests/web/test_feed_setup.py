@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import func, select
 
 from db import queries
-from db.models import Feed, Reading, Water
+from db.models import Feed, Reading, Water, WaterMember
 from feeds.fetch import FetchError
 from tests.factories import add_feed_reading, add_reading, make_feed, make_user, make_water
 from tests.feeds.test_block import EXAMPLE
@@ -284,6 +284,17 @@ def test_pause_and_resume(client, db, water, admin, fetch):
     assert feed.state == "on" and feed.last_polled_at is None
 
 
+def test_pause_and_resume_refuse_a_manual_water(client, db, water, admin, fetch):
+    make_feed(db, water, admin, state="off")
+    sign_in(client, admin)
+    for path in ("pause", "resume"):
+        response = post(client, f"/w/test-lake/feed/{path}")
+        assert response.status_code == 409, path
+        assert "manual readings" in response.text
+    assert db.scalar(select(Feed.state)) == "off"
+    assert fresh(db, Water, water.id).feed_mode == "manual"
+
+
 def test_switching_to_manual_keeps_feed_readings_and_stops_polling(client, db, session_factory, water, admin, fetch):
     sign_in(client, admin)
     enable(client)
@@ -355,6 +366,22 @@ def test_rejecting_and_clearing_an_overrule(client, db, water, admin, flagged):
     assert queries.active_readings(db, water.id)["temp_c"].tolist() == []
     post(client, f"/w/test-lake/admin/readings/{good.id}/override", {"decision": "clear"})
     assert queries.active_readings(db, water.id)["temp_c"].tolist() == [13.5]
+
+
+def test_accepting_a_newer_reading_moves_the_feeds_last_good_reading(client, db, water, admin, flagged):
+    sign_in(client, admin)
+    post(client, f"/w/test-lake/admin/readings/{flagged.id}/override", {"decision": "accept"})
+    assert fresh(db, Feed, flagged.feed_id).last_good_reading_at == NOW.replace(hour=6)
+
+
+def test_accepting_an_older_reading_leaves_the_last_good_reading(client, db, water, admin, flagged):
+    feed = db.get(Feed, flagged.feed_id)
+    add_feed_reading(db, feed, "2026-10-18 08:00", 13.6)
+    feed.last_good_reading_at = NOW.replace(hour=8)
+    db.commit()
+    sign_in(client, admin)
+    post(client, f"/w/test-lake/admin/readings/{flagged.id}/override", {"decision": "accept"})
+    assert fresh(db, Feed, flagged.feed_id).last_good_reading_at == NOW.replace(hour=8)
 
 
 def test_a_bad_decision_is_refused(client, db, water, admin, flagged):
@@ -440,6 +467,33 @@ def test_me_lists_feed_waters_with_a_switch_to_manual(client, db, water, admin):
     assert 'action="/w/test-lake/feed/disable"' in page
     assert feed.id
     assert csrf(client)
+
+
+def test_me_shows_feed_controls_only_to_the_waters_admins(client, db, water, admin, swimmer):
+    make_feed(db, water, admin, last_good_reading_at=NOW.replace(hour=10))
+    water.feed_mode = "feed"
+    db.add(WaterMember(water_id=water.id, user_id=swimmer.id, role="contributor"))
+    db.commit()
+    sign_in(client, swimmer)
+    page = client.get("/me").text
+    assert "Example Lake" in page
+    assert "/w/test-lake/feed/disable" not in page
+    assert 'href="/w/test-lake/feed"' not in page
+
+
+@pytest.mark.parametrize("state, last_good, shown", [
+    ("on", NOW.replace(hour=10), "on"),
+    ("on", NOW.replace(day=17, hour=20), "quiet"),
+    ("on", None, "quiet"),
+    ("paused", NOW.replace(hour=10), "paused"),
+])
+def test_me_shows_whether_a_feed_is_on_quiet_or_paused(client, db, water, admin, state, last_good, shown):
+    make_feed(db, water, admin, state=state, last_good_reading_at=last_good)
+    water.feed_mode = "feed"
+    db.commit()
+    sign_in(client, admin)
+    page = re.sub(r"\s+", " ", client.get("/me").text)
+    assert f"Example Lake, {shown}." in page
 
 
 def test_test_and_turn_on_fetch_off_the_event_loop(client, app, water, admin):

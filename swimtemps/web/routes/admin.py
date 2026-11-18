@@ -24,6 +24,8 @@ from web.routes.create import check_about
 from web.routes.pages import active_water
 from web.routes.readings import FUTURE_SLACK, local_input_value
 from web.templating import render
+from worker.cycle import feed_status
+from worker.feeds import typical_gap
 
 router = APIRouter()
 
@@ -163,6 +165,13 @@ def archive(request: Request, slug: str, db: Session = Depends(get_db), user: Us
     return RedirectResponse("/", status_code=303)
 
 
+def feed_label(status: dict) -> str:
+    """One word for a feed's state, judged as the water page judges it: paused, quiet or on."""
+    if status["state"] == "paused":
+        return "paused"
+    return "quiet" if status["quiet"] else "on"
+
+
 @router.get("/me", response_class=HTMLResponse)
 def me(request: Request, db: Session = Depends(get_db), user: User = Depends(require_user)):
     waters = db.scalars(
@@ -171,10 +180,14 @@ def me(request: Request, db: Session = Depends(get_db), user: User = Depends(req
             | Water.id.in_(select(WaterMember.water_id).where(WaterMember.user_id == user.id))
         ).order_by(Water.name)
     ).all()
-    feeds = db.execute(
-        select(Feed, Water).join(Water, Water.id == Feed.water_id)
-        .where(Water.id.in_([w.id for w in waters]), Water.feed_mode == "feed").order_by(Water.name)
-    ).all()
+    now = request.app.state.clock()
+    feeds = [
+        (feed, water, feed_label(feed_status(feed, now, typical_gap(db, feed.id))), can_admin(db, user, water))
+        for feed, water in db.execute(
+            select(Feed, Water).join(Water, Water.id == Feed.water_id)
+            .where(Water.id.in_([w.id for w in waters]), Water.feed_mode == "feed").order_by(Water.name)
+        ).all()
+    ]
     readings = db.execute(
         select(Reading, Water.name, Water.slug, Water.timezone)
         .join(Water, Water.id == Reading.water_id)
