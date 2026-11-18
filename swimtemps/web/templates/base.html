@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}swimtemps{% endblock %}</title>
   <meta name="description" content="Water temperature readings and 5-day forecasts for open-water swimming spots.">
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="{{ static_url("app.css") }}">
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js" defer></script>
-  <script src="/static/app.js" defer></script>
+  <script src="{{ static_url("app.js") }}" defer></script>
   {% block head %}{% endblock %}
 </head>
 <body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>

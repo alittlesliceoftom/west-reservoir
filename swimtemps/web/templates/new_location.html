@@ -3,7 +3,7 @@
 {% block head %}
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" defer></script>
-<script src="/static/map.js" defer></script>
+<script src="{{ static_url("map.js") }}" defer></script>
 {% endblock %}
 {% block main %}
 <p class="steps">Step 2 of 4 · Where is it?</p>

@@ -19,14 +19,15 @@ from web.config import Settings
 from feeds.fetch import fetch_json
 from forecast.openmeteo import OpenMeteoClient
 from web.routes import admin, auth, create, feeds, health, pages, readings
-from web.templating import render
+from web.templating import asset_versions, render
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def create_app(settings: Settings | None = None, session_factory=None, clock=None, supabase=None) -> FastAPI:
+def create_app(settings: Settings | None = None, session_factory=None, clock=None, supabase=None,
+               static_dir: Path | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     settings.validate()
     app = FastAPI(title="swimtemps", docs_url=None, redoc_url=None, openapi_url=None)
@@ -40,7 +41,10 @@ def create_app(settings: Settings | None = None, session_factory=None, clock=Non
     app.state.feed_fetch = fetch_json
     app.add_middleware(AuthMiddleware)
 
-    app.mount("/static", StaticFiles(directory=str(Path(__file__).with_name("static"))), name="static")
+    static_dir = static_dir or Path(__file__).with_name("static")
+    # Pages link CSS and JS as /static/<name>?v=<hash>, so a deploy that changes a file changes its URL.
+    app.state.asset_versions = asset_versions(static_dir)
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
     app.include_router(pages.router)
     app.include_router(health.router)
     app.include_router(auth.router)
