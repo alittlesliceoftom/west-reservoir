@@ -11,7 +11,7 @@ failed compute sets it back.
 
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 from sqlalchemy import delete, select, text, update
@@ -45,6 +45,9 @@ HEARTBEAT_KEEP = timedelta(days=7)
 # record but form no training legs, which keeps a mistyped year from pulling
 # decades of hourly weather into a free-tier database.
 ARCHIVE_MAX = timedelta(days=3 * 365)
+# The most days of archive weather fetched for one water in one cycle, newest
+# first. A long hole heals over several hourly cycles rather than in one call.
+ARCHIVE_DAYS_PER_CYCLE = 92
 # A feed water's clocks run from its feed's last good reading.
 FEED_QUIET_AFTER = timedelta(hours=12)
 FEED_FORECAST_PAUSED_AFTER = timedelta(days=5)
@@ -66,18 +69,35 @@ def _forecast_is_fresh(session: Session, water_id: int, now: datetime) -> bool:
     return fetched is not None and fetched > now - FORECAST_FRESH
 
 
+def day_ranges(days) -> list[tuple[date, date]]:
+    """Consecutive days collapsed into inclusive (start, end) ranges, oldest first."""
+    ranges: list[list[date]] = []
+    for day in sorted(set(days)):
+        if ranges and day == ranges[-1][1] + timedelta(days=1):
+            ranges[-1][1] = day
+        else:
+            ranges.append([day, day])
+    return [(start, end) for start, end in ranges]
+
+
 def refresh_weather(session: Session, waters: list[Water], client, now: datetime, skip_fresh: bool = False) -> None:
     """
-    Store the forecast for each coordinate group, one call per group, and
-    backfill from the archive any reading between 7 days and 3 years old that
-    has no weather. A failed call is logged and skipped: the stored weather
-    stands, and one group's failure never stops another's.
+    Store the forecast for each coordinate group, one call per group, then
+    fill from the archive the hours each water's model needs that have no
+    weather: from its oldest reading (up to 3 years back) to the start of the
+    forecast window, which the forecast's past days cover. Hours inside that
+    window are never asked of the archive, which lags real time by a few
+    days. Each water gets at most ARCHIVE_DAYS_PER_CYCLE missing days per
+    cycle, newest first, so the hours between its latest reading and now heal
+    first; the group makes one archive call per run of consecutive days. A
+    failed call is logged and skipped: the stored weather stands, and one
+    group's failure never stops another's.
     """
     groups: dict[tuple, list[Water]] = defaultdict(list)
     for water in waters:
         groups[coordinate_key(water)].append(water)
 
-    archive_before = (pd.Timestamp(now) - timedelta(days=PAST_DAYS)).tz_convert("UTC")
+    window_start = (pd.Timestamp(now).tz_convert("UTC").floor("D") - timedelta(days=PAST_DAYS)).to_pydatetime()
     archive_from = (pd.Timestamp(now) - ARCHIVE_MAX).tz_convert("UTC").to_pydatetime()
     for (lat, lon), members in groups.items():
         fresh = skip_fresh and all(_forecast_is_fresh(session, w.id, now) for w in members)
@@ -93,13 +113,11 @@ def refresh_weather(session: Session, waters: list[Water], client, now: datetime
                     queries.upsert_weather(session, water.id, frame, "forecast", fetched_at=now)
 
         missing = [
-            m for w in members
-            if (m := queries.earliest_reading_without_weather(session, w.id, since=archive_from)) is not None
-            and pd.Timestamp(m) < archive_before
+            day for w in members
+            for day in queries.days_missing_weather(
+                session, w.id, since=archive_from, until=window_start, limit=ARCHIVE_DAYS_PER_CYCLE)
         ]
-        if missing:
-            start = (pd.Timestamp(min(missing)).tz_convert("UTC") - timedelta(days=1)).date()
-            end = archive_before.date()
+        for start, end in day_ranges(missing):
             try:
                 frame = client.archive(lat, lon, start, end)
             except OpenMeteoError as error:

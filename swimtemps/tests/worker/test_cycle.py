@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 from sqlalchemy import func, select, text
 
+from db import queries
 from db.models import ForecastPoint, ForecastRun, Heartbeat, ModelFit, Snapshot, Water
 from forecast.openmeteo import OpenMeteoError, parse_hourly
 from tests.factories import add_reading, make_user, make_water
@@ -166,7 +167,7 @@ def test_readings_older_than_seven_days_trigger_an_archive_backfill(db, session_
     assert len(client.archive_calls) == 1
     _, _, start, end = client.archive_calls[0]
     assert start <= pd.Timestamp("2026-09-20").date()
-    assert end >= pd.Timestamp("2026-10-10").date()
+    assert end == pd.Timestamp("2026-10-09").date()  # the recorded forecast covers 10-10 on
     sources = dict(db.execute(text(
         "SELECT source, count(*) FROM weather_hourly WHERE water_id = :w GROUP BY source"), {"w": water.id}).all())
     assert sources["archive"] > 0 and sources["forecast"] > 0
@@ -277,3 +278,73 @@ def test_the_archive_backfill_goes_back_at_most_three_years(db, session_factory,
     cycle.drain_dirty(session_factory, client, NOW + timedelta(hours=1))
     assert len(client.archive_calls) == 1
     assert client.archive_calls[0][2] >= pd.Timestamp("2023-10-01").date()
+
+
+# --- weather holes ------------------------------------------------------------
+
+def store_archive(db, water, start, end, air=11.0):
+    """Archive weather for every hour from `start` to `end` inclusive."""
+    hours = pd.date_range(pd.Timestamp(start, tz="UTC"), pd.Timestamp(end, tz="UTC"), freq="h")
+    frame = pd.DataFrame({"valid_at": hours, "air_temp": air, "shortwave": 0.0, "cloud_cover": 80.0})
+    queries.upsert_weather(db, water.id, frame, "archive")
+    db.commit()
+
+
+def missing_hours(db, water, start, end) -> int:
+    return db.scalar(text("""
+        SELECT count(*)
+        FROM generate_series(CAST(:start AS timestamptz), CAST(:end AS timestamptz), interval '1 hour') h
+        WHERE NOT EXISTS (SELECT 1 FROM weather_hourly w WHERE w.water_id = :w AND w.valid_at = h)
+    """), {"w": water.id, "start": start, "end": end})
+
+
+def days_requested(client) -> int:
+    return sum((end - start).days + 1 for _, _, start, end in client.archive_calls)
+
+
+def test_an_eleven_day_hole_after_the_latest_reading_is_filled_and_the_forecast_returns(db, session_factory, owner):
+    water = make_water(db, owner)
+    daily_readings(db, water, owner, [15.0, 14.8, 14.6], last="2026-09-28 06:00")
+    store_archive(db, water, "2026-09-26 00:00", "2026-09-28 23:00")
+    # The recorded forecast starts 2026-10-10 00:00, so 09-29 to 10-09 is an 11-day hole.
+
+    client = FakeOpenMeteo()
+    cycle.drain_dirty(session_factory, client, NOW)
+
+    assert missing_hours(db, water, "2026-09-26 06:00+00", "2026-10-18 01:00+00") == 0
+    payload = snapshot(db, water)
+    assert payload["estimate_now"] is not None
+    assert len(payload["forecast"]) == 5
+
+
+def test_a_long_hole_heals_over_several_cycles_within_the_per_cycle_cap(db, session_factory, owner):
+    water = make_water(db, owner)
+    add_reading(db, water, owner, pd.Timestamp("2026-05-01 06:00", tz="UTC").to_pydatetime(), 14.0)
+    # 2026-05-01 to 2026-10-09 has no weather: 162 days, more than one cycle's worth.
+    cap = cycle.ARCHIVE_DAYS_PER_CYCLE
+    assert cap < 162
+
+    client = FakeOpenMeteo()
+    cycle.sweep(session_factory, client, NOW)
+    assert 0 < days_requested(client) <= cap
+    assert max(end for _, _, _, end in client.archive_calls) == pd.Timestamp("2026-10-09").date()
+
+    cycles = 1
+    while missing_hours(db, water, "2026-05-01 06:00+00", "2026-10-18 01:00+00") and cycles < 10:
+        before = set(client.archive_calls)
+        client.archive_calls.clear()
+        cycle.sweep(session_factory, client, NOW + timedelta(minutes=cycles))
+        cycles += 1
+        assert 0 < days_requested(client) <= cap
+        assert not set(client.archive_calls) & before
+    assert missing_hours(db, water, "2026-05-01 06:00+00", "2026-10-18 01:00+00") == 0
+    assert cycles == -(-162 // cap)
+
+
+def test_hours_inside_the_forecast_window_are_never_asked_of_the_archive(db, session_factory, owner):
+    water = make_water(db, owner)
+    daily_readings(db, water, owner, [13.0, 12.8], last="2026-10-15 06:00")
+    client = FakeOpenMeteo(fail=True)
+    cycle.sweep(session_factory, client, NOW)
+    cycle.sweep(session_factory, client, NOW + timedelta(hours=1))
+    assert client.archive_calls == []
