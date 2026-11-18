@@ -8,7 +8,8 @@ from sqlalchemy import func, select
 
 from db import queries
 from db.models import Feed, Reading, Water, WaterMember
-from feeds.fetch import FetchError
+from feeds.fetch import FetchError, fetch_json
+from tests.feeds.test_fetch import client_for, nested_json, resolver
 from tests.factories import add_feed_reading, add_reading, make_feed, make_user, make_water
 from tests.feeds.test_block import EXAMPLE
 from tests.web.conftest import NOW, payload, store_snapshot
@@ -512,3 +513,15 @@ def test_test_and_turn_on_fetch_off_the_event_loop(client, app, water, admin):
     sign_in(client, admin)
     assert enable(client).status_code == 303
     assert seen == ["in a thread", "in a thread"]
+
+
+@pytest.mark.parametrize("url, reason", [
+    ("https://lake.example:99999/x", "port"),
+    ("https://lake.example/temps", "nested"),
+])
+def test_unreadable_test_input_is_a_message_in_the_preview(client, app, water, admin, url, reason):
+    app.state.feed_fetch = lambda target: fetch_json(target, client_for(nested_json), resolver)
+    sign_in(client, admin)
+    response = post(client, "/w/test-lake/feed/test", {**FIELDS, "url": url})
+    assert response.status_code == 422
+    assert 'id="feed-preview"' in response.text and reason in response.text

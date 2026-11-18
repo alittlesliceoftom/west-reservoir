@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from feeds import fetch as fetch_module
-from feeds.fetch import MAX_BYTES, FetchError, fetch_json
+from feeds.fetch import MAX_BYTES, MAX_DEPTH, FetchError, fetch_json
 
 ADDRESSES = {
     "lake.example": "93.184.216.34",
@@ -240,3 +240,60 @@ def test_a_web_page_is_refused():
 def test_an_error_status_is_refused():
     with pytest.raises(FetchError, match="404"):
         fetch_json("https://lake.example/", client_for(lambda r: httpx.Response(404, text="gone")), resolver)
+
+
+def nested_json(request):
+    return httpx.Response(200, content=b"[" * 100_000 + b"]" * 100_000,
+                          headers={"content-type": "application/json"})
+
+
+def test_a_port_out_of_range_is_a_fetch_error_before_any_request():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return json_ok(request)
+
+    with pytest.raises(FetchError, match="port"):
+        fetch_json("https://lake.example:99999/x", client_for(handler), resolver)
+    assert requests == []
+
+
+def test_a_redirect_to_a_port_out_of_range_is_a_fetch_error():
+    def handler(request):
+        return httpx.Response(302, headers={"location": "https://other.example:99999/x"})
+
+    with pytest.raises(FetchError, match="port"):
+        fetch_json("https://lake.example/temps", client_for(handler), resolver)
+
+
+def test_a_malformed_redirect_is_a_fetch_error():
+    def handler(request):
+        return httpx.Response(302, headers={"location": "http://[bad/x"})
+
+    with pytest.raises(FetchError):
+        fetch_json("https://lake.example/temps", client_for(handler), resolver)
+
+
+def test_a_recursion_error_while_parsing_is_a_fetch_error(monkeypatch):
+    def too_deep(body):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(fetch_module.json, "loads", too_deep)
+    with pytest.raises(FetchError, match="nested"):
+        fetch_json("https://lake.example/temps", client_for(json_ok), resolver)
+
+
+def test_json_nested_too_deeply_is_a_fetch_error():
+    with pytest.raises(FetchError, match="nested"):
+        fetch_json("https://lake.example/temps", client_for(nested_json), resolver)
+
+
+def test_json_nested_just_past_the_limit_is_refused_and_at_the_limit_is_read():
+    def nested(depth):
+        body = '{"a":' * (depth - 1) + "[1]" + "}" * (depth - 1)
+        return lambda request: httpx.Response(200, content=body.encode())
+
+    assert fetch_json("https://lake.example/", client_for(nested(MAX_DEPTH)), resolver)
+    with pytest.raises(FetchError, match="nested"):
+        fetch_json("https://lake.example/", client_for(nested(MAX_DEPTH + 1)), resolver)

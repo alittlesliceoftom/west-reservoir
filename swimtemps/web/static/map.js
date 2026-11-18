@@ -70,9 +70,17 @@
       if (q.length < 2) return;
       results.innerHTML = "<li class='muted'>Searching...</li>";
       fetch("/api/geocode?q=" + encodeURIComponent(q))
-        .then(function (r) { return r.json(); })
-        .then(function (places) {
+        .then(function (r) { return r.json().then(function (body) { return { ok: r.ok, body: body }; }); })
+        .then(function (res) {
           results.innerHTML = "";
+          if (!res.ok) {
+            var li = document.createElement("li");
+            li.className = "muted"; li.setAttribute("role", "alert");
+            li.textContent = res.body.detail || "Search failed. Move the map by hand instead.";
+            results.appendChild(li);
+            return;
+          }
+          var places = res.body;
           if (!Array.isArray(places) || !places.length) { results.innerHTML = "<li class='muted'>No places found. Move the map by hand instead.</li>"; return; }
           places.forEach(function (pl) {
             var li = document.createElement("li");
