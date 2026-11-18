@@ -30,7 +30,7 @@ from web.auth import require_user, verify_csrf
 from web.deps import get_db
 from web.routes.admin import admin_water, back, standing_reading
 from web.templating import render
-from worker.feeds import checked
+from worker.feeds import checked, last_good_reading_at
 
 router = APIRouter()
 
@@ -211,15 +211,23 @@ def _change(request, db, water, done, **changes):
     return RedirectResponse(f"/w/{water.slug}/feed?done={done}", status_code=303)
 
 
+def _feed_water(db: Session, slug: str, user: User) -> Water:
+    """The water, if the user admins it and it takes its readings from its feed."""
+    water = admin_water(db, slug, user)
+    if water.feed_mode != "feed":
+        raise HTTPException(409, "This water takes manual readings. Turn its feed on from the feed setup page first.")
+    return water
+
+
 @router.post("/w/{slug}/feed/pause", dependencies=[Depends(verify_csrf)])
 def pause(request: Request, slug: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
-    return _change(request, db, admin_water(db, slug, user), "paused", state="paused")
+    return _change(request, db, _feed_water(db, slug, user), "paused", state="paused")
 
 
 @router.post("/w/{slug}/feed/resume", dependencies=[Depends(verify_csrf)])
 def resume(request: Request, slug: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
     # Never-polled feeds are polled within a minute by the worker's drain.
-    return _change(request, db, admin_water(db, slug, user), "resumed", state="on", last_polled_at=None)
+    return _change(request, db, _feed_water(db, slug, user), "resumed", state="on", last_polled_at=None)
 
 
 @router.post("/w/{slug}/feed/disable", dependencies=[Depends(verify_csrf)])
@@ -232,7 +240,11 @@ def disable(request: Request, slug: str, db: Session = Depends(get_db), user: Us
 @router.post("/w/{slug}/admin/readings/{reading_id}/override", dependencies=[Depends(verify_csrf)])
 def overrule(request: Request, slug: str, reading_id: int, decision: str = Form(""),
              db: Session = Depends(get_db), user: User = Depends(require_user)):
-    """An admin's call on a feed reading: `accept` (it was real), `reject` (it is wrong) or `clear`."""
+    """
+    An admin's call on a feed reading: `accept` (it was real), `reject` (it is
+    wrong) or `clear`. An accepted reading newer than the feed's last good one
+    becomes it, so banners and /healthz see it before the next poll.
+    """
     water = admin_water(db, slug, user)
     reading: Reading = standing_reading(db, water, reading_id)
     if decision not in ("accept", "reject", "clear"):
@@ -242,6 +254,11 @@ def overrule(request: Request, slug: str, reading_id: int, decision: str = Form(
     now: datetime = request.app.state.clock()
     reading.flag_override = None if decision == "clear" else decision
     reading.override_by, reading.override_at = user.id, now
+    db.flush()
+    feed = db.get(Feed, reading.feed_id)
+    latest = last_good_reading_at(db, feed.id)
+    if latest is not None and (feed.last_good_reading_at is None or latest > feed.last_good_reading_at):
+        feed.last_good_reading_at = latest
     queries.mark_dirty(db, water.id)
     db.commit()
     return back(water, "overruled")
