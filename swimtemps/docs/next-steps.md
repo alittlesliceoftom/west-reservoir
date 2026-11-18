@@ -42,8 +42,8 @@ Code lives in the `swimtemps/` subtree of west-res branch `claude/swimtemps-plat
 - Per-feed cleaning thresholds have no UI; recheck the defaults on summer data.
 - `/healthz` (3 days) and the forecast pause (5 days) are fixed, so a weekly-updated
   sheet keeps `/healthz` red.
-- Older platform minors: weather-hole backfill, the auth middleware running on static
-  files, SRI hashes, refresh-token revocation on logout.
+- Older platform minors: the auth middleware running on static files, SRI hashes,
+  refresh-token revocation on logout.
 
 ## Dev environment
 

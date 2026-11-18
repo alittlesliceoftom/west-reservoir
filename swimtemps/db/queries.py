@@ -1,6 +1,6 @@
 """Analytical reads and bulk writes, as SQL."""
 
-from datetime import datetime
+from datetime import date, datetime
 
 import pandas as pd
 from sqlalchemy import text
@@ -130,17 +130,28 @@ def readings_changed_since(session: Session, water_id: int, since: datetime) -> 
     return bool(session.execute(sql, {"water_id": water_id, "since": since}).scalar())
 
 
-def earliest_reading_without_weather(session: Session, water_id: int, since: datetime) -> datetime | None:
-    """The oldest standing reading since `since` whose hour has no stored weather."""
+def days_missing_weather(session: Session, water_id: int, since: datetime, until: datetime,
+                         limit: int) -> list[date]:
+    """
+    UTC days with at least one hour lacking stored weather, newest first, at
+    most `limit` of them. The hours checked run from the hour of the water's
+    oldest standing reading since `since` up to, not including, `until`; a
+    water with no such reading has none.
+    """
     sql = text("""
-        SELECT min(r.measured_at)
-        FROM readings r
-        LEFT JOIN weather_hourly w
-          ON w.water_id = r.water_id AND w.valid_at = date_trunc('hour', r.measured_at)
-        WHERE r.water_id = :water_id AND r.deleted_at IS NULL AND w.valid_at IS NULL
-          AND r.measured_at >= :since
+        WITH oldest AS (
+            SELECT date_trunc('hour', min(measured_at)) AS hour
+            FROM readings
+            WHERE water_id = :water_id AND deleted_at IS NULL AND measured_at >= :since
+        )
+        SELECT DISTINCT (h AT TIME ZONE 'UTC')::date AS day
+        FROM oldest, generate_series(oldest.hour, CAST(:until AS timestamptz) - interval '1 hour', interval '1 hour') h
+        WHERE NOT EXISTS (SELECT 1 FROM weather_hourly w WHERE w.water_id = :water_id AND w.valid_at = h)
+        ORDER BY day DESC
+        LIMIT :limit
     """)
-    return session.execute(sql, {"water_id": water_id, "since": since}).scalar()
+    params = {"water_id": water_id, "since": since, "until": until, "limit": limit}
+    return list(session.execute(sql, params).scalars())
 
 
 def own_errors(session: Session, water_id: int, min_points: int) -> dict[int, float] | None:
